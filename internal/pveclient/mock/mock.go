@@ -40,9 +40,11 @@ type Config struct {
 }
 
 // VM is one mock VM/CT record. The mock stores both under a single per-node
-// map; tests distinguish intent by the kind of endpoint they call.
+// VM is one mock record. VM and LXC share storage (PVE's per-node id space is
+// unified), distinguished by Kind.
 type VM struct {
 	ID     int
+	Kind   string // "qemu" or "lxc"
 	Config map[string]string
 	Status string // "running" | "stopped"
 }
@@ -95,14 +97,24 @@ func (s *Server) state(node string) map[int]*VM {
 	return m
 }
 
-// PreloadVM seeds a VM/CT on a node.
+// PreloadVM seeds a VM on a node.
 func (s *Server) PreloadVM(node string, vmid int, cfg map[string]string, status string) {
 	if cfg == nil {
 		cfg = map[string]string{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state(node)[vmid] = &VM{ID: vmid, Config: cfg, Status: status}
+	s.state(node)[vmid] = &VM{ID: vmid, Kind: "qemu", Config: cfg, Status: status}
+}
+
+// PreloadCT seeds an LXC container on a node.
+func (s *Server) PreloadCT(node string, cid int, cfg map[string]string, status string) {
+	if cfg == nil {
+		cfg = map[string]string{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state(node)[cid] = &VM{ID: cid, Kind: "lxc", Config: cfg, Status: status}
 }
 
 // VMConfig returns the live config of a VM (nil if absent).
@@ -269,7 +281,9 @@ func (s *Server) handleClusterResources(w http.ResponseWriter, r *http.Request) 
 			"node":   rw.node,
 			"vmid":   rw.vm.ID,
 			"status": rw.vm.Status,
+			"kind":   rw.vm.Kind,
 			"name":   rw.vm.Config["name"],
+			"tags":   rw.vm.Config["tags"],
 		})
 	}
 	writeData(w, out)
@@ -503,7 +517,11 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request, node string, isL
 	if start := r.PostFormValue("start"); start == "true" || start == "1" {
 		status = "running"
 	}
-	s.vms[node][id] = &VM{ID: id, Config: cfg, Status: status}
+	kindStr := "qemu"
+	if isLXC {
+		kindStr = "lxc"
+	}
+	s.vms[node][id] = &VM{ID: id, Kind: kindStr, Config: cfg, Status: status}
 	upid := s.newTaskLocked()
 	s.created++
 	writeData(w, upid)
