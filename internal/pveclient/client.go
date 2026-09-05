@@ -343,14 +343,32 @@ func errStringFromEnvelope(body []byte) string {
 	return strings.TrimSpace(string(body))
 }
 
-// ClusterResources returns the full cluster resource list via the gateway.
-// Each entry is a raw map carrying type, vmid, node, status, etc.
-func (c *Client) ClusterResources(ctx context.Context) ([]map[string]any, error) {
-	var out []map[string]any
+// ClusterResources returns the full cluster resource list via the gateway,
+// decoded into a narrow typed struct.
+// Each entry carries the union of PVE's listing fields: one entry per VM,
+// per LXC, and per other resource kind on the cluster.
+func (c *Client) ClusterResources(ctx context.Context) ([]ClusterResource, error) {
+	var out []ClusterResource
 	if _, err := c.Do(ctx, http.MethodGet, gatewayLabel, "/cluster/resources", nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// ClusterResource is one entry of PVE's /cluster/resources listing.
+//
+// PVE's real listing uses "type" ("vm" → qm/qemu, "ct" → lxc); the mock also
+// emits "kind" as an alias. We capture both so the planner can normalize.
+type ClusterResource struct {
+	Node   string `json:"node"`
+	Vmid   int    `json:"vmid"`
+	Type   string `json:"type"`
+	Kind   string `json:"kind"`
+	Status string `json:"status"`
+	Name   string `json:"name"`
+	// Tags: PVE actually returns a space-joined string; mock returns string.
+	Tags string `json:"tags"`
+	Pool string `json:"pool"`
 }
 
 // PveVersion returns the PVE major version as reported by /version.

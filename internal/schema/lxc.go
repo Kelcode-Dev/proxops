@@ -225,9 +225,9 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 		upd["memory"] = want
 		stop = true
 	}
-	// tags
-	if wantT := strings.Join(l.allTags(), ","); pveStr(current["tags"]) != wantT {
-		upd["tags"] = wantT
+	// tags: PVE stores as a JSON array; compare as a set.
+	if !tagsEqual(current["tags"], l.allTags()) {
+		upd["tags"] = strings.Join(l.allTags(), ",")
 	}
 	// rootfs: PVE reports it as "storage/volid"; we don't own the volid.
 	if wantRoot := fmt.Sprintf("%s:", l.Spec.Root.Storage); pveStr(current["rootfs"]) != "" && !strings.HasPrefix(pveStr(current["rootfs"]), l.Spec.Root.Storage+":") {

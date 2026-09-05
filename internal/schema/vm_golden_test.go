@@ -109,16 +109,18 @@ func TestDriftNoChange(t *testing.T) {
 	v := mustParseVM(t)
 	// The mock returns config with PVE's native spellings. Build a "matching"
 	// current state and assert Drift reports no change.
+	// PVE-native spellings: tags is a JSON array, memory a number, disks a
+	// "pool:vol,size=<bytes>" string.
 	current := map[string]any{
-		"cpu":     "host",
-		"cores":   "4",
-		"memory":  "8388608",
-		"tags":    "pveconform",
-		"name":    "talos-worker-01",
-		"scsi0":     "vm_disks:vm-142-disk-0,size=53687091200",
+		"cpu":            "host",
+		"cores":          4,
+		"memory":         8388608,
+		"tags":           []any{"pveconform"},
+		"name":           "talos-worker-01",
+		"scsi0":          "vm_disks:vm-142-disk-0,size=53687091200",
 		"scsi0.iothread": "1",
-		"scsihw":  "virtio-scsi-single",
-		"net0":    "virtio=52:54:00:aa:bb:cc,bridge=vmbr2,firewall=0",
+		"scsihw":         "virtio-scsi-single",
+		"net0":           "virtio=52:54:00:aa:bb:cc,bridge=vmbr2,firewall=0",
 	}
 	upd, stop, changed := v.Drift(current)
 	if changed {
@@ -131,12 +133,12 @@ func TestDriftMemoryChange(t *testing.T) {
 	v := mustParseVM(t)
 	// Desired is 8GiB but PVE reports 16GiB → must converge down.
 	current := map[string]any{
-		"cpu":     "host",
-		"cores":   "4",
-		"memory":  "16777216", // 16 GiB in KiB
-		"tags":    "pveconform",
-		"scsi0":   "vm_disks:0,size=53687091200",
-		"net0":    "virtio=,bridge=vmbr2,firewall=0",
+		"cpu":    "host",
+		"cores":  "4",
+		"memory": "16777216", // 16 GiB in KiB
+		"tags":   "pveconform",
+		"scsi0":  "vm_disks:0,size=53687091200",
+		"net0":   "virtio=,bridge=vmbr2,firewall=0",
 	}
 	upd, stop, changed := v.Drift(current)
 	if !changed {

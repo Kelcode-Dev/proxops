@@ -277,11 +277,16 @@ func (s *Server) handleClusterResources(w http.ResponseWriter, r *http.Request) 
 	})
 	out := make([]map[string]any, 0, len(rows))
 	for _, rw := range rows {
+		// PVE's real /cluster/resources uses "type" with values "vm"/"ct".
+		ptype := "vm"
+		if rw.vm.Kind == "lxc" {
+			ptype = "ct"
+		}
 		out = append(out, map[string]any{
 			"node":   rw.node,
 			"vmid":   rw.vm.ID,
+			"type":   ptype,
 			"status": rw.vm.Status,
-			"kind":   rw.vm.Kind,
 			"name":   rw.vm.Config["name"],
 			"tags":   rw.vm.Config["tags"],
 		})
@@ -386,6 +391,11 @@ func (s *Server) getObjectConfig(w http.ResponseWriter, r *http.Request, node st
 		}
 		out := map[string]any{"vmid": id}
 		for k, val := range v.Config {
+			if k == "tags" || k == "args" {
+				// PVE returns list-valued config fields as JSON arrays.
+				out[k] = splitList(val)
+				continue
+			}
 			out[k] = val
 		}
 		out["status"] = v.Status
@@ -578,4 +588,30 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]any{"errors": msg})
+}
+
+// splitList splits a PVE list-valued config field into a []any. PVE accepts
+// both space- and comma-separated tag lists; the mock stores whichever form
+// the client POSTed and returns it as a JSON array (matching PVE GET config).
+func splitList(s string) []any {
+	if s == "" {
+		return nil
+	}
+	// Prefer comma if present, else space.
+	if strings.Contains(s, ",") {
+		var out []any
+		for _, p := range strings.Split(s, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	var out []any
+	for _, p := range strings.Fields(s) {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

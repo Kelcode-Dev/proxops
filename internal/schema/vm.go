@@ -274,10 +274,10 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 			stop = true
 		}
 	}
-	// tags.
-	// PVE tags: returned as a comma string in config. Desired allTags.
-	if wantT := strings.Join(v.allTags(), ","); pveStr(current["tags"]) != wantT {
-		upd["tags"] = wantT
+	// tags: PVE stores as a JSON array of strings; we compare as a set, and
+	// emit a comma-joined string on update (PVE accepts both forms).
+	if !tagsEqual(current["tags"], v.allTags()) {
+		upd["tags"] = strings.Join(v.allTags(), ",")
 	}
 	// scsihw (VM-wide; owned when a disk declares a controller).
 	if wantHW := vmScsiHW(v.Spec.Disks); wantHW != "" && pveStr(current["scsihw"]) != wantHW {
@@ -491,19 +491,72 @@ func pveStr(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
-	// PVE sometimes returns ints in string-encoded config values; coerce.
+	// PVE list-valued config fields (tags, args, ...) arrive as JSON arrays.
+	// Join them with "," to match the form the schema layer produces.
+	if arr, ok := v.([]any); ok {
+		parts := make([]string, 0, len(arr))
+		for _, e := range arr {
+			parts = append(parts, pveStr(e))
+		}
+		return strings.Join(parts, ",")
+	}
 	return fmt.Sprintf("%v", v)
 }
 
+// pveInt coerces PVE config values to int. PVE returns numerics as Go int
+// (JSON number) or occasionally string; tolerate both.
 func pveInt(v any) int {
 	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
 	case string:
 		n, _ := strconv.Atoi(strings.TrimSpace(x))
 		return n
 	default:
-		n, _ := v.(int)
-		return n
+		return 0
 	}
+}
+
+// tagsEqual reports whether PVE's current tags (array or comma string) contain
+// exactly the desired set, order-independent. This is the owned-field
+// comparison for tags: PVE appends/permutes tag order internally, so a
+// positional compare would false-positive on every managed object.
+func tagsEqual(current any, desired []string) bool {
+	got := map[string]bool{}
+	switch c := current.(type) {
+	case []any:
+		for _, e := range c {
+			if s, ok := e.(string); ok && s != "" {
+				got[s] = true
+			}
+		}
+	case string:
+		for _, t := range strings.Split(c, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				got[t] = true
+			}
+		}
+	}
+	des := map[string]bool{}
+	for _, t := range desired {
+		if t != "" {
+			des[t] = true
+		}
+	}
+	if len(got) != len(des) {
+		return false
+	}
+	for t := range des {
+		if !got[t] {
+			return false
+		}
+	}
+	return true
 }
 
 func validDiskSlot(s string) bool {

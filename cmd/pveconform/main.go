@@ -37,6 +37,7 @@ type globalFlags struct {
 	pveAuth     string
 	pvePort     int
 	caFile      string
+	gitPath     string // air-gapped / local-mode source of truth
 }
 
 // commandFlags carries per-command flags.
@@ -79,6 +80,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&gf.gitBranch, "git-branch", "", "git branch to reconcile")
 	root.PersistentFlags().IntVar(&gf.pollSec, "git-poll-sec", 0, "git poll interval in seconds (0: use config)")
 	root.PersistentFlags().IntVar(&gf.pruneBudget, "prune-budget", -1, "max deletions per reconcile cycle (-1: use config)")
+	root.PersistentFlags().StringVar(&gf.gitPath, "git-path", "", "air-gapped / local mode: path to a git work tree (no fetch)")
 	root.PersistentFlags().StringVar(&gf.pveUser, "pve-user", "", "PVE user ID, e.g. root@pam")
 	root.PersistentFlags().StringVar(&gf.pveAuth, "pve-auth", "", "PVE auth method: token or ticket")
 	root.PersistentFlags().IntVar(&gf.pvePort, "pve-port", 0, "PVE API port (0: use config)")
@@ -124,6 +126,7 @@ func buildAgent(gf *globalFlags, log *slog.Logger, persistent, local *pflag.Flag
 			cfg.PVE.Port = gf.pvePort
 		}
 	})
+	applyFlag("git-path", func() { cfg.Git.Path = gf.gitPath })
 	applyFlag("ca-file", func() { cfg.PVE.CAFile = gf.caFile })
 
 	// Env overlays credentials (highest precedence for secrets).
@@ -132,7 +135,7 @@ func buildAgent(gf *globalFlags, log *slog.Logger, persistent, local *pflag.Flag
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return app.New(cfg, log, metrics.Register(), version), nil
+	return app.New(cfg, log, metrics.Register(), version)
 }
 
 // overlayEnv mirrors the config package's env overlay for testability.
