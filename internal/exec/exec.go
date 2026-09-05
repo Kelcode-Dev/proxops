@@ -202,16 +202,88 @@ func (e *Executor) update(ctx context.Context, a plan.Action) (didStop bool, err
 
 // --- PVE ops (return UPID; "" when PVE acted synchronously) ---
 
+// create issues a PVE create for the action kind. CTT (clone template) and
+// ISO (storage download) take non-numeric PVE paths, so they are branched off
+// from the standard VM/LXC create.
 func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
-	v := toValues(a.Params)
-	start := a.DesiredPower == "started"
-	if a.Kind == schema.KindVM {
-		return e.client.VM().Create(ctx, a.Node, v, start)
+	switch a.Kind {
+	case schema.KindISO:
+		p, _ := a.Params["storage"].(string)
+		u, _ := a.Params["url"].(string)
+		f, _ := a.Params["filename"].(string)
+		if p == "" || u == "" || f == "" {
+			return "", fmt.Errorf("ISO: storage/url/filename missing from params")
+		}
+		return e.client.Storage().Download(ctx, a.Node, p, u, f)
+	case schema.KindCTTemplate:
+		// PVE accepts only newid/full (+ storage) on /clone. We therefore do
+		// a three-step CTT create: clone → (optional description/tags update)
+		// → mark-as-template. The plan carries the source cid in "source".
+		var src int
+		switch t := a.Params["source"].(type) {
+		case int:
+			src = t
+		case int64:
+			src = int(t)
+		}
+		dst := a.ID
+		if src <= 0 || dst <= 0 {
+			return "", fmt.Errorf("CTT %s: source/newid missing or invalid", a.Name)
+		}
+		cv := url.Values{}
+		if f, ok := a.Params["full"].(string); ok && f == "1" {
+			cv.Set("full", "1")
+		}
+		up, err := e.client.LXC().Clone(ctx, a.Node, src, dst, cv)
+		if err != nil {
+			return up, err
+		}
+		if err := e.waitTask(ctx, a.Node, up); err != nil {
+			return up, err
+		}
+		// PVE /clone rejects extra form keys; apply description/tags after.
+		if d, ok := a.Params["description"].(string); ok && d != "" {
+			uv := url.Values{"description": {d}}
+			dup, uerr := e.client.LXC().Update(ctx, a.Node, dst, uv)
+			if uerr != nil {
+				return dup, uerr
+			}
+			if werr := e.waitTask(ctx, a.Node, dup); werr != nil {
+				return dup, werr
+			}
+		}
+		if tg, ok := a.Params["tags"].(string); ok && tg != "" {
+			uv := url.Values{"tags": {tg}}
+			dup, uerr := e.client.LXC().Update(ctx, a.Node, dst, uv)
+			if uerr != nil {
+				return dup, uerr
+			}
+			if werr := e.waitTask(ctx, a.Node, dup); werr != nil {
+				return dup, werr
+			}
+		}
+		// Mark as template.
+		tup, terr := e.client.LXC().CTTemplate(ctx, a.Node, dst)
+		if terr != nil {
+			return "", terr
+		}
+		return tup, nil
+	default:
+		v := toValues(a.Params)
+		start := a.DesiredPower == "started"
+		if a.Kind == schema.KindVM {
+			return e.client.VM().Create(ctx, a.Node, v, start)
+		}
+		return e.client.LXC().Create(ctx, a.Node, v, start)
 	}
-	return e.client.LXC().Create(ctx, a.Node, v, start)
 }
 
+// updateConfig issues a PVE config update. CTT "update" is just the
+// mark-as-template op (the cid exists but is not templated).
 func (e *Executor) updateConfig(ctx context.Context, a plan.Action) (string, error) {
+	if a.Kind == schema.KindCTTemplate {
+		return e.client.LXC().MarkTemplate(ctx, a.Node, a.ID)
+	}
 	v := toValues(a.Params)
 	if a.Kind == schema.KindVM {
 		return e.client.VM().Update(ctx, a.Node, a.ID, v)

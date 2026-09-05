@@ -1,18 +1,17 @@
 // Package mock implements a stateful in-memory PVE API server for tests.
 //
-// It is not a full PVE reimplementation — it implements the routes pveclient
-// and the reconciler actually use, with PVE-compatible semantics:
-//
+// It is a PVE-shape fake:
 //   - token auth via Authorization: PVEAPIToken=<value>
-//   - ticket auth via POST /access/ticket then cookie (PVEAuthCookie)
-//   - async task lifecycles (create / update / power / delete return a UPID;
-//     /tasks/<upid>/status settles after a configured number of polls)
-//   - per-node VM (qemu) and LXC container state; PVE-style "no such vm"
-//     errors (HTTP 500 with that message) for unknown object IDs
+//   - ticket auth via POST /access/ticket + PVEAuthCookie
+//   - async tasks: create/update/power/delete/clone/template/download all
+//     return a task UPID; /nodes/{n}/tasks/{upid}/status settles after the
+//     configured number of polls
+//   - per-node qemu+lxc objects (PVE's id space is shared within a node).
+//     PVE reports "no such vm" as HTTP 500 for unknown ids.
+//   - per-node, per-storage ISO listing + download
+//   - /cluster/resources lists objects with "type" = "qm" or "lxc"
 //
-// The mock is plain HTTP; tests point pveclient.Options.BaseURL at the mock
-// root so no TLS is present.
-
+// The mock is plain HTTP; the pveclient points BaseURL at the mock root.
 package mock
 
 import (
@@ -29,22 +28,17 @@ import (
 
 // Config controls mock behavior.
 type Config struct {
-	// Token, when set, authorizes requests via Authorization: PVEAPIToken=<Token>.
-	Token string
-	// TicketUser/TicketPassword authorize POST /access/ticket.
+	Token          string
 	TicketUser     string
 	TicketPassword string
-	// TaskTicks is the number of /status polls a task takes before settling to
-	// exitstatus OK. 0 or negative → 1.
+	// TaskTicks: polls until a task settles; 0/neg → 1.
 	TaskTicks int
 }
 
-// VM is one mock VM/CT record. The mock stores both under a single per-node
-// VM is one mock record. VM and LXC share storage (PVE's per-node id space is
-// unified), distinguished by Kind.
+// VM is one object record for a PVE node.
 type VM struct {
 	ID     int
-	Kind   string // "qemu" or "lxc"
+	Kind   string // "qemu" | "lxc"
 	Config map[string]string
 	Status string // "running" | "stopped"
 }
@@ -54,18 +48,20 @@ type Server struct {
 	mu      sync.Mutex
 	cfg     Config
 	tickets map[string]bool
-	vms     map[string]map[int]*VM
-	tasks   map[string]*uptask
+	objs    map[string]map[int]VM // node -> id -> record
+	cid     uint32                // last assigned clone id
+	isos    map[string]map[string]map[string]bool // node -> storage -> filename
+	tasks   map[string]*task
 	taskSeq int
 
-	created, updated, deleted int
+	created, updated, deleted, cloned, tpl, untpl, isl int
 
 	ts *httptest.Server
 }
 
-type uptask struct{ ticks int }
+type task struct{ ticks int }
 
-// New starts the mock and returns it. Call Close to stop.
+// New starts the mock and returns it.
 func New(cfg Config) *Server {
 	if cfg.TaskTicks <= 0 {
 		cfg.TaskTicks = 1
@@ -73,83 +69,153 @@ func New(cfg Config) *Server {
 	s := &Server{
 		cfg:     cfg,
 		tickets: map[string]bool{},
-		vms:     map[string]map[int]*VM{},
-		tasks:   map[string]*uptask{},
+		objs:    map[string]map[int]VM{},
+		isos:    map[string]map[string]map[string]bool{},
+		tasks:   map[string]*task{},
 	}
 	s.ts = httptest.NewServer(http.HandlerFunc(s.serve))
 	return s
 }
 
-// URL returns the mock root, e.g. "http://127.0.0.1:PORT".
+// URL returns the mock root ("http://127.0.0.1:PORT").
 func (s *Server) URL() string { return s.ts.URL }
 
-// Close stops the mock server.
+// Close stops the mock.
 func (s *Server) Close() { s.ts.Close() }
 
-// --- test setup/introspection helpers ---
+// --- test setup / introspection ---
 
-func (s *Server) state(node string) map[int]*VM {
-	m, ok := s.vms[node]
-	if !ok {
-		m = map[int]*VM{}
-		s.vms[node] = m
-	}
-	return m
-}
-
-// PreloadVM seeds a VM on a node.
+// PreloadVM seeds a qemu object.
 func (s *Server) PreloadVM(node string, vmid int, cfg map[string]string, status string) {
-	if cfg == nil {
-		cfg = map[string]string{}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.state(node)[vmid] = &VM{ID: vmid, Kind: "qemu", Config: cfg, Status: status}
+	s.set(node, vmid, "qemu", cfg, status)
 }
 
-// PreloadCT seeds an LXC container on a node.
+// PreloadLXC seeds an lxc object.
+func (s *Server) PreloadLXC(node string, cid int, cfg map[string]string, status string) {
+	s.set(node, cid, "lxc", cfg, status)
+}
+
+// PreloadCT is an alias of PreloadLXC (M3 naming).
 func (s *Server) PreloadCT(node string, cid int, cfg map[string]string, status string) {
+	s.set(node, cid, "lxc", cfg, status)
+}
+
+// PreloadCTTemplate seeds an lxc object with the template flag set.
+func (s *Server) PreloadCTTemplate(node string, cid int, cfg map[string]string) {
+	if cfg == nil {
+		cfg = map[string]string{}
+	}
+	if _, ok := cfg["template"]; !ok {
+		cfg["template"] = "1"
+	}
+	s.set(node, cid, "lxc", cfg, "stopped")
+}
+
+// PreloadISO adds an already-present ISO on a storage.
+func (s *Server) PreloadISO(node, storage, filename string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.isos[node] == nil {
+		s.isos[node] = map[string]map[string]bool{}
+	}
+	if s.isos[node][storage] == nil {
+		s.isos[node][storage] = map[string]bool{}
+	}
+	s.isos[node][storage][filename] = true
+}
+
+func (s *Server) set(node string, id int, kind string, cfg map[string]string, status string) {
 	if cfg == nil {
 		cfg = map[string]string{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state(node)[cid] = &VM{ID: cid, Kind: "lxc", Config: cfg, Status: status}
+	if s.objs[node] == nil {
+		s.objs[node] = map[int]VM{}
+	}
+	s.objs[node][id] = VM{ID: id, Kind: kind, Config: cfg, Status: status}
 }
 
-// VMConfig returns the live config of a VM (nil if absent).
-func (s *Server) VMConfig(node string, vmid int) map[string]string {
+// object is the kind-agnostic accessor core. PVE's numeric id space is treated
+// as shared per node in this mock, mirroring M3's contract so existing e2e
+// tests (which call VMExists for LXC) keep working.
+func (s *Server) object(node string, id int) (VM, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if v, ok := s.vms[node][vmid]; ok {
-		return v.Config
-	}
+	v, ok := s.objs[node][id]
+	return v, ok
+}
+
+// VMConfig returns the live config of an object (nil if absent).
+func (s *Server) VMConfig(node string, vmid int) map[string]string {
+	if v, ok := s.object(node, vmid); ok { return v.Config }
 	return nil
 }
 
-// VMStatus returns the current status of a VM, false if absent.
+// CTConfig is an alias of VMConfig for the LXC case (kind-agnostic).
+func (s *Server) CTConfig(node string, cid int) map[string]string { return s.VMConfig(node, cid) }
+
+// LXCConfig is an alias of VMConfig for the LXC case.
+func (s *Server) LXCConfig(node string, cid int) map[string]string { return s.VMConfig(node, cid) }
+
+// VMStatus returns the object status (false if absent).
 func (s *Server) VMStatus(node string, vmid int) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if v, ok := s.vms[node][vmid]; ok {
-		return v.Status, true
-	}
+	if v, ok := s.object(node, vmid); ok { return v.Status, true }
 	return "", false
 }
 
-// VMExists tells whether a VM/CT is present on a node.
+// LXCStatus is an alias of VMStatus for the LXC case.
+func (s *Server) LXCStatus(node string, cid int) (string, bool) { return s.VMStatus(node, cid) }
+
+// VMExists reports object presence.
 func (s *Server) VMExists(node string, vmid int) bool {
-	_, ok := s.VMStatus(node, vmid)
+	_, ok := s.object(node, vmid)
 	return ok
 }
 
 // CTExists is an alias of VMExists for the LXC case.
 func (s *Server) CTExists(node string, cid int) bool { return s.VMExists(node, cid) }
 
-// CTConfig is an alias of VMConfig for the LXC case.
-func (s *Server) CTConfig(node string, cid int) map[string]string { return s.VMConfig(node, cid) }
+// LXCExists is an alias of VMExists for the LXC case.
+func (s *Server) LXCExists(node string, cid int) bool { return s.VMExists(node, cid) }
 
-// --- request routing ---
+// CTIsTemplate reports whether an lxc object on the node is flagged a template.
+func (s *Server) CTIsTemplate(node string, cid int) bool {
+	v, ok := s.object(node, cid)
+	return ok && v.Config["template"] == "1"
+}
+
+// ISOExists reports whether a filename is present on a node-storage.
+func (s *Server) ISOExists(node, storage, filename string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st := s.isos[node][storage]; st != nil {
+		return st[filename]
+	}
+	return false
+}
+
+// ISOs lists the filenames on a node-storage.
+func (s *Server) ISOs(node, storage string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for f := range s.isos[node][storage] {
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// --- routing ---
+
+func (s *Server) split(s2 string) (h, t string, ok bool) {
+	i := strings.IndexByte(s2, '/')
+	if i < 0 {
+		return s2, "", false
+	}
+	return s2[:i], s2[i+1:], true
+}
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api2/json/")
@@ -159,58 +225,43 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.handleTicket(w, r)
 		return
 	case rest == "version":
-		writeData(w, map[string]any{"version": "8.2", "release": "mock"})
+		writeOK(w, map[string]any{"version": "8.2", "release": "mock"})
 		return
 	}
 
 	if !s.authorized(r) {
-		writeErr(w, 401, "authentication error")
+		writeErr(w, http.StatusUnauthorized, "authentication error")
 		return
 	}
 
-	if rest == "cluster/resources" {
+	switch {
+	case rest == "cluster/resources":
 		s.handleClusterResources(w, r)
 		return
-	}
-	if !strings.HasPrefix(rest, "nodes/") {
-		writeErr(w, 404, "unknown endpoint /"+rest)
+	case strings.HasPrefix(rest, "nodes/"):
+		node, after, ok := s.split(rest[len("nodes/"):])
+		if !ok {
+			writeErr(w, http.StatusNotFound, "malformed node path")
+			return
+		}
+		kind, rest2, ok := s.split(after)
+		if !ok {
+			kind, rest2 = after, ""
+		}
+		switch kind {
+		case "qemu", "lxc":
+			s.objectRoute(w, r, node, kind, rest2)
+		case "tasks":
+			s.taskRoute(w, r, node, rest2)
+		case "storage":
+			s.storageRoute(w, r, node, after)
+		default:
+			writeErr(w, http.StatusNotFound, "unknown kind "+kind)
+		}
 		return
-	}
-	node, after, ok := cutField(rest[len("nodes/"):])
-	if !ok {
-		writeErr(w, 404, "malformed node path")
-		return
-	}
-	kind, rest2, ok := cutField(after)
-	if !ok {
-		// after was the complete path with no trailing slash: "qemu" or "lxc".
-		kind, rest2 = after, ""
-	}
-	s.mu.Lock()
-	// Lazily ensure node state exists.
-	if _, ok := s.vms[node]; !ok {
-		s.vms[node] = map[int]*VM{}
-	}
-	s.mu.Unlock()
-
-	switch kind {
-	case "qemu", "lxc":
-		s.vmRoute(w, r, node, kind, rest2)
-	case "tasks":
-		s.taskRoute(w, rest2)
 	default:
-		writeErr(w, 404, "unknown kind "+kind)
+		writeErr(w, http.StatusNotFound, "unknown endpoint /"+rest)
 	}
-}
-
-// cutField splits "head/tail" on the first '/'; ok is true when a slash was
-// found (so tail may still be empty, e.g. "100/").
-func cutField(s string) (head, tail string, ok bool) {
-	i := strings.IndexByte(s, '/')
-	if i < 0 {
-		return s, "", false
-	}
-	return s[:i], s[i+1:], true
 }
 
 func (s *Server) authorized(r *http.Request) bool {
@@ -227,7 +278,7 @@ func (s *Server) authorized(r *http.Request) bool {
 
 func (s *Server) handleTicket(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, 405, "method not allowed")
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	_ = r.ParseForm()
@@ -237,381 +288,536 @@ func (s *Server) handleTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	pass := r.PostFormValue("password")
 	if user != s.cfg.TicketUser || pass != s.cfg.TicketPassword {
-		writeErr(w, 401, "authentication error")
+		writeErr(w, http.StatusUnauthorized, "authentication error")
 		return
 	}
-	tkt := fmt.Sprintf("ticket-%d", time.Now().UnixNano())
+	t := fmt.Sprintf("ticket-%d", time.Now().UnixNano())
 	s.mu.Lock()
-	s.tickets[tkt] = true
+	s.tickets[t] = true
 	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "PVEAuthCookie", Value: tkt, HttpOnly: true})
-	writeData(w, map[string]any{
-		"ticket":      tkt,
-		"CSRFToken":   "csrf-" + tkt,
-		"valid_until": time.Now().Add(2 * time.Hour).Unix(),
-	})
+	http.SetCookie(w, &http.Cookie{Name: "PVEAuthCookie", Value: t, Path: "/api2/json"})
+	http.SetCookie(w, &http.Cookie{Name: "X-Userid", Value: user, Path: "/api2/json"})
+	w.Header().Set("Set-X-Userid", user)
+	writeOK(w, map[string]any{"ticket": t, "CSRFToken": "mock", "valid_until": time.Now().Add(2 * time.Hour).Unix()})
 }
 
 func (s *Server) handleClusterResources(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, 405, "method not allowed")
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	s.mu.Lock()
 	type row struct {
 		node string
-		vm   *VM
+		v    VM
 	}
-	var rows []row
-	for n, m := range s.vms {
+	s.mu.Lock()
+	var rs []row
+	for nod, m := range s.objs {
 		for _, v := range m {
-			rows = append(rows, row{n, v})
+			rs = append(rs, row{nod, v})
 		}
 	}
 	s.mu.Unlock()
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].node != rows[j].node {
-			return rows[i].node < rows[j].node
+	sort.Slice(rs, func(i, j int) bool {
+		if rs[i].node != rs[j].node {
+			return rs[i].node < rs[j].node
 		}
-		return rows[i].vm.ID < rows[j].vm.ID
+		if rs[i].v.Kind != rs[j].v.Kind {
+			return rs[i].v.Kind < rs[j].v.Kind
+		}
+		return rs[i].v.ID < rs[j].v.ID
 	})
-	out := make([]map[string]any, 0, len(rows))
-	for _, rw := range rows {
-		// PVE's real /cluster/resources uses "type" with values "vm"/"ct".
-		ptype := "vm"
-		if rw.vm.Kind == "lxc" {
-			ptype = "ct"
+	out := make([]map[string]any, 0, len(rs))
+	for _, rw := range rs {
+		typ := "qm"
+		if rw.v.Kind == "lxc" {
+			typ = "lxc"
 		}
 		out = append(out, map[string]any{
 			"node":   rw.node,
-			"vmid":   rw.vm.ID,
-			"type":   ptype,
-			"status": rw.vm.Status,
-			"name":   rw.vm.Config["name"],
-			"tags":   rw.vm.Config["tags"],
+			"vmid":   rw.v.ID,
+			"type":   typ,
+			"status": rw.v.Status,
+			"name":   rw.v.Config["name"],
+			"tags":   rw.v.Config["tags"],
 		})
 	}
-	writeData(w, out)
+	writeOK(w, out)
 }
 
-func (s *Server) taskRoute(w http.ResponseWriter, rest string) {
-	upid, tail, ok := cutField(rest)
-	if !ok || tail != "status" {
-		writeErr(w, 404, "expected /tasks/<upid>/status")
+// objectRoute handles /nodes/{n}/{qemu|lxc}/[id[/action]].
+func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind, rest string) {
+	// bare: POST create
+	if rest == "" {
+		if r.Method == http.MethodPost {
+			_ = r.ParseForm()
+			idStr := r.PostFormValue("vmid")
+			if idStr == "" {
+				idStr = r.PostFormValue("ctid")
+			}
+			id, err := strconv.Atoi(idStr)
+			if err != nil || id <= 0 {
+				writeErr(w, http.StatusBadRequest, "vmid or ctid required")
+				return
+			}
+			s.mu.Lock()
+			if s.objs[node] == nil {
+				s.objs[node] = map[int]VM{}
+			}
+			if _, busy := s.objs[node][id]; busy {
+				s.mu.Unlock()
+				writeErr(w, http.StatusConflict, "vm id "+strconv.Itoa(id)+" already exists")
+				return
+			}
+			cfg := map[string]string{}
+			for k, vs := range r.PostForm {
+				// PVE's create form doesn't include "vmid"/"ctid"/"start".
+				if k == "vmid" || k == "ctid" || k == "start" || k == "newid" || k == "full" {
+					continue
+				}
+				if len(vs) > 0 {
+					cfg[k] = vs[0]
+				}
+			}
+			kkind := "qemu"
+			if kind == "lxc" {
+				kkind = "lxc"
+			}
+			status := "stopped"
+			if r.PostForm.Get("start") != "" {
+				status = "running"
+			}
+			s.objs[node][id] = VM{ID: id, Kind: kkind, Config: cfg, Status: status}
+			upid := s.newTaskLocked(node, "create")
+			s.created++
+			s.mu.Unlock()
+			writeOK(w, upid)
+			return
+		}
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
+	// /id or /id/action
+	idStr, after, ok := s.split(rest)
+	if !ok {
+		idStr, after = rest, ""
+	}
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		writeErr(w, http.StatusBadRequest, "bad object id "+idStr)
+		return
+	}
+
+	// Look up object
+	rec, okOb := s.object(node, id)
+	kindStr := rec.Kind
+	if !okOb {
+		writeErr(w, http.StatusInternalServerError, "no such vm "+strconv.Itoa(id))
+		return
+	}
+
+	// PVE convention: VM actions are under /{id}/{action}; LXC likewise.
+	// GET config: /{id} → returns the config as a flat object.
+	if after == "" {
+		if r.Method == http.MethodGet {
+			s.mu.Lock()
+			rec := s.objs[node][id]
+			out := map[string]any{"vmid": id}
+			for k, v := range rec.Config {
+				out[k] = v
+			}
+			s.mu.Unlock()
+			writeOK(w, out)
+			return
+		}
+		if r.Method == http.MethodDelete && kindStr == "lxc" {
+			s.delete(w, r, node, id)
+			return
+		}
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// PVE power/status endpoints sit under "status/..."; flatten them so the
+	// action switch sees "start"/"stop"/"shutdown"/"reboot"/"current".
+	action := after
+	if strings.HasPrefix(action, "status/") {
+		action = strings.TrimPrefix(action, "status/")
+	}
+
+	// Actions:
+	switch action {
+	case "config":
+		if r.Method == http.MethodGet {
+			s.mu.Lock()
+			rec := s.objs[node][id]
+			out := map[string]any{"vmid": rec.ID}
+			for k, v := range rec.Config {
+				out[k] = v
+			}
+			s.mu.Unlock()
+			writeOK(w, out)
+			return
+		}
+		if r.Method == http.MethodPost {
+			_ = r.ParseForm()
+			s.mu.Lock()
+			rec := s.objs[node][id]
+			if rec.Config == nil {
+				rec.Config = map[string]string{}
+			}
+			for k, vs := range r.PostForm {
+				if len(vs) > 0 {
+					rec.Config[k] = vs[0]
+				}
+			}
+			s.objs[node][id] = rec
+			upid := s.newTaskLocked(node, "update")
+			s.updated++
+			s.mu.Unlock()
+			writeOK(w, upid)
+			return
+		}
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+
+	case "template":
+		if r.Method == http.MethodPost || r.Method == http.MethodDelete {
+			// PVE's POST /lxc/{id}/template sets "template=1".
+			s.mu.Lock()
+			rec := s.objs[node][id]
+			if rec.Config == nil {
+				rec.Config = map[string]string{}
+			}
+			rec.Config["template"] = "1"
+			s.objs[node][id] = rec
+			upid := s.newTaskLocked(node, "template")
+			s.tpl++
+			s.mu.Unlock()
+			writeOK(w, upid)
+			return
+		}
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+
+	case "untemplate":
+		if r.Method == http.MethodPost || r.Method == http.MethodDelete {
+			s.mu.Lock()
+			rec := s.objs[node][id]
+			if rec.Config != nil {
+				delete(rec.Config, "template")
+			}
+			s.objs[node][id] = rec
+			upid := s.newTaskLocked(node, "untemplate")
+			s.untpl++
+			s.mu.Unlock()
+			writeOK(w, upid)
+			return
+		}
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+
+	case "clone":
+		if r.Method != http.MethodPost || kindStr != "lxc" {
+			writeErr(w, http.StatusMethodNotAllowed, "clone is a CT-only POST")
+			return
+		}
+		_ = r.ParseForm()
+		newidStr := r.PostFormValue("newid")
+		newid, err2 := strconv.Atoi(newidStr)
+		if err2 != nil || newid <= 0 {
+			writeErr(w, http.StatusBadRequest, "newid required")
+			return
+		}
+		full := r.PostFormValue("full") == "1"
+		s.mu.Lock()
+		if s.objs[node] == nil {
+			s.objs[node] = map[int]VM{}
+		}
+		if _, busy := s.objs[node][newid]; busy {
+			s.mu.Unlock()
+			writeErr(w, http.StatusConflict, "vm id "+strconv.Itoa(newid)+" already exists")
+			return
+		}
+		src := s.objs[node][id]
+		outCfg := map[string]string{}
+		for k, v := range src.Config {
+			outCfg[k] = v
+		}
+		// PVE clones preserve "name"? They do not. The destination gets
+		// a PVE-picked name. We set it to the destination's "name" form param.
+		delete(outCfg, "name")
+		for k, vs := range r.PostForm {
+			if k == "newid" || k == "full" {
+				continue
+			}
+			if len(vs) > 0 {
+				outCfg[k] = vs[0]
+			}
+		}
+		// full=true forces "full" in PVE; mock just sets nothing.
+		_ = full
+		s.objs[node][newid] = VM{ID: newid, Kind: "lxc", Config: outCfg, Status: "stopped"}
+		upid := s.newTaskLocked(node, "clone")
+		s.cloned++
+		s.mu.Unlock()
+		writeOK(w, upid)
+
+	case "start":
+		s.power(w, r, node, id, "start")
+	case "stop":
+		s.power(w, r, node, id, "stop")
+	case "shutdown":
+		s.power(w, r, node, id, "shutdown")
+	case "reboot":
+		s.power(w, r, node, id, "reboot")
+
+	case "current":
+		// PVE GET /lxc/{id}/status/current returns "status": "stopped".
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.mu.Lock()
+		rec := s.objs[node][id]
+		key := "vmid"
+		if kindStr == "lxc" {
+			key = "cid"
+		}
+		out := map[string]any{
+			key:    id,
+			"status": rec.Status,
+		}
+		if mem, ok2 := rec.Config["memory"]; ok2 {
+			if n, e := strconv.Atoi(mem); e == nil {
+				out["maxmem"] = int64(n) * 1024
+			}
+		}
+		s.mu.Unlock()
+		writeOK(w, out)
+
+	case "vmdelete":
+		if r.Method == http.MethodDelete || r.Method == http.MethodPost {
+			s.delete(w, r, node, id)
+			return
+		}
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+
+	case "resize":
+		_ = r.ParseForm()
+		m := r.PostFormValue("memory")
+		if m == "" {
+			writeErr(w, http.StatusBadRequest, "memory required")
+			return
+		}
+		s.mu.Lock()
+		rec := s.objs[node][id]
+		if rec.Config == nil {
+			rec.Config = map[string]string{}
+		}
+		rec.Config["memory"] = m
+		s.objs[node][id] = rec
+		upid := s.newTaskLocked(node, "resize")
+		s.mu.Unlock()
+		writeOK(w, upid)
+
+	default:
+		writeErr(w, http.StatusNotFound, "unknown action "+after)
+	}
+}
+
+func (s *Server) power(w http.ResponseWriter, r *http.Request, node string, id int, verb string) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	s.mu.Lock()
+	rec, ok := s.objs[node][id]
+	if !ok {
+		s.mu.Unlock()
+		writeErr(w, http.StatusInternalServerError, "no such vm "+strconv.Itoa(id))
+		return
+	}
+	switch verb {
+	case "start":
+		if rec.Status == "running" {
+			s.mu.Unlock()
+			writeErr(w, http.StatusConflict, "vm "+strconv.Itoa(id)+" is already running")
+			return
+		}
+		rec.Status = "running"
+	case "stop", "shutdown":
+		if rec.Status == "stopped" {
+			s.mu.Unlock()
+			writeErr(w, http.StatusConflict, "vm "+strconv.Itoa(id)+" is already stopped")
+			return
+		}
+		rec.Status = "stopped"
+	case "reboot":
+		rec.Status = "stopped"
+	}
+	s.objs[node][id] = rec
+	upid := s.newTaskLocked(node, "power-"+verb)
+	s.mu.Unlock()
+	writeOK(w, upid)
+}
+
+func (s *Server) delete(w http.ResponseWriter, r *http.Request, node string, id int) {
+	if r.Method != http.MethodDelete && r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.objs[node][id]
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "no such vm "+strconv.Itoa(id))
+		return
+	}
+	if rec.Status == "running" {
+		writeErr(w, http.StatusBadRequest, "vm "+strconv.Itoa(id)+" must be stopped before deletion")
+		return
+	}
+	delete(s.objs[node], id)
+	upid := s.newTaskLocked(node, "delete")
+	s.deleted++
+	writeOK(w, upid)
+}
+
+// storageRoute handles /nodes/{n}/storage/{sid}[/{sub}[/{content}]].
+// The pveclient only issues:
+//   - GET  /nodes/{n}/storage/{sid}             → storage info
+//   - GET  /nodes/{n}/storage/{sid}/content/iso → ISO listing (volid array)
+//   - POST /nodes/{n}/storage/{sid}/download    → download (async task)
+func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest string) {
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 || parts[0] != "storage" {
+		writeErr(w, http.StatusNotFound, "expected /storage/{id}/...")
+		return
+	}
+	sid := parts[1]
+
+	switch {
+	// GET /storage/{sid}/content/iso → listing
+	case len(parts) == 4 && parts[2] == "content" && parts[3] == "iso":
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.mu.Lock()
+		var names []string
+		if sts := s.isos[node][sid]; sts != nil {
+			for f := range sts {
+				names = append(names, f)
+			}
+		}
+		s.mu.Unlock()
+		sort.Strings(names)
+		out := make([]map[string]any, 0, len(names))
+		for _, f := range names {
+			out = append(out, map[string]any{
+				"volid":    sid + ":iso/" + f,
+				"filename": f,
+			})
+		}
+		writeOK(w, out)
+
+	// Other /content/{type} listings are empty in the mock.
+	case len(parts) == 4 && parts[2] == "content":
+		writeOK(w, []map[string]any{})
+
+	// POST /storage/{sid}/download → async download task.
+	case len(parts) == 3 && parts[2] == "download":
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		_ = r.ParseForm()
+		filename := r.PostFormValue("filename")
+		if filename == "" {
+			writeErr(w, http.StatusBadRequest, "filename required for download")
+			return
+		}
+		s.mu.Lock()
+		if s.isos[node] == nil {
+			s.isos[node] = map[string]map[string]bool{}
+		}
+		if s.isos[node][sid] == nil {
+			s.isos[node][sid] = map[string]bool{}
+		}
+		s.isos[node][sid][filename] = true
+		upid := s.newTaskLocked(node, "iso-download")
+		s.isl++
+		s.mu.Unlock()
+		writeOK(w, upid)
+
+	// GET /storage/{sid} → storage info (also catches longer unknown tails
+	// conservatively: only the bare form matches, the rest 404).
+	case len(parts) == 2:
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		writeOK(w, map[string]any{
+			"storage": sid,
+			"node":    node,
+			"active":  true,
+			"content": []string{"iso"},
+			"type":    "dir",
+			"format":  "file",
+			"path":    "/var/lib/vz/template/iso",
+		})
+
+	default:
+		writeErr(w, http.StatusNotFound, "unknown storage endpoint: /"+rest)
+	}
+}
+
+// taskRoute handles /nodes/{n}/tasks/{upid}/status.
+func (s *Server) taskRoute(w http.ResponseWriter, r *http.Request, node, rest string) {
+	upid, sub, ok := s.split(rest)
+	if !ok || sub != "status" {
+		writeErr(w, http.StatusNotFound, "expected /tasks/{upid}/status")
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	_ = node
 	s.mu.Lock()
 	t, ok := s.tasks[upid]
 	if !ok {
 		s.mu.Unlock()
-		writeErr(w, 500, "no such task: "+upid)
+		writeErr(w, http.StatusInternalServerError, "no such task "+upid)
 		return
 	}
-	var data map[string]any
+	var out map[string]any
 	if t.ticks > 0 {
 		t.ticks--
-		data = map[string]any{"status": "running", "progress": 0.5}
+		out = map[string]any{"status": "running"}
 	} else {
-		data = map[string]any{"status": "stopped", "exitstatus": "OK", "progress": -1}
+		out = map[string]any{"status": "stopped", "exitstatus": "OK", "progress": -1}
 		delete(s.tasks, upid)
 	}
 	s.mu.Unlock()
-	writeData(w, data)
+	writeOK(w, out)
 }
 
-// vmRoute handles /nodes/<n>/{qemu|lxc}[/<id>[/<action>]].
-func (s *Server) vmRoute(w http.ResponseWriter, r *http.Request, node, kind, rest string) {
-	isLXC := kind == "lxc"
-
-	// POST /nodes/<n>/{qemu|lxc} → create (no id in path).
-	if rest == "" {
-		s.create(w, r, node, isLXC)
-		return
-	}
-
-	idStr, after, ok := cutField(rest)
-	if !ok {
-		// /nodes/<n>/<kind>/<id> (no trailing action): GET config / DELETE whole.
-		id, err := strconv.Atoi(idStr)
-		if err != nil {
-			writeErr(w, 400, "bad object id "+idStr)
-			return
-		}
-		s.wholeObject(w, r, node, id, isLXC)
-		return
-	}
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		writeErr(w, 400, "bad object id "+idStr)
-		return
-	}
-
-	switch {
-	case after == "":
-		s.wholeObject(w, r, node, id, isLXC)
-	case after == "config":
-		s.getObjectConfig(w, r, node, id, isLXC)
-	case strings.HasPrefix(after, "status/"):
-		s.getStatusOrPower(w, r, node, id, isLXC, strings.TrimPrefix(after, "status/"))
-	case after == "vmdelete":
-		s.deleteVM(w, r, node, id)
-	default:
-		writeErr(w, 404, "unknown action "+after)
-	}
-	_ = ok
-}
-
-// wholeObject handles GET config and DELETE for a bare /<kind>/<id>.
-func (s *Server) wholeObject(w http.ResponseWriter, r *http.Request, node string, id int, isLXC bool) {
-	switch r.Method {
-	case http.MethodGet:
-		s.getObjectConfig(w, r, node, id, isLXC)
-	case http.MethodDelete:
-		if !isLXC {
-			// VMs use POST /vmdelete, not DELETE on the object.
-			writeErr(w, 404, "use vmdelete for qemu objects")
-			return
-		}
-		s.deleteObject(w, r, node, id)
-	default:
-		writeErr(w, 405, "method not allowed")
-	}
-}
-
-// getObjectConfig GETs the object's config, or POSTs a config update.
-func (s *Server) getObjectConfig(w http.ResponseWriter, r *http.Request, node string, id int, _ bool) {
-	switch r.Method {
-	case http.MethodGet:
-		s.mu.Lock()
-		v, ok := s.vms[node][id]
-		if !ok {
-			s.mu.Unlock()
-			writeErr(w, 500, "no such vm "+strconv.Itoa(id))
-			return
-		}
-		out := map[string]any{"vmid": id}
-		for k, val := range v.Config {
-			if k == "tags" || k == "args" {
-				// PVE returns list-valued config fields as JSON arrays.
-				out[k] = splitList(val)
-				continue
-			}
-			out[k] = val
-		}
-		out["status"] = v.Status
-		s.mu.Unlock()
-		writeData(w, out)
-	case http.MethodPost:
-		_ = r.ParseForm()
-		s.mu.Lock()
-		v, ok := s.vms[node][id]
-		if !ok {
-			s.mu.Unlock()
-			writeErr(w, 500, "no such vm "+strconv.Itoa(id))
-			return
-		}
-		for key, vals := range r.PostForm {
-			if v.Config == nil {
-				v.Config = map[string]string{}
-			}
-			if len(vals) > 0 {
-				v.Config[key] = vals[0]
-			}
-		}
-		upid := s.newTaskLocked()
-		s.updated++
-		s.mu.Unlock()
-		writeData(w, upid)
-	default:
-		writeErr(w, 405, "method not allowed")
-	}
-}
-
-// getStatusOrPower GETs status/current, or POSTs a power transition.
-func (s *Server) getStatusOrPower(w http.ResponseWriter, r *http.Request, node string, id int, isLXC bool, action string) {
-	switch {
-	case action == "current":
-		s.mu.Lock()
-		v, ok := s.vms[node][id]
-		if !ok {
-			s.mu.Unlock()
-			writeErr(w, 500, "no such vm "+strconv.Itoa(id))
-			return
-		}
-		out := map[string]any{"status": v.Status}
-		if idKey := "vmid"; isLXC {
-			out["cid"] = id
-		} else {
-			out[idKey] = id
-		}
-		if mem, ok := v.Config["memory"]; ok {
-			if n, e := strconv.ParseInt(mem, 10, 64); e == nil {
-				out["maxmem"] = n * 1024 // KiB → bytes, so status-current is byte-typed
-			}
-		}
-		s.mu.Unlock()
-		writeData(w, out)
-	case action == "start", action == "stop", action == "shutdown", action == "reboot":
-		if r.Method != http.MethodPost {
-			writeErr(w, 405, "method not allowed")
-			return
-		}
-		s.mu.Lock()
-		v, ok := s.vms[node][id]
-		if !ok {
-			s.mu.Unlock()
-			writeErr(w, 500, "no such vm "+strconv.Itoa(id))
-			return
-		}
-		switch action {
-		case "start":
-			if v.Status == "running" {
-				s.mu.Unlock()
-				writeErr(w, 400, "vm "+strconv.Itoa(id)+" is already running")
-				return
-			}
-			v.Status = "running"
-		case "stop", "shutdown":
-			if v.Status == "stopped" {
-				s.mu.Unlock()
-				writeErr(w, 400, "vm "+strconv.Itoa(id)+" is already stopped")
-				return
-			}
-			v.Status = "stopped"
-		case "reboot":
-			// no persistent state change in the mock
-		}
-		upid := s.newTaskLocked()
-		s.updated++
-		s.mu.Unlock()
-		writeData(w, upid)
-	default:
-		writeErr(w, 404, "unknown status action "+action)
-	}
-}
-
-// create implements POST /nodes/<n>/{qemu|lxc}.
-func (s *Server) create(w http.ResponseWriter, r *http.Request, node string, isLXC bool) {
-	if r.Method != http.MethodPost {
-		writeErr(w, 405, "method not allowed")
-		return
-	}
-	_ = r.ParseForm()
-	idRaw := r.PostFormValue("vmid")
-	if idRaw == "" {
-		idRaw = r.PostFormValue("ctid")
-	}
-	id, err := strconv.Atoi(idRaw)
-	if err != nil || id <= 0 {
-		writeErr(w, 400, "vmid required")
-		return
-	}
-	_ = isLXC
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.vms[node][id]; exists {
-		writeErr(w, 409, "vm id "+strconv.Itoa(id)+" already exists")
-		return
-	}
-	cfg := map[string]string{}
-	for k, vals := range r.PostForm {
-		if k == "start" {
-			continue
-		}
-		if len(vals) > 0 {
-			cfg[k] = vals[0]
-		}
-	}
-	status := "stopped"
-	if start := r.PostFormValue("start"); start == "true" || start == "1" {
-		status = "running"
-	}
-	kindStr := "qemu"
-	if isLXC {
-		kindStr = "lxc"
-	}
-	s.vms[node][id] = &VM{ID: id, Kind: kindStr, Config: cfg, Status: status}
-	upid := s.newTaskLocked()
-	s.created++
-	writeData(w, upid)
-}
-
-// deleteVM implements POST /nodes/<n>/qemu/<id>/vmdelete.
-func (s *Server) deleteVM(w http.ResponseWriter, r *http.Request, node string, id int) {
-	if r.Method != http.MethodPost {
-		writeErr(w, 405, "method not allowed")
-		return
-	}
-	s.deleteObject(w, r, node, id)
-}
-
-// deleteObject removes a stopped object, mirroring PVE's refuse-while-running rule.
-func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, node string, id int) {
-	s.mu.Lock()
-	v, ok := s.vms[node][id]
-	if !ok {
-		s.mu.Unlock()
-		writeErr(w, 500, "no such vm "+strconv.Itoa(id))
-		return
-	}
-	if v.Status == "running" {
-		s.mu.Unlock()
-		writeErr(w, 400, "vm "+strconv.Itoa(id)+" must be stopped before deletion")
-		return
-	}
-	delete(s.vms[node], id)
-	upid := s.newTaskLocked()
-	s.deleted++
-	s.mu.Unlock()
-	writeData(w, upid)
-}
-
-// newTaskLocked registers a task and returns its UPID. Callers must hold s.mu.
-func (s *Server) newTaskLocked() string {
+func (s *Server) newTaskLocked(node, kind string) string {
 	s.taskSeq++
-	upid := fmt.Sprintf("pve@mock!task-%d", s.taskSeq)
-	s.tasks[upid] = &uptask{ticks: s.cfg.TaskTicks}
+	upid := fmt.Sprintf("%s@mock!%s-%d-%d", node, kind, s.taskSeq, time.Now().UnixNano()%1000)
+	s.tasks[upid] = &task{ticks: s.cfg.TaskTicks}
 	return upid
 }
 
 // --- envelope helpers ---
 
-// writeData sends a PVE success envelope: {"data": ...}.
-func writeData(w http.ResponseWriter, data any) {
+func writeOK(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }
 
-// writeErr sends a PVE error envelope: {"errors": "..."} with an HTTP status.
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]any{"errors": msg})
-}
-
-// splitList splits a PVE list-valued config field into a []any. PVE accepts
-// both space- and comma-separated tag lists; the mock stores whichever form
-// the client POSTed and returns it as a JSON array (matching PVE GET config).
-func splitList(s string) []any {
-	if s == "" {
-		return nil
-	}
-	// Prefer comma if present, else space.
-	if strings.Contains(s, ",") {
-		var out []any
-		for _, p := range strings.Split(s, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				out = append(out, p)
-			}
-		}
-		return out
-	}
-	var out []any
-	for _, p := range strings.Fields(s) {
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }

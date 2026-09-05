@@ -264,9 +264,18 @@ func newResource(doc map[string]any) (schema.Resource, error) {
 			return nil, err
 		}
 		return l, nil
-	case schema.KindCTTemplate, schema.KindISO:
-		// Reserved; land in M4.
-		return nil, fmt.Errorf("kind %s is not yet implemented (M4)", kind)
+	case schema.KindCTTemplate:
+		c := schema.NewCTTemplate()
+		if err := docTo(c, doc); err != nil {
+			return nil, err
+		}
+		return c, nil
+	case schema.KindISO:
+		iso := schema.NewISO()
+		if err := docTo(iso, doc); err != nil {
+			return nil, err
+		}
+		return iso, nil
 	default:
 		return nil, fmt.Errorf("unknown kind %q", kindRaw)
 	}
@@ -288,6 +297,10 @@ func metadataOf(r schema.Resource) *schema.Metadata {
 	case *schema.VM:
 		return &v.Metadata
 	case *schema.LXC:
+		return &v.Metadata
+	case *schema.CTTemplate:
+		return &v.Metadata
+	case *schema.ISO:
 		return &v.Metadata
 	default:
 		return &schema.Metadata{}

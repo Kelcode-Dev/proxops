@@ -86,3 +86,74 @@ func (l *LXC) Delete(ctx context.Context, node string, cid int) (string, error) 
 	}
 	return l.c.Do(ctx, http.MethodDelete, node, lxcBase(node, cid), nil, nil)
 }
+
+// IsTemplate reports whether a container is flagged as a PVE template
+// (config has "template" == "1").
+func (l *LXC) IsTemplate(ctx context.Context, node string, cid int) (bool, error) {
+	cfg, err := l.Get(ctx, node, cid)
+	if err != nil {
+		return false, err
+	}
+	v, ok := cfg["template"]
+	if !ok {
+		return false, nil
+	}
+	switch t := v.(type) {
+	case string:
+		return t == "1", nil
+	case int:
+		return t == 1, nil
+	}
+	return false, nil
+}
+
+// MarkTemplate promotes a stopped container to a template
+// (POST /lxc/{cid}/template).
+func (l *LXC) MarkTemplate(ctx context.Context, node string, cid int) (string, error) {
+	return l.c.Do(ctx, http.MethodPost, node, lxcBase(node, cid)+"/template", nil, nil)
+}
+
+// UnmarkTemplate demotes a template back to a regular container
+// (POST /lxc/{cid}/untemplate).
+func (l *LXC) UnmarkTemplate(ctx context.Context, node string, cid int) (string, error) {
+	return l.c.Do(ctx, http.MethodPost, node, lxcBase(node, cid)+"/untemplate", nil, nil)
+}
+
+// Clone clones a template into a new container id. PVE requires the source to
+// be stopped or a template. Returns the PVE task UPID.
+func (l *LXC) Clone(ctx context.Context, node string, src, dst int, params url.Values) (string, error) {
+	if params == nil {
+		params = url.Values{}
+	}
+	params.Set("newid", strconv.Itoa(dst))
+	// clone is POST /lxc/{src}/clone (async; returns a task UPID)
+	return l.c.Do(ctx, http.MethodPost, node,
+		"nodes/"+node+"/lxc/"+strconv.Itoa(src)+"/clone", params, nil)
+}
+
+// CTTemplate promotes a stopped, non-template container to a template when it
+// is not one yet. Idempotent: a container that is already a template returns
+// an empty upid string and nil error. PVE's /lxc/{cid}/template is only valid
+// on stopped containers — callers must stop first when necessary.
+func (l *LXC) CTTemplate(ctx context.Context, node string, cid int) (string, error) {
+	ok, err := l.IsTemplate(ctx, node, cid)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return "", nil // already a template; no-op
+	}
+	return l.MarkTemplate(ctx, node, cid)
+}
+
+// CloneTemplate creates a new template from a source (usually a CTTemplate).
+// This is the M4 CTTemplate reconcile primitive: desired is "a template
+// exists with cid X", and we get it by cloning from a source id + marking the
+// result as a template.
+func (l *LXC) CloneTemplate(ctx context.Context, node string, src, dst int, params url.Values) (string, error) {
+	up, err := l.Clone(ctx, node, src, dst, params)
+	if err != nil {
+		return up, err
+	}
+	return l.MarkTemplate(ctx, node, dst)
+}

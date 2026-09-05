@@ -157,8 +157,8 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 	r.lastGood = idx
 	r.lastCommit = res.Commit
 
-	// (3) load live PVE inventory.
-	live, err := plan.LoadLive(ctx, r.PVE)
+	// (3) load live PVE inventory + ISO presence.
+	live, err := plan.LoadLive(ctx, r.PVE, idx.List())
 	if err != nil {
 		res.Aborted = true
 		res.AbortReason = "pve inventory read failed: " + err.Error()
