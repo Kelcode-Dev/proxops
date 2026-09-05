@@ -137,6 +137,9 @@ func buildAgent(gf *globalFlags, log *slog.Logger, persistent, local *pflag.Flag
 
 // overlayEnv mirrors the config package's env overlay for testability.
 func overlayEnv(cfg *config.Config) {
+	if v := os.Getenv("PVECONFORM_PVE_TOKEN_VALUE"); v != "" {
+		cfg.PVE.TokenValue = v
+	}
 	if v := os.Getenv("PVECONFORM_PVE_TOKEN"); v != "" {
 		cfg.PVE.Token = v
 	}

@@ -37,8 +37,14 @@ type PVEConfig struct {
 	// User is the PVE user ID; for tokens it is the token owner,
 	// e.g. "root@pam" or "pveops@pve".
 	User string `yaml:"user"`
+	// TokenID is the PVE API token name (the part before '=' in the
+	// user@realm!tokenid=uuid credential). Preferred over TokenValue.
+	TokenID string `yaml:"token-id"`
 	// Token is the API token UUID (token auth). Prefer env PVECONFORM_PVE_TOKEN.
 	Token string `yaml:"token"`
+	// TokenValue, when set, overrides TokenID+Token with a fully-composed
+	// "user@realm!tokenid=uuid" credential. Prefer env PVECONFORM_PVE_TOKEN_VALUE.
+	TokenValue string `yaml:"token-value"`
 	// Password is the user's password (ticket auth only).
 	// Prefer env PVECONFORM_PVE_PASSWORD.
 	Password string `yaml:"password"`
@@ -47,6 +53,9 @@ type PVEConfig struct {
 	// CAFile optionally points at the PVE cluster self-signed CA certificate.
 	// When empty the system trust store is used.
 	CAFile string `yaml:"ca-file"`
+	// Gateway is the node used to bootstrap ticket auth and reach
+	// cluster-wide endpoints. Default "pve".
+	Gateway string `yaml:"gateway"`
 }
 
 // GitConfig holds git source-of-truth settings.
@@ -86,7 +95,7 @@ type Config struct {
 func Defaults() *Config {
 	return &Config{
 		Log:     LogConfig{Level: "info"},
-		PVE:     PVEConfig{Auth: AuthToken, Port: 8006},
+		PVE:     PVEConfig{Auth: AuthToken, Port: 8006, Gateway: "pve"},
 		Git:     GitConfig{Branch: "main"},
 		Rec:     ReconcileConfig{PollInterval: 30 * time.Second, TaskTimeout: 30 * time.Minute, PruneBudget: 3},
 		Listen:  "127.0.0.1:9494",
@@ -117,6 +126,12 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("PVECONFORM_PVE_TOKEN"); v != "" {
 		c.PVE.Token = v
 	}
+	if v := os.Getenv("PVECONFORM_PVE_TOKEN_VALUE"); v != "" {
+		c.PVE.TokenValue = v
+	}
+	if v := os.Getenv("PVECONFORM_PVE_TOKEN_VALUE"); v != "" {
+		c.PVE.TokenValue = v
+	}
 	if v := os.Getenv("PVECONFORM_PVE_PASSWORD"); v != "" {
 		c.PVE.Password = v
 	}
@@ -143,8 +158,13 @@ func (c *Config) Validate() error {
 		if c.PVE.User == "" {
 			errs = append(errs, "pve.user is required for token auth")
 		}
-		if c.PVE.Token == "" {
-			errs = append(errs, "pve.token missing (set PVECONFORM_PVE_TOKEN)")
+		if c.PVE.TokenValue == "" {
+			if c.PVE.TokenID == "" {
+				errs = append(errs, "pve.token-id missing")
+			}
+			if c.PVE.Token == "" {
+				errs = append(errs, "pve.token missing (set PVECONFORM_PVE_TOKEN)")
+			}
 		}
 		if c.PVE.Password != "" {
 			errs = append(errs, "pve.password must be empty when pve.auth=token")

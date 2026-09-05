@@ -141,6 +141,14 @@ func TestValidateRejectsBadCombos(t *testing.T) {
 		t.Error("expected error: missing pve.token")
 	}
 
+	// Token auth with token value but missing user.
+	c = Defaults()
+	c.Git.Path = "/tmp/x"
+	c.PVE.TokenValue = "u@pve!x=y"
+	if err := c.Validate(); err == nil {
+		t.Error("expected error: missing pve.user for token value")
+	}
+
 	// Ticket auth without a password.
 	c = Defaults()
 	c.Git.Path = "/tmp/x"
@@ -165,9 +173,19 @@ func TestValidatePassesForValidConfigs(t *testing.T) {
 	c := Defaults()
 	c.Git.URL = "https://git.example.com/repo"
 	c.PVE.User = "root@pam"
+	c.PVE.TokenID = "pveconform"
 	c.PVE.Token = "deadbeef"
 	if err := c.Validate(); err != nil {
 		t.Fatalf("token mode should validate: %v", err)
+	}
+
+	// A composed token value also validates on its own without token-id.
+	c3 := Defaults()
+	c3.Git.URL = "https://git.example.com/repo"
+	c3.PVE.User = "root@pam"
+	c3.PVE.TokenValue = "root@pam!pveconform=deadbeef"
+	if err := c3.Validate(); err != nil {
+		t.Fatalf("token-value mode should validate: %v", err)
 	}
 
 	c2 := Defaults()
