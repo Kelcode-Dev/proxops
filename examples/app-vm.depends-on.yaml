@@ -1,0 +1,26 @@
+# Demonstrates `depends-on`: this VM wants a base image before it is ever
+# created. The annotation documents intent and is validated (unknown target /
+# cycle -> cycle abort). It is NOT a hard topological gate in the MVP
+# planner — see docs/SCHEMA.md ("depends-on") for current semantics.
+apiVersion: proxops/v1alpha1
+kind: VM
+metadata:
+  name: app-vm
+  annotations:
+    # Comma-separated "Kind:name" refs to other manifests in this tree.
+    proxops/depends-on: "CTTemplate:golden-base,ISO:talos-1-8-0"
+spec:
+  node: pve01
+  vmid: 400
+  memory: 2GiB
+  cpu:
+    type: host
+    cores: 2
+  disks:
+    - storage: vm_disks
+      size: 20GiB
+      interface: scsi0
+      controller: virtio-scsi-single
+  networks:
+    - model: virtio
+      bridge: vmbr0

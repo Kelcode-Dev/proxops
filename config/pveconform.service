@@ -1,0 +1,43 @@
+[Unit]
+Description=pveconform — Git → Proxmox GitOps reconciler
+Documentation=https://github.com/GizzmoShifu/proxmox-operator
+After=network-online.target
+Wants=network-online.target
+# Do NOT start if no PVE API credentials are configured — the agent would
+# abort every cycle. Override with `EnvironmentFile=` or a drop-in.
+ConditionPathExists=/etc/pveconform/pveconform.yaml
+
+[Service]
+Type=simple
+User=pveconform
+Group=pveconform
+# Binary + config. Adjust paths to your install layout.
+ExecStart=/usr/local/bin/pveconform run --config /etc/pveconform/pveconform.yaml
+Restart=on-failure
+RestartSec=5s
+
+# Secrets come only from the environment (see docs/OPERATIONS.md).
+# Option A: an env file (root-only 0600):
+EnvironmentFile=-/etc/pveconform/pveconform.env
+# Option B: an inline drop-in:
+#   echo 'Environment="PVECONFORM_PVE_TOKEN_VALUE=root@pam!pveconform=..."' > \
+#         /etc/systemd/system/pveconform.service.d/cred.conf
+#   echo 'Environment="PVECONFORM_GIT_TOKEN=..."' >> same file
+
+# Hardening
+NoNewPrivileges=true
+ProtectHome=read-only      # agent's git cache lives under /home/pveconform
+PrivateTmp=true
+ProtectSystem=full         # read-only /usr /boot /efi /etc; home + tmp writable
+ReadWritePaths=/home/pveconform/.local/share/pveconform
+
+# The agent exposes /healthz (2 min staleness window) — enable watchdogs if
+# you prefer liveness via the endpoint; keep the default 45s timeout above.
+# WatchdogSec=45
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/pveconform/pveconform.env (0600 root:pveconform), e.g.:
+#   PVECONFORM_PVE_TOKEN_VALUE=root@pam!pveconform=<uuid>
+#   PVECONFORM_GIT_TOKEN=<ghp_...>

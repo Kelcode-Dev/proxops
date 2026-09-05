@@ -1,0 +1,17 @@
+# ISO manifest: pveconform ensures this installer image is present on the
+# PVE storage backend "local" (node pve01), downloading it from the URL if
+# it is not.
+#
+# - No PVE numeric id: identity is (node, storage, filename).
+# - Never deleted by pveconform in MVP: removing the manifest stops
+#   re-download but leaves the file on PVE storage.
+# - The PVE node must have outbound HTTPS to fetch from spec.url.
+apiVersion: proxops/v1alpha1
+kind: ISO
+metadata:
+  name: talos-1-8-0
+spec:
+  node: pve01
+  storage: local          # PVE storage id with an ISO pool (e.g. "local", "isos")
+  filename: talos-1.8.0-v1.8.0.iso
+  url: https://download.talos.dev/v1.8.0/latest/amd64/talos-runtime.iso

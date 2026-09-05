@@ -1,0 +1,39 @@
+# pveconform — reference configuration.
+#
+# Precedence (lowest → highest): built-in defaults → this file → CLI flags →
+# environment (credentials ONLY, never read from this file or flags).
+# Every field is optional; defaults are shown as comments.
+#
+# Load with:  pveconform run --config config/pveconform.yaml
+
+log:
+  level: info              # debug | info | warn | error
+
+pve:
+  auth: token              # token (PVE API token, recommended) | ticket (user+password)
+  user: root@pam           # PVE user id (token owner, or ticket user)
+  token-id: pveconform     # token name for auth=token (user@pam!token-id=<uuid>)
+  # token: ""              # token uuid — use env PVECONFORM_PVE_TOKEN
+  # token-value: ""        # fully-composed "user@realm!tokenid=uuid" —
+                           # use env PVECONFORM_PVE_TOKEN_VALUE (overrides the pair)
+  # password: ""           # ticket auth only — use env PVECONFORM_PVE_PASSWORD
+  port: 8006               # PVE API (pveproxy) port
+  gateway: pve             # cluster gateway node name (bootstrap + cluster-wide endpoints)
+  # ca-file: ""            # PVE cluster self-signed CA; empty = system trust store
+
+git:
+  # URL mode (default):
+  url: https://github.com/example/pveconform-manifests.git
+  branch: main
+  # token: ""              # use env PVECONFORM_GIT_TOKEN
+  # Local (air-gapped) mode — mutually exclusive with url:
+  # path: /var/lib/pveconform/manifests
+
+reconcile:
+  poll-interval: 30s       # watch-mode cycle cadence
+  task-timeout: 30m        # max wait per PVE async task (clone/download/create)
+  prune-budget: 3          # max deletions per cycle (empty-desired anomaly guard rides on this)
+
+listen: 127.0.0.1:9494     # /healthz /metrics /status bind address
+                           # use 0.0.0.0:9494 for a monitoring scrape
+data-dir: ~/.local/share/pveconform   # git cache + scratch (not user data)

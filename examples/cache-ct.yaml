@@ -1,0 +1,29 @@
+# An LXC container pinned to pve01/ctid 9000, booting a minimal cache box.
+#
+# LXCs share PVE's per-node integer id pool with VMs — the pinned `vmid`
+# (the PVE wire key is `ctid`, the schema keeps `vmid` for symmetry) must be
+# unique across ALL object kinds on the node.
+apiVersion: proxops/v1alpha1
+kind: LXC
+metadata:
+  name: cache-01
+  labels:
+    role: cache
+spec:
+  node: pve01
+  vmid: 9000
+  state: started
+  memory: 1GiB
+  swap: 512MiB
+  cpu:
+    cores: 1
+  root:
+    storage: local
+    size: 4GiB
+  networks:
+    - bridge: vmbr0
+      # model: veth       # PVE veth is the default; explicit if you need tap
+      # hwaddr: "aa:bb:cc:dd:ee:90"
+  # os: debian-12         # PVE ostype hint
+  # arch: x86_64
+  # pve-description: "cache box under pveconform"

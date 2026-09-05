@@ -1,0 +1,34 @@
+# A single VM, pinned to pve01/vmid 142, 8GiB, 4 host-vCPUs, one scsi disk on
+# the "vm_disks" pool (50GiB, virtio-scsi-single + I/O thread), one virtio NIC
+# on vmbr2.
+#
+# Boot: PVE start=0 during create (the agent starts it in a separate plan
+# step).
+apiVersion: proxops/v1alpha1
+kind: VM
+metadata:
+  name: talos-worker-01
+  labels:
+    role: worker
+    cluster: prod
+spec:
+  node: pve01
+  vmid: 142            # pinned (agent won't invent an id)
+  state: started       # default; also "stopped"
+  memory: 8GiB         # PVE wire: 8388608K
+  cpu:
+    type: host
+    cores: 4
+  disks:
+    - storage: vm_disks
+      size: 50GiB
+      interface: scsi0          # PVE slot
+      controller: virtio-scsi-single
+      iothread: true
+  networks:
+    - model: virtio
+      bridge: vmbr2
+  # pve-description: "talos worker"     # optional PVE description
+  # extra:                               # escape hatch, sent verbatim to PVE
+  #   tablet0: usb0,usb1
+  #   boot: order=scsi0;net0,enabled=1
