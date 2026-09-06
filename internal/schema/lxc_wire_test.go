@@ -39,18 +39,20 @@ func mustParseLXC(t *testing.T) *schema.LXC {
 	return l
 }
 
-// TestLXCRootfsWireFormat — rootfs must be a PVE volume-spec
-// "<pool>:<size>" (8GiB → "8G"); NOT "pool,size=<bytes>" and not a bare
-// "pool". Regression for the same class of parameter-verification error
-// that hit the VM scsi0 path.
+// TestLXCRootfsWireFormat — rootfs must be "pool:<size-GiB>" (8GiB → "8").
+// PVE's documented LXC container-creation form is "STORAGE_ID:SIZE_IN_GiB"
+// (pct.conf(5)), and the bare number after the storage id is read in GiB —
+// the same unit PVE uses for QEMU scsiN create-time volume specs (empirically
+// verified on PVE 9.2: local-lvm:8589934592 → "Volume too large (8.00 EiB)").
 func TestLXCRootfsWireFormat(t *testing.T) {
 	l := mustParseLXC(t)
 	p, err := l.ToCreateParams()
 	if err != nil {
 		t.Fatalf("ToCreateParams: %v", err)
 	}
-	if got, want := p["rootfs"], "local-lvm:8G"; got != want {
-		t.Errorf("rootfs = %v, want %q (PVE volume-spec)", got, want)
+	// 8 GiB → "8" (GiB, not bytes).
+	if got, want := p["rootfs"], "local-lvm:8"; got != want {
+		t.Errorf("rootfs = %v, want %q (pool:<GiB>)", got, want)
 	}
 }
 
@@ -88,9 +90,12 @@ func TestLXCVethPinnedWireFormat(t *testing.T) {
 	// Drift against PVE's report of the same device must be a no-op.
 	live := map[string]any{
 		"cores":  1,
-		"memory": int64(1 << 20),
+		"memory": int64(1024), // PVE MiB count for 1GiB
 		"tags":   []any{"pveconform"},
-		"rootfs": "local-lvm:local-lvm-ct-9000",
+		// PVE-assigned container volume id; no size token yet (PVE reports the
+		// LVM container volume name; pveDiskInfo treats a missing size as
+		// "compatible" so adoption does not churn on unknown sizes).
+		"rootfs": "local-lvm:local-lvm-ct-9000-ROOT",
 		"net0":   "veth=aa:bb:cc:dd:ee:90,bridge=vmbr0",
 	}
 	if _, stop, changed := l.Drift(live); changed {
@@ -99,14 +104,15 @@ func TestLXCVethPinnedWireFormat(t *testing.T) {
 }
 
 // TestLXCMemoryNormalization — 1GiB memory must be emitted as PVE's wire
-// form: KiB as an integer (1GiB = 1048576 KiB).
+// form: MiB as an integer (1GiB = 1024 MiB). PVE's LXC /config "memory" is
+// documented in MB (pct.conf(5)).
 func TestLXCMemoryNormalization(t *testing.T) {
 	l := mustParseLXC(t)
 	p, err := l.ToCreateParams()
 	if err != nil {
 		t.Fatalf("ToCreateParams: %v", err)
 	}
-	if got, want := p["memory"], int64(1048576); got != want {
+	if got, want := p["memory"], int64(1024); got != want {
 		t.Errorf("memory = %T %v, want int64(%d)", got, got, want)
 	}
 }

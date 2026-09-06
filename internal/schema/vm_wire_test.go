@@ -64,25 +64,31 @@ func TestUserFailingManifestCreateWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToCreateParams: %v", err)
 	}
-	// scsi0: PVE 9 create-time volume spec on LVM storage.
-	if got, want := p["scsi0"], "local-lvm:8G"; got != want {
-		t.Errorf("scsi0 = %v, want %q (PVE volume-spec — LVM gets pool:size)", got, want)
+	// scsi0: PVE 9.2 LVM/LVM-thin create-time form is "<pool>:<GiB>", with
+	// iothread embedded inline. Empirically verified on conformance-dev:
+	// "local-lvm:8589934592" → lvcreate "Volume too large (8.00 EiB)" (the
+	// bare number is read as GiB, not bytes); "local-lvm:1" allocated a
+	// 1073741824-byte thin volume; "local-lvm:0.5" → 512 MiB. 8GiB → "8".
+	// The sibling "scsi0.iothread=1" create param is rejected by PVE's schema.
+	if got, want := p["scsi0"], "local-lvm:8,iothread=1"; got != want {
+		t.Errorf("scsi0 = %v, want %q (<pool>:<GiB>, iothread inline)", got, want)
+	}
+	if _, ok := p["scsi0.iothread"]; ok {
+		t.Errorf("scsi0.iothread sibling param emitted (PVE rejects it; iothread belongs inline in the drive string): %v", p["scsi0.iothread"])
 	}
 	// scsihw is VM-wide; virtio-scsi-single is the user's controller.
 	if got, want := p["scsihw"], "virtio-scsi-single"; got != want {
 		t.Errorf("scsihw = %v, want %q", got, want)
 	}
-	// scsi0.iothread must be a sibling key with value "1".
-	if got := p["scsi0.iothread"]; got != "1" {
-		t.Errorf("scsi0.iothread = %T %v, want \"1\" (iothread=true)", got, got)
-	}
 	// net0: unpinned-MAC virtio on vmbr0.
 	if got, want := p["net0"], "virtio,bridge=vmbr0,firewall=0"; got != want {
 		t.Errorf("net0 = %v, want %q (no '=' on unpinned-MAC virtio)", got, want)
 	}
-	// memory: 1GiB → 1048576 KiB as an integer in the wire form.
-	if got, want := p["memory"], int64(1<<20); got != want {
-		t.Errorf("memory = %T %v, want int64(%d) = KiB form", got, got, want)
+	// memory: PVE's create-time `memory` is an integer MIB count (qm.conf:
+	// "in MiB"). 1GiB → 1024. (The former KiB form, 1048576, would have
+	// asked PVE for ~1 TiB of RAM.)
+	if got, want := p["memory"], int64(1024); got != want {
+		t.Errorf("memory = %T %v, want int64(%d) = PVE MiB form", got, got, want)
 	}
 	// cpu / cores
 	if got, want := p["cpu"], "kvm64"; got != want {
@@ -93,23 +99,65 @@ func TestUserFailingManifestCreateWire(t *testing.T) {
 	}
 
 	// Drift against PVE's own report must be a no-op once PVE has created
-	// the VM. PVE reports scsi0 as "<pool>:<vmid>-disk-<n>,size=<bytes>" —
-	// diskMatches normalizes that to (pool, size-bytes) and compares against
-	// our desired (pool, size-bytes).
+	// the VM. PVE reports scsi0 as "<pool>:<volname>,iothread=1,size=<binary>"
+	// (volume name is PVE-assigned; iothread is inline in the drive string;
+	// size in binary suffixes like "8G")," and memory as an integer MiB count.
 	live := map[string]any{
-		"vmid":           9100,
-		"name":           "test-vm-01",
-		"memory":         1048576,
-		"cpu":            "kvm64",
-		"cores":          1,
-		"scsihw":         "virtio-scsi-single",
-		"scsi0":          "local-lvm:vm-9100-disk-0,size=8589934592",
-		"scsi0.iothread": "1",
-		"net0":           "virtio=52:54:00:aa:bb:cc,bridge=vmbr0,firewall=0",
-		"tags":           []any{"pveconform"},
+		"vmid":   9100,
+		"name":   "test-vm-01",
+		"memory": 1024,
+		"cpu":    "kvm64",
+		"cores":  1,
+		"scsihw": "virtio-scsi-single",
+		// PVE's post-allocate report shape for our 8GiB + iothread disk:
+		"scsi0": "local-lvm:local-lvm-vm-9100-disk-0,iothread=1,size=8G",
+		"net0":  "virtio=52:54:00:aa:bb:cc,bridge=vmbr0,firewall=0",
+		"tags":  []any{"pveconform"},
 	}
 	if update, stop, changed := v.Drift(live); changed {
 		t.Errorf("Drift on PVE's own create report is not a no-op: changed=%v stop=%v update=%v", changed, stop, update)
+	}
+}
+
+// TestVMFractionalDiskGiBCreate — a sub-GiB disk spec must render as a
+// fractional PVE GiB number ("0.5"), not a byte count. PVE accepts decimal
+// GiB in LVM/LVM-thin volume specs (the PVE UI's "Disk size (GiB)" field is a
+// numberfield with decimalPrecision 3).
+func TestVMFractionalDiskGiBCreate(t *testing.T) {
+	v := mustParseUserVM(t)         // iothread: true in the manifest
+	v.Spec.Disks[0].Size = "512MiB" // 0.5 GiB
+	p, err := v.ToCreateParams()
+	if err != nil {
+		t.Fatalf("ToCreateParams: %v", err)
+	}
+	if got, want := p["scsi0"], "local-lvm:0.5,iothread=1"; got != want {
+		t.Errorf("scsi0 = %v, want %q", got, want)
+	}
+}
+
+// TestVMDiskSizeDriftDetection — a PVE-reported disk that is NOT the desired
+// size must surface as drift (guards the pveDiskInfo comparison against the
+// old "pool-only" degenerate match).
+func TestVMDiskSizeDriftDetection(t *testing.T) {
+	v := mustParseUserVM(t) // desired 8GiB, iothread
+	bigger := map[string]any{
+		"memory": 1024,
+		"scsi0":  "local-lvm:local-lvm-vm-9100-disk-0,iothread=1,size=16G",
+	}
+	upd, _, changed := v.Drift(bigger)
+	if !changed {
+		t.Fatalf("drift: PVE reporting 16G against desired 8G must be a change")
+	}
+	if got := upd["scsi0"]; got != "local-lvm:8,iothread=1" {
+		t.Errorf("drift update scsi0 = %v, want %q", got, "local-lvm:8,iothread=1")
+	}
+	// iothread missing on the PVE side also must drift.
+	noIOThread := map[string]any{
+		"memory": 1024,
+		"scsi0":  "local-lvm:local-lvm-vm-9100-disk-0,size=8G",
+	}
+	if _, _, changed := v.Drift(noIOThread); !changed {
+		t.Errorf("drift: PVE report without iothread=1 against desired iothread=true must be a change")
 	}
 }
 
@@ -119,14 +167,14 @@ func TestUserFailingManifestCreateWire(t *testing.T) {
 func TestVMUnpinnedMacNICDrift(t *testing.T) {
 	v := mustParseUserVM(t)
 	live := map[string]any{
-		"vmid":           9100,
-		"memory":         1048576,
-		"cpu":            "kvm64",
-		"cores":          1,
-		"scsihw":         "virtio-scsi-single",
-		"scsi0":          "local-lvm:vm-9100-disk-0,size=8589934592",
-		"scsi0.iothread": "1",
-		// PVE-assigned MAC on net0 — not in our manifest.
+		"vmid":   9100,
+		"memory": 1024,
+		"cpu":    "kvm64",
+		"cores":  1,
+		"scsihw": "virtio-scsi-single",
+		"scsi0":  "local-lvm:vm-9100-disk-0,iothread=1,size=8G",
+		// PVE natively reports net0 as "virtio=<auto-mac>,bridge=..." even
+		// when we created it with an unpinned MAC.
 		"net0": "virtio=aa:bb:cc:dd:ee:ff,bridge=vmbr0,firewall=0",
 		"tags": []any{"pveconform"},
 	}

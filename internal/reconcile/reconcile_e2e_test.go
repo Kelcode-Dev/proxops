@@ -264,7 +264,7 @@ func TestE2EPruneTaggedOrphan(t *testing.T) {
 	// Simulate a live tagged VM that is not in git.
 	h.mock.PreloadVM(node, 100, map[string]string{
 		"name":   "stale-vm",
-		"memory": "8388608",
+		"memory": "8192",
 		"tags":   "pveconform",
 	}, "stopped")
 
@@ -297,10 +297,10 @@ func TestE2EPruneRespectsBudget(t *testing.T) {
 		"vm.yaml": vmManifest("kept", 1000),
 	}, 2) // budget = 2
 	// 1000 matches git; 100/101/102 are tagged orphans.
-	h.mock.PreloadVM(node, 1000, map[string]string{"name": "kept", "memory": "8388608", "tags": "pveconform"}, "stopped")
+	h.mock.PreloadVM(node, 1000, map[string]string{"name": "kept", "memory": "8192", "tags": "pveconform"}, "stopped")
 	for _, id := range []int{100, 101, 102} {
 		h.mock.PreloadVM(node, id, map[string]string{
-			"name": "stale", "memory": "8388608", "tags": "pveconform",
+			"name": "stale", "memory": "8192", "tags": "pveconform",
 		}, "stopped")
 	}
 	p := h.apply(t)
@@ -332,9 +332,9 @@ func TestE2EPruneUntaggedIgnored(t *testing.T) {
 	h := newHarness(t, map[string]string{
 		"vm.yaml": vmManifest("kept", 1000),
 	}, 3)
-	h.mock.PreloadVM(node, 1000, map[string]string{"name": "kept", "memory": "8388608", "tags": "pveconform"}, "stopped")
+	h.mock.PreloadVM(node, 1000, map[string]string{"name": "kept", "memory": "8192", "tags": "pveconform"}, "stopped")
 	h.mock.PreloadVM(node, 100, map[string]string{
-		"name": "manual-vm", "memory": "8388608",
+		"name": "manual-vm", "memory": "8192",
 		// no pveconform tag
 	}, "stopped")
 

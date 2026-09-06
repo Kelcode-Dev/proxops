@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -14,16 +15,23 @@ const TaskPollInterval = 5 * time.Second
 
 // TaskStatus is the subset of PVE's task-status response we consume.
 //
-// GET /nodes/{n}/tasks/{upid}/status returns:
+// GET /nodes/{n}/tasks/{upid}/status returns, when a task settles:
 //
-//	{"data": {"status": "stopped", "exitstatus": "OK", "progress": -1}}
+//	{"data": {"status": "stopped", "exitstatus": "OK"}}
+//	{"data": {"status": "stopped", "exitstatus": "unable to create VM 9100 -
+//	          lvcreate 'pve/vm-9100-disk-0' error: Volume too large (8.00 EiB)"}}
+//
+// i.e. PVE reports a failed task's reason in the exitstatus STRING (verified
+// against PVE 9.2's task-status endpoint; success is the literal "OK"). The
+// "errors" field belongs to the *parameter-validation* envelope of HTTP 4xx
+// responses and is never populated on task status, so it is not decoded here
+// — decoding it previously surfaced every failed task as "unknown error".
 //
 // While running: {"status": "running", "progress": 0.42, ...}.
 type TaskStatus struct {
 	Status     string   `json:"status"`
 	Progress   *float64 `json:"progress"`
 	ExitStatus string   `json:"exitstatus"`
-	Errors     string   `json:"errors"`
 }
 
 // IsStopped reports whether the task has terminated.
@@ -128,9 +136,11 @@ func (w *TaskWaiter) Wait(ctx context.Context, tid TaskID) (*TaskStatus, error) 
 			if last.IsOK() {
 				return &last, nil
 			}
-			msg := last.Errors
-			if msg == "" {
-				msg = "unknown error"
+			// PVE reports the failure reason in exitstatus (a human
+			// sentence, e.g. "unable to create VM 9100 - lvcreate ... error:").
+			msg := strings.TrimSpace(last.ExitStatus)
+			if msg == "" || msg == "OK" {
+				msg = "task stopped with a non-OK exit status"
 			}
 			return &last, &TaskFailedError{UPID: tid.UPID, Message: msg}
 		}

@@ -8,10 +8,10 @@ import (
 )
 
 func TestPlanMemoryDriftNeedsStop(t *testing.T) {
-	// Desired: 8GiB (8388608 KiB). Live PVE reports 4GiB, and it is running.
-	// A memory change on PVE requires the VM to be stopped → StopFirst.
+	// Desired: 8GiB (8192 MiB on PVE's wire). Live PVE reports 4GiB, and it is
+	// running. A memory change on PVE requires the VM to be stopped → StopFirst.
 	desired := map[string]any{
-		"cpu": "host", "cores": "2", "memory": "8388608",
+		"cpu": "host", "cores": "2", "memory": "4096",
 		"tags": []any{"pveconform"}, "scsihw": "virtio-scsi",
 	}
 	live := &plan.LiveInventory{

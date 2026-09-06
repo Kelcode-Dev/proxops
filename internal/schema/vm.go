@@ -132,7 +132,7 @@ func (v *VM) Validate() error {
 	if v.Spec.Memory == "" {
 		return fmt.Errorf("%s: spec.memory must be set (e.g. 8GiB)", v.Ref())
 	}
-	if _, err := MemoryKiB(v.Spec.Memory); err != nil {
+	if _, err := MemoryMiB(v.Spec.Memory); err != nil {
 		return fmt.Errorf("%s: spec.memory: %w", v.Ref(), err)
 	}
 	// disks
@@ -210,7 +210,7 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 	p := map[string]any{
 		"vmid":   v.Spec.VMID,
 		"name":   pveName(v),
-		"memory": memKiB(v.Spec.Memory),
+		"memory": memMiB(v.Spec.Memory),
 		"cpu":    v.Spec.CPU.Type,
 		"cores":  v.Spec.CPU.Cores,
 		"tags":   strings.Join(v.allTags(), ","),
@@ -229,10 +229,7 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 		if slot == "" {
 			slot = fmt.Sprintf("scsi%d", i)
 		}
-		p[slot] = diskVolumeString(d, slot)
-		if d.IOThread {
-			p[slot+".iothread"] = "1"
-		}
+		p[slot] = driveVolumeString(d)
 	}
 	for i := range v.Spec.NICs {
 		slot := v.Spec.NICs[i].Slot
@@ -266,9 +263,11 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 		upd["cores"] = want
 		stop = true
 	}
-	// memory. PVE memory: KiB when running or stopped; the API reports int
-	// KiB (in bytes when in status, in KiB in config).
-	if want, err := MemoryKiB(v.Spec.Memory); err == nil {
+	// memory: PVE's config stores an integer MiB count ("memory: ..." in
+	// qm.conf is documented in MiB; a create-time `memory=100` is stored and
+	// reported as `100`). The live-status endpoint reports bytes, but Drift
+	// only ever sees the /config form.
+	if want, err := MemoryMiB(v.Spec.Memory); err == nil {
 		if pveInt(current["memory"]) != int(want) {
 			upd["memory"] = want
 			stop = true
@@ -284,24 +283,22 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 		upd["scsihw"] = wantHW
 		stop = true
 	}
-	// disks.
+	// disks. PVE's /config report is "<pool>:vm-<vmid>-disk-<n>[,iothread=1],size=<binary>"
+	// (PVE-assigned volume name, binary-suffix size, iothread inline in the
+	// drive property string). We own pool, size, and iothread; compare in
+	// pveDiskInfo.
 	for i, d := range v.Spec.Disks {
 		slot := d.Slot
 		if slot == "" {
 			slot = fmt.Sprintf("scsi%d", i)
 		}
-		cur := pveStr(current[slot])
-		want := diskVolumeString(d, slot)
-		// Compare only the storage-id and size components (volume names are
-		// PVE-assigned; we don't own them).
+		cur := parseDiskInfo(pveStr(current[slot]))
+		want := parseDiskInfo(driveVolumeString(d))
 		if !diskMatches(cur, want) {
-			upd[slot] = want
+			// Re-emit the full owned drive string; PVE keeps the volume name
+			// it allocated and only reinterprets the new pool/size/options.
+			upd[slot] = driveVolumeString(d)
 			stop = true
-		}
-		if d.IOThread {
-			if pveStr(current[slot+".iothread"]) != "1" {
-				upd[slot+".iothread"] = "1"
-			}
 		}
 	}
 	// nics.
@@ -359,76 +356,132 @@ func vmScsiHW(disks []Disk) string {
 	return ""
 }
 
-// memKiB returns PVE memory in KiB (int64).
-func memKiB(human string) int64 {
-	b, _ := MemoryKiB(human)
+// memMiB returns PVE memory in MiB (int64). PVE's create-time `memory` and
+// LXC's `memory`/`swap` fields are integer megabyte counts ("in MiB" per
+// qm.conf / "in MB" per pct.conf): 1GiB → 1024.
+func memMiB(human string) int64 {
+	b, _ := MemoryMiB(human)
 	return b
 }
 
-// diskVolumeString builds PVE's create-time disk device value in the
-// <pool>:<size> form (e.g. "local-lvm:8G"). PVE allocates a new volume with
-// that size on the pool; we do not own the volume name. This is the form
-// PVE's /qemu create API accepts. PVE's config *report* uses a different
-// form ("<pool>:vmid-vol-id" after volume allocation), and Drift's
-// comparison below normalizes to (pool, size-bytes) so both forms diff
-// correctly.
+// diskVolumeString builds PVE's create-time disk device value as
+// "<pool>:<size-in-GiB>" (e.g. "local-lvm:8"). The number after the storage
+// id is GiB, not bytes: PVE's LVM/LVM-thin "allocate volume of this size"
+// path multiplies by 10^30 (confirmed on PVE 9.2 — sending 8589934592
+// produced "Volume too large (8.00 EiB)"; sending 1 allocated a 1073741824-
+// byte thin volume). Fractional GiB is accepted ("0.5" → a 512 MiB volume),
+// matching PVE's web UI which exposes a 3-decimal "Disk size (GiB)" field.
+// Other storage backends (dir, cifs) use different volume grammars, but the
+// GiB number is the common allocation form PVE's storage plugins understand
+// at create time. PVE rewrites the field after allocate to
+// "<pool>:vm-<vmid>-disk-<n>,size=<binary-suffix>", which is why Drift
+// compares on pool + size — see splitDiskOwned.
 func diskVolumeString(d Disk, slot string) string {
 	_ = slot
-	return fmt.Sprintf("%s:%s", d.Storage, FormatDiskBytes(diskBytes(d.Size)))
+	return fmt.Sprintf("%s:%s", d.Storage, GiBString(diskBytes(d.Size)))
 }
 
+// driveVolumeString renders the full PVE QEMU drive property string used by
+// the create endpoint: "<pool>:<GiB>[,iothread=1]". PVE's create schema
+// rejects a separate "<slot>.iothread=1" sibling parameter
+// ("property is not defined in schema and the schema does not allow
+// additional properties") — iothread is owned by the drive string itself
+// (qm.conf documents scsi[n] with the inline option list that includes
+// `iothread=`), and PVE's post-create /config report embeds it in the same
+// string ("local-lvm:vm-9100-disk-0,iothread=1,size=8G").
+func driveVolumeString(d Disk) string {
+	s := diskVolumeString(d, d.Slot)
+	if d.IOThread {
+		s += ",iothread=1"
+	}
+	return s
+}
 func diskBytes(human string) int64 {
 	b, _ := DiskBytes(human)
 	return b
 }
 
-// diskMatches reports whether a PVE-reported disk value matches the desired.
-// PVE reports current as "pool:volume-name,size=<bytes>" (the volume name is
-// PVE-assigned and not owned), and desired as "pool,size=<bytes>". We compare
-// only the owned pieces: pool and size (in bytes).
-func diskMatches(cur, want string) bool {
-	cPool, cSize := splitDiskOwned(cur)
-	wPool, wSize := splitDiskOwned(want)
-	if cPool != wPool {
-		return false
-	}
-	if cSize == 0 || wSize == 0 {
-		return true // either side had no size token; treat as compatible
-	}
-	return cSize == wSize
+// pveDiskInfo is the owned-field view of a PVE QEMU drive property string.
+// Both sides are parsed from the same grammar:
+//
+//	create/report: "local-lvm:vm-9100-disk-0,iothread=1,size=8G"
+//	our desired:   "local-lvm:8,iothread=1"
+//
+// Fields we own and compare: pool (volume id), size (bytes), iothread.
+type pveDiskInfo struct {
+	pool      string
+	sizeBytes int64
+	sizeSet   bool
+	iothread  bool
 }
 
-// splitDiskOwned extracts (pool, sizeBytes) from a PVE disk string.
-func splitDiskOwned(s string) (string, int64) {
-	// "pool:volume,size=123456" or "pool,size=123456"
-	parts := strings.SplitN(s, ",", 2)
-	head := parts[0]
-	pool := head
-	// strip the "pool:vol" part to just the pool.
-	if i := strings.Index(head, ":"); i >= 0 {
-		pool = head[:i]
+// pveDiskInfo parses a PVE QEMU drive property string into (pool, size,
+// iothread). The pool is the token before the first ':'; options are the
+// comma-separated k=v (or bare-flag) tokens after it. PVE reports `size` in
+// binary suffix form ("8G", "512M"); our desired form embeds the volume-size
+// number right after the pool in GiB — both parse to the same bytes.
+func parseDiskInfo(s string) pveDiskInfo {
+	out := pveDiskInfo{}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return out
 	}
-	var size int64
-	if len(parts) == 2 {
-		rest := parts[1]
-		if j := strings.Index(rest, "size="); j >= 0 {
-			sizeTok := rest[j+len("size="):]
-			// cut at any further comma.
-			if c := strings.Index(sizeTok, ","); c >= 0 {
-				sizeTok = sizeTok[:c]
+	if ci := strings.IndexByte(s, ':'); ci > 0 {
+		out.pool = s[:ci]
+		rest := s[ci+1:]
+		// Split the rest on commas; the first token may be either a
+		// volume name ("vm-9100-disk-0") or a size number ("8", "0.5").
+		toks := strings.Split(rest, ",")
+		for i, t := range toks {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				continue
 			}
-			v, err := strconv.ParseInt(sizeTok, 10, 64)
-			if err != nil {
-				// PVE sometimes reports "50G" — parse with binary suffix.
-				if b, ok := pveDiskSizeBytes(sizeTok); ok {
-					size = b
+			if eq := strings.IndexByte(t, '='); eq > 0 {
+				k, v := t[:eq], t[eq+1:]
+				switch k {
+				case "size":
+					if b, ok := pveDiskSizeBytes(v); ok {
+						out.sizeBytes, out.sizeSet = b, true
+					}
+				case "iothread":
+					out.iothread = v == "1" || v == "on" || v == "true"
 				}
-			} else {
-				size = v
+				continue
+			}
+			if i == 0 && !strings.Contains(t, "=") {
+				// Bare first token: "local-lvm:8" create form (volume-size
+				// number in GiB) or "local-lvm:vm-...-disk-0" report form.
+				if f, err := strconv.ParseFloat(t, 64); err == nil && f > 0 {
+					out.sizeBytes = int64(f * float64(int64(1)<<30))
+					out.sizeSet = true
+					continue
+				}
+				// Treat as the PVE-assigned volume name → not owned.
+				continue
 			}
 		}
 	}
-	return pool, size
+	return out
+}
+
+// diskMatches reports whether two PVE drive property strings agree on the
+// owned pieces (pool, size, iothread). a is the PVE-side (current) report;
+// b is our desired state. A CURRENT report that omits its size token (LXC
+// rootfs/mp reports; cdrom/none media; pre-allocate) is treated as
+// compatible — PVE simply is not telling us a number to compare against —
+// so idempotent re-runs stay quiet.
+func diskMatches(a, b pveDiskInfo) bool {
+	if a.pool != b.pool {
+		return false
+	}
+	if a.iothread != b.iothread {
+		return false
+	}
+	if !a.sizeSet {
+		return true
+	}
+	return b.sizeSet && a.sizeBytes == b.sizeBytes
 }
 
 // nicString builds PVE's "net0" value string. Two forms:

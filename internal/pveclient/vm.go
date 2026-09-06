@@ -98,15 +98,18 @@ func (vm *VM) Status(ctx context.Context, node string, vmid int) (VMStatus, erro
 	return out, nil
 }
 
-// Delete removes a stopped VM (POST /qemu/{v}/vmdelete). PVE uses POST, not the
-// DELETE verb, for VM removal. The VM must be stopped; PVE refuses otherwise.
+// Delete removes a stopped VM. PVE 9.x exposes VM destruction as REST
+// DELETE /nodes/{n}/qemu/{v} — the legacy POST /qemu/{v}/vmdelete endpoint
+// is "not implemented" in PVE 9.2. The VM must already be stopped; the
+// executor performs a pre-delete stop (PVE refuses to destroy a running
+// object; we never send "force").
 func (vm *VM) Delete(ctx context.Context, node string, vmid int) (string, error) {
-	return vm.c.Do(ctx, http.MethodPost, node, vmBase(node, vmid)+"/vmdelete", nil, nil)
+	return vm.c.Do(ctx, http.MethodDelete, node, vmBase(node, vmid), nil, nil)
 }
 
-// Resize adjusts online RAM in KiB (POST /qemu/{v}/resize). Synchronous on PVE;
-// returns an empty upID.
-func (vm *VM) Resize(ctx context.Context, node string, vmid int, memoryKib int64) (string, error) {
-	p := url.Values{"memory": {strconv.FormatInt(memoryKib, 10)}}
+// Resize adjusts online RAM in MiB (POST /qemu/{v}/resize) — the same unit as
+// PVE's static `memory` config field. Synchronous on PVE; returns an empty upID.
+func (vm *VM) Resize(ctx context.Context, node string, vmid int, memoryMib int64) (string, error) {
+	p := url.Values{"memory": {strconv.FormatInt(memoryMib, 10)}}
 	return vm.c.Do(ctx, http.MethodPost, node, vmBase(node, vmid)+"/resize", p, nil)
 }

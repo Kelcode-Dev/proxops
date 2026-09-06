@@ -121,7 +121,7 @@ func (l *LXC) Validate() error {
 	if l.Spec.Memory == "" {
 		return fmt.Errorf("%s: spec.memory must be set (e.g. 2GiB)", l.Ref())
 	}
-	if _, err := MemoryKiB(l.Spec.Memory); err != nil {
+	if _, err := MemoryMiB(l.Spec.Memory); err != nil {
 		return fmt.Errorf("%s: spec.memory: %w", l.Ref(), err)
 	}
 	if l.Spec.Root.Storage == "" {
@@ -160,16 +160,19 @@ func (l *LXC) ToCreateParams() (map[string]any, error) {
 		"vmid":   l.Spec.VMID,
 		"name":   l.pveName(),
 		"cores":  l.Spec.CPU.Cores,
-		"memory": memKiB(l.Spec.Memory),
+		"memory": memMiB(l.Spec.Memory),
 		"tags":   strings.Join(l.allTags(), ","),
 		"start":  "0",
 	}
 	if l.Spec.PveDescription != "" {
 		p["description"] = l.Spec.PveDescription
 	}
-	// Rootfs: "storage/size".
-	rootSize := FormatDiskBytes(diskBytes(l.Spec.Root.Size))
-	p["rootfs"] = fmt.Sprintf("%s:%s", l.Spec.Root.Storage, rootSize)
+	// Rootfs: PVE's documented LXC create-time allocation form is
+	// "STORAGE_ID:SIZE_IN_GiB" (pct.conf(5)); a bare number after the
+	// storage id is read as GiB by PVE's storage plugins — the same unit as
+	// the QEMU `scsiN` create-time volume spec (empirically verified on PVE
+	// 9.2: local-lvm:8589934592 → "Volume too large (8.00 EiB)").
+	p["rootfs"] = fmt.Sprintf("%s:%s", l.Spec.Root.Storage, GiBString(diskBytes(l.Spec.Root.Size)))
 	if l.Spec.OS != "" {
 		p["os"] = l.Spec.OS
 	}
@@ -177,7 +180,9 @@ func (l *LXC) ToCreateParams() (map[string]any, error) {
 		p["arch"] = l.Spec.Arch
 	}
 	if l.Spec.Swap != "" {
-		p["swap"] = memKiB(l.Spec.Swap)
+		if mi, err := MemoryMiB(l.Spec.Swap); err == nil {
+			p["swap"] = mi
+		}
 	}
 	// Network: PVE uses "net0: veth[,hwaddr=...],bridge=...,tag=..." (see
 	// lxcNetString for the device-type/empty-MAC semantics).
@@ -282,8 +287,8 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 		upd["cores"] = l.Spec.CPU.Cores
 		stop = true
 	}
-	// memory
-	if want, err := MemoryKiB(l.Spec.Memory); err == nil && pveInt(current["memory"]) != int(want) {
+	// memory: PVE's LXC /config stores an integer MiB count (pct.conf: "in MB").
+	if want, err := MemoryMiB(l.Spec.Memory); err == nil && pveInt(current["memory"]) != int(want) {
 		upd["memory"] = want
 		stop = true
 	}
@@ -291,9 +296,12 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	if !tagsEqual(current["tags"], l.allTags()) {
 		upd["tags"] = strings.Join(l.allTags(), ",")
 	}
-	// rootfs: PVE reports it as "storage/volid"; we don't own the volid.
-	if wantRoot := fmt.Sprintf("%s:", l.Spec.Root.Storage); pveStr(current["rootfs"]) != "" && !strings.HasPrefix(pveStr(current["rootfs"]), l.Spec.Root.Storage+":") {
-		upd["rootfs"] = wantRoot
+	// rootfs: PVE's /config report is "<pool>:<volid>[,...],size=<binary>" —
+	// the container volume id is PVE-assigned (not owned). We own pool and
+	// size; pveDiskInfo compares on those, ignoring the volume name.
+	wantRoot := parseDiskInfo(fmt.Sprintf("%s:%s", l.Spec.Root.Storage, GiBString(diskBytes(l.Spec.Root.Size))))
+	if !diskMatches(parseDiskInfo(pveStr(current["rootfs"])), wantRoot) {
+		upd["rootfs"] = fmt.Sprintf("%s:%s", l.Spec.Root.Storage, GiBString(diskBytes(l.Spec.Root.Size)))
 		stop = true
 	}
 	// nics — compare owned fields (model, hwaddr, bridge, tag).

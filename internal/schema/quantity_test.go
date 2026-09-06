@@ -40,24 +40,52 @@ func TestParseBytesInvalid(t *testing.T) {
 	}
 }
 
-func TestMemoryKiB(t *testing.T) {
+// TestMemoryMiB — PVE's memory wire unit is MiB (qm.conf(5): "in MiB"),
+// verified live on PVE 9.2: memory=100 → stored/reported as 100.
+func TestMemoryMiB(t *testing.T) {
+	// Note: PVE's PVM memory is an integer MiB count; manifests are expected
+	// to use binary ("32MiB"), which is also what PVE's own UI fields imply.
 	cases := map[string]int64{
-		"8GiB":   8 * 1024 * 1024, // 8 GiB in KiB
-		"1MiB":   1024,
-		"512KiB": 512,
+		"8GiB":   8192, // 8 GiB in MiB
+		"1GiB":   1024,
+		"1MiB":   1,
+		"512MiB": 512,
+		"32MiB":  32,
 	}
 	for in, want := range cases {
-		got, err := MemoryKiB(in)
+		got, err := MemoryMiB(in)
 		if err != nil {
-			t.Errorf("MemoryKiB(%q): %v", in, err)
+			t.Errorf("MemoryMiB(%q): %v", in, err)
 			continue
 		}
 		if got != want {
-			t.Errorf("MemoryKiB(%q) = %d KiB, want %d", in, got, want)
+			t.Errorf("MemoryMiB(%q) = %d MiB, want %d", in, got, want)
 		}
 	}
-	if _, err := MemoryKiB("1K"); err == nil {
-		t.Error("MemoryKiB(1K) should fail (1000 not a multiple of 1024)")
+	if _, err := MemoryMiB("1"); err == nil {
+		t.Error("MemoryMiB(1) should fail (1 byte is not a whole MiB)")
+	}
+}
+
+// TestGiBString — PVE's disk volume size number is GiB (verified live:
+// local-lvm:1 → 1073741824-byte LV; local-lvm:0.5 → 512 MiB LV;
+// local-lvm:8589934592 → "Volume too large (8.00 EiB)").
+func TestGiBString(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{in: "8GiB", want: "8"},
+		{in: "50GiB", want: "50"},
+		{in: "1GiB", want: "1"},
+		{in: "512MiB", want: "0.5"},
+		{in: "1536MiB", want: "1.5"},
+	}
+	for _, c := range cases {
+		b, err := ParseBytes(c.in)
+		if err != nil {
+			t.Fatalf("ParseBytes(%q): %v", c.in, err)
+		}
+		if got := GiBString(b); got != c.want {
+			t.Errorf("GiBString(%s) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

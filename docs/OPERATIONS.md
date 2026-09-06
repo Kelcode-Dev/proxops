@@ -151,8 +151,9 @@ mode (`run`) the loop tolerates cycle aborts and keeps ticking; check the
 
 ### Idempotency by construction
 
-Because `Drift` compares desired vs live by PVE-wire fields (memory in KiB,
-disk size in bytes, NIC model+bridge+MAC, controller+size for disks), you
+Because `Drift` compares desired vs live by PVE-wire fields (memory in MiB,
+disk size in PVE binary-suffix units, NIC model+bridge (auto Mac ignored),
+scsihw + iothread + pool + size for disks), you
 should **never** have to `pveconform apply` twice in a row: the second cycle
 produces a zero-action plan for a converged cluster. Any non-empty plan is
 drift, not state-machine confusion.

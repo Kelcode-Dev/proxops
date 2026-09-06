@@ -435,7 +435,10 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 			writeOK(w, out)
 			return
 		}
-		if r.Method == http.MethodDelete && kindStr == "lxc" {
+		// PVE 9.x: DELETE /nodes/{n}/qemu/{id} and DELETE /nodes/{n}/lxc/{id}
+		// both perform the destroy (the old POST /qemu/{id}/vmdelete and POST
+		// /lxc/{id}/ctdestroy endpoints are "not implemented" in PVE 9.2).
+		if r.Method == http.MethodDelete {
 			s.delete(w, r, node, id)
 			return
 		}

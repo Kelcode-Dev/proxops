@@ -8,20 +8,54 @@ import (
 
 // Human size parsing for manifest fields.
 //
-// PVE wire units: memory is KiB (int); disk size is bytes.
-// Manifests use human-friendly units ("8GiB", "50GiB"); this package
-// converts to PVE wire units at the schema boundary.
+// PVE 9.2 wire units (empirically verified on conformance-dev and against
+// PVE's own qm.conf(5)/pct.conf(5)): memory is an integer MiB count; disk /
+// container volume sizes are expressed in GiB. Manifests use friendly units
+// ("8GiB", "50GiB"); this package converts to PVE wire units at the schema
+// boundary.
 
-// MemoryKiB converts a human quantity ("8GiB") to PVE memory KiB.
-func MemoryKiB(q string) (int64, error) {
+// MemoryMiB converts a human quantity ("8GiB") to PVE memory in MiB.
+//
+// PVE's create-time `memory` (QEMU) and `memory`/`swap` (LXC) fields are
+// integer megabyte counts: `memory=100` is stored and reported as `100`.
+// qm.conf documents QEMU memory "in MiB"; pct.conf documents LXC memory/swap
+// "in MB". Sending KiB would be off by 1024× (1GiB would become ~1TiB).
+func MemoryMiB(q string) (int64, error) {
 	b, err := ParseBytes(q)
 	if err != nil {
 		return 0, err
 	}
-	if b%1024 != 0 {
-		return 0, fmt.Errorf("memory %q is not a whole number of KiB", q)
+	const mib = int64(1) << 20
+	if b%mib != 0 {
+		return 0, fmt.Errorf("memory %q is not a whole number of MiB", q)
 	}
-	return b / 1024, nil
+	return b / mib, nil
+}
+
+// GiBString renders a byte count as the PVE volume-size number in GiB:
+//
+//	8589934592 bytes (8 GiB)  → "8"
+//	536870912  bytes (512 MiB) → "0.5"
+//	9126817280 bytes (8.5 GiB) → "8.5"
+//
+// PVE's LVM/LVM-thin VM disk spec (`scsi0=local-lvm:8`) and LXC container
+// rootfs/mount-point spec (`rootfs=local-lvm:8`, documented as
+// "STORAGE_ID:SIZE_IN_GiB") both read the number after the storage id as GiB,
+// and accept fractional values (the web UI uses a 3-decimal GiB field). A bare
+// byte count is misread as GiB — the original defect that produced
+// "Volume too large (8.00 EiB)" for `local-lvm:8589934592`.
+func GiBString(b int64) string {
+	if b < 0 {
+		b = 0
+	}
+	const gib = int64(1) << 30
+	whole := b / gib
+	if b%gib == 0 {
+		return strconv.FormatInt(whole, 10)
+	}
+	// Fractional GiB: use the shortest round-tripping decimal. b is always
+	// well below 2^53 bytes for any realistic disk, so float64 is exact.
+	return strconv.FormatFloat(float64(b)/float64(gib), 'f', -1, 64)
 }
 
 // ParseBytes parses a quantity string to bytes.

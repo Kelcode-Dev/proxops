@@ -62,9 +62,10 @@ func TestTalosSampleToCreateParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToCreateParams: %v", err)
 	}
-	// PVE wire units.
-	if p["memory"] != "8192M" && p["memory"] != int64(8*1024*1024) && p["memory"] != "8388608K" {
-		t.Errorf("memory = %T %v — expected 8GiB in PVE units", p["memory"], p["memory"])
+	// PVE wire units: memory is an integer MiB count (qm.conf(5): "in MiB",
+	// verified live on PVE 9.2). 8GiB → 8192.
+	if p["memory"] != int64(8*1024) {
+		t.Errorf("memory = %T %v, want int64(%d) — PVE MiB form", p["memory"], p["memory"], 8*1024)
 	}
 	if p["cpu"] != "host" {
 		t.Errorf("cpu = %v", p["cpu"])
@@ -84,16 +85,13 @@ func TestTalosSampleToCreateParams(t *testing.T) {
 	if !strings.Contains(tags, "pveconform") {
 		t.Errorf("tags missing pveconform: %q", tags)
 	}
-	// scsi0: PVE create-time volume spec "<pool>:<size>"; PVE allocates the
-	// volume name. NOT a config-report form ("pool:vmid-volid,size=...") and
-	// NOT the declarative "pool,size=<bytes>" either — those would fail
-	// PVE's "Parameter verification".
+	// scsi0: PVE 9.2 LVM/LVM-thin create-time wire form is
+	// "<pool>:<size-GiB>" with options inline. PVE reads the bare number in
+	// GiB (verified live: local-lvm:8589934592 → "Volume too large (8.00
+	// EiB)"; local-lvm:1 → a 1 GiB LV). 50GiB → "vm_disks:50".
 	disk, _ := p["scsi0"].(string)
-	if disk != "vm_disks:50G" {
-		t.Errorf("scsi0 = %q, want vm_disks:50G (PVE create-time volume spec)", disk)
-	}
-	if !strings.HasSuffix(disk, ":50G") || !strings.HasPrefix(disk, "vm_disks:") {
-		t.Errorf("scsi0 = %q, not in PVE volume-spec form", disk)
+	if disk != "vm_disks:50,iothread=1" {
+		t.Errorf("scsi0 = %q, want vm_disks:50,iothread=1 (pool:<GiB>, iothread inline)", disk)
 	}
 	// nicString: with an unpinned (empty) MAC, PVE expects "virtio,bridge=..."
 	// — NOT "virtio=,bridge=..." (empty key after '=' trips PVE's
@@ -109,13 +107,16 @@ func TestTalosSampleToCreateParams(t *testing.T) {
 	if p["scsihw"] != "virtio-scsi-single" {
 		t.Errorf("scsihw = %v, want virtio-scsi-single", p["scsihw"])
 	}
-	// iothread set on scsi0.
-	if p["scsi0.iothread"] != "1" {
-		t.Errorf("scsi0.iothread = %v, want 1", p["scsi0.iothread"])
+	// iothread is INLINE in the drive string, NOT a sibling "<slot>.iothread"
+	// key: PVE's create schema rejects the sibling form with "property is
+	// not defined in schema and the schema does not allow additional
+	// properties".
+	if _, ok := p["scsi0.iothread"]; ok {
+		t.Errorf("scsi0.iothread = %v — iothread must be inline in scsi0, not a sibling key", p["scsi0.iothread"])
 	}
-	// Memory normalization: 8GiB → 8388608 KiB (int64), as PVE's wire form.
-	if p["memory"] != int64(8*1024*1024) {
-		t.Errorf("memory = %T %v, want int64(8388608) — PVE wire form is KiB", p["memory"], p["memory"])
+	// Memory normalization: 8GiB → 8192 MiB (int64), as PVE's wire form.
+	if p["memory"] != int64(8*1024) {
+		t.Errorf("memory = %T %v, want int64(8192) — PVE wire form is MiB", p["memory"], p["memory"])
 	}
 }
 
@@ -143,17 +144,17 @@ func TestTalosSampleCreateExactValues(t *testing.T) {
 		t.Fatalf("ToCreateParams: %v", err)
 	}
 
-	if got, want := p["scsi0"].(string), "local-lvm:8G"; got != want {
-		t.Errorf("scsi0 on LVM-thin = %q, want %q", got, want)
+	if got, want := p["scsi0"].(string), "local-lvm:8,iothread=1"; got != want {
+		t.Errorf("scsi0 on LVM-thin = %q, want %q (pool:<GiB>, iothread inline — NOT bytes, NOT 8G)", got, want)
 	}
-	if got := p["scsi0.iothread"]; got != "1" {
-		t.Errorf("scsi0.iothread = %T %v, want \"1\" (iothread=true pinned in wire form)", got, got)
+	if got := p["scsi0.iothread"]; got != nil {
+		t.Errorf("scsi0.iothread = %T %v, want absent (iothread belongs inline in the drive string; PVE rejects the sibling key)", got, got)
 	}
 	if got, want := p["net0"].(string), "virtio,bridge=vmbr2,firewall=0"; got != want {
 		t.Errorf("net0 = %q, want %q (virtio NIC + bridge, no =<empty-MAC>)", got, want)
 	}
-	if got, want := p["memory"], int64(1024*1024); got != want {
-		t.Errorf("memory = %T %v, want int64(1048576) — GiB normalized to KiB int", got, got)
+	if got, want := p["memory"], int64(1024); got != want {
+		t.Errorf("memory = %T %v, want int64(1024) — GiB normalized to PVE MiB int", got, got)
 	}
 	// Bonus: cpu type + cores round-trip as expected.
 	if got := p["cpu"]; got != "kvm64" {
@@ -163,26 +164,25 @@ func TestTalosSampleCreateExactValues(t *testing.T) {
 		t.Errorf("cores = %T %v, want 1", got, got)
 	}
 
-	// Drift side: PVE's config report uses "pool:vmid-vol-id,size=<bytes>";
-	// our create wire form is "pool:<size>". diskMatches normalizes both to
-	// (pool, size-bytes) so a freshly-created VM does NOT drift back.
-	// (8 GiB = 8589934592 bytes, 1 GiB mem = 1048576 KiB.)
-	desiredDisk8G := int64(8 * 1024 * 1024 * 1024)
-	_ = desiredDisk8G
+	// Drift side: PVE's LVM disk config report is
+	// "pool:vmid-volname,iothread=1,size=<binary>" (PVE-assigned volume name,
+	// binary-suffix size, iothread inline in the drive string). Our
+	// create-time wire form "pool:<GiB>[,iothread=1]" normalizes to the same
+	// owned (pool, size-bytes, iothread) triple, so a freshly-created VM
+	// reports no drift.
 	current := map[string]any{
-		"vmid":           int64(142),
-		"name":           "x",
-		"cpu":            "kvm64",
-		"cores":          1,
-		"memory":         int64(1024 * 1024),
-		"scsihw":         "virtio-scsi",
-		"scsi0":          "local-lvm:vm-142-disk-0,size=8589934592",
-		"scsi0.iothread": "1",
-		"net0":           "virtio=52:54:00:aa:bb:cc,bridge=vmbr2",
-		"tags":           []any{"pveconform"},
+		"vmid":   int64(142),
+		"name":   "x",
+		"cpu":    "kvm64",
+		"cores":  1,
+		"memory": 1024, // PVE MiB count
+		"scsihw": "virtio-scsi",
+		"scsi0":  "local-lvm:vm-142-disk-0,iothread=1,size=8G",
+		"net0":   "virtio=52:54:00:aa:bb:cc,bridge=vmbr2",
+		"tags":   []any{"pveconform"},
 	}
-	if _, _, changed := v.Drift(current); changed {
-		t.Errorf("Drift against a just-created VM reported change; wire form <-> PVE report shape mismatch")
+	if upd, stop, changed := v.Drift(current); changed {
+		t.Errorf("Drift against PVE's LVM disk report reported a change: upd=%v stop=%v — size/shape mismatch", upd, stop)
 	}
 }
 
@@ -194,15 +194,14 @@ func TestDriftNoChange(t *testing.T) {
 	// PVE-native spellings: tags is a JSON array, memory a number, disks a
 	// "pool:vol,size=<bytes>" string.
 	current := map[string]any{
-		"cpu":            "host",
-		"cores":          4,
-		"memory":         8388608,
-		"tags":           []any{"pveconform"},
-		"name":           "talos-worker-01",
-		"scsi0":          "vm_disks:vm-142-disk-0,size=53687091200",
-		"scsi0.iothread": "1",
-		"scsihw":         "virtio-scsi-single",
-		"net0":           "virtio=52:54:00:aa:bb:cc,bridge=vmbr2,firewall=0",
+		"cpu":    "host",
+		"cores":  4,
+		"memory": 8192, // PVE MiB count (8GiB)
+		"tags":   []any{"pveconform"},
+		"name":   "talos-worker-01",
+		"scsi0":  "vm_disks:vm-142-disk-0,iothread=1,size=50G",
+		"scsihw": "virtio-scsi-single",
+		"net0":   "virtio=52:54:00:aa:bb:cc,bridge=vmbr2,firewall=0",
 	}
 	upd, stop, changed := v.Drift(current)
 	if changed {
@@ -217,9 +216,9 @@ func TestDriftMemoryChange(t *testing.T) {
 	current := map[string]any{
 		"cpu":    "host",
 		"cores":  "4",
-		"memory": "16777216", // 16 GiB in KiB
+		"memory": "16384", // 16 GiB in PVE MiB
 		"tags":   "pveconform",
-		"scsi0":  "vm_disks:0,size=53687091200",
+		"scsi0":  "vm_disks:0,size=50G",
 		"net0":   "virtio=,bridge=vmbr2,firewall=0",
 	}
 	upd, stop, changed := v.Drift(current)

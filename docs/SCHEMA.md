@@ -60,7 +60,7 @@ converge on a later cycle.
 | `spec.node` | yes | — | Proxmox node hosting the VM. |
 | `spec.vmid` | yes | `vmid` | PVE VM ID. Pinned; PVE's per-node id space is one integer pool shared across all object kinds. |
 | `spec.state` | no (default `started`) | power | `started` \| `stopped`. Drift reconciles power. |
-| `spec.memory` | yes | `memory` (KiB) | e.g. `8GiB`, `512MiB`, `4096`. Must be a whole number of KiB. |
+| `spec.memory` | yes | `memory` (MiB) | e.g. `8GiB`, `512MiB`, `4096`. Must be a whole number of MiB; PVE stores it as an integer MiB count. |
 | `spec.cpu.type` | yes | `cpu` | `host`, `kvm64`, `x86-64-v2-Aes`… |
 | `spec.cpu.cores` | yes | `sockets`? no — plain cores | PVE `cores` int (sockets=1 in MVP). |
 | `spec.disks` | ≥1 | one `sdX`/`scsiX` per entry | Ordered list; see Disk. |
@@ -109,12 +109,12 @@ Same envelope. Spec:
 | `spec.node` | yes | — | PVE node. |
 | `spec.vmid` | yes | `ctid` | PVE CT ID (shared integer pool with VMs). |
 | `spec.state` | no (default `started`) | power | `started` \| `stopped`. |
-| `spec.memory` | yes | `memory` | KiB. |
-| `spec.swap` | no | `swap` | KiB. |
+| `spec.memory` | yes | `memory` | MiB (PVE documents this as MB). |
+| `spec.swap` | no | `swap` | MiB (PVE documents this as MB). |
 | `spec.cpu.cores` | yes | `cores` | PVE `cores` int. |
 | `spec.cpu.units` | no | `cpulimit` | PVE CPU limit in percentage points (optional; 0 = unset). |
 | `spec.root.storage` | yes | `rootfs` | PVE storage id. |
-| `spec.root.size` | yes | `size` in `rootfs` | Human bytes. |
+| `spec.root.size` | yes | `size` in `rootfs` | GiB in PVE's create-time `STORAGE_ID:SIZE_IN_GiB` form. |
 | `spec.networks` | ≥1 | one `netN` per entry | Model, bridge, `hwaddr`, `tag`. |
 | `spec.os` | no | `ostype` | PVE ostype hint. |
 | `spec.arch` | no | `arch` | PVE arch (`i386`, `x86_64`). |
