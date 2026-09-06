@@ -129,29 +129,14 @@ func buildAgent(gf *globalFlags, log *slog.Logger, persistent, local *pflag.Flag
 	applyFlag("git-path", func() { cfg.Git.Path = gf.gitPath })
 	applyFlag("ca-file", func() { cfg.PVE.CAFile = gf.caFile })
 
-	// Env overlays credentials (highest precedence for secrets).
-	overlayEnv(cfg)
+	// Env overlays credentials (highest precedence for secrets), via the
+	// single config.OverlayFromEnv path.
+	config.OverlayFromEnv(cfg)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return app.New(cfg, log, metrics.Register(), version)
-}
-
-// overlayEnv mirrors the config package's env overlay for testability.
-func overlayEnv(cfg *config.Config) {
-	if v := os.Getenv("PVECONFORM_PVE_TOKEN_VALUE"); v != "" {
-		cfg.PVE.TokenValue = v
-	}
-	if v := os.Getenv("PVECONFORM_PVE_TOKEN"); v != "" {
-		cfg.PVE.Token = v
-	}
-	if v := os.Getenv("PVECONFORM_PVE_PASSWORD"); v != "" {
-		cfg.PVE.Password = v
-	}
-	if v := os.Getenv("PVECONFORM_GIT_TOKEN"); v != "" {
-		cfg.Git.Token = v
-	}
 }
 
 // newRunCmd is the daemon mode: poll git and reconcile PVE continuously.

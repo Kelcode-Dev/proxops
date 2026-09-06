@@ -54,6 +54,24 @@ type PVEParams struct {
 	CAFile     string
 }
 
+// Credential composes the PVEAPI token credential from the user, token id,
+// and raw token value, OR returns the pre-composed TokenValue when present.
+// Empty user / token id / token → empty string (caller MUST check for
+// empty and refuse the request, since PVE rejects unauthenticated calls).
+//
+// For ticket auth, Credential is unused (the ticket flow is
+// user+password, see auth.fetchTicket); this method only models the token
+// wire shape.
+func (p PVEParams) Credential() string {
+	if p.TokenValue != "" {
+		return p.TokenValue
+	}
+	if p.User == "" || p.TokenID == "" || p.Token == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s!%s=%s", p.User, p.TokenID, p.Token)
+}
+
 // Options configure a Client.
 type Options struct {
 	PVE              PVEParams

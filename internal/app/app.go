@@ -26,6 +26,26 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// PVEParamsFrom is the single wiring point from a validated config to the
+// pveclient.PVEParams. Factored out of New so the mapping can be unit-tested
+// without constructing a full Agent (which would trigger a git fetch).
+//
+// It is a pure copy with no defaults: defaults are config's job, and
+// pveclient.New applies its own fallbacks for empty Gateway/Port.
+func PVEParamsFrom(cfg *config.Config) pveclient.PVEParams {
+	return pveclient.PVEParams{
+		User:       cfg.PVE.User,
+		Auth:       string(cfg.PVE.Auth),
+		TokenID:    cfg.PVE.TokenID,
+		Token:      cfg.PVE.Token,
+		TokenValue: cfg.PVE.TokenValue,
+		Password:   cfg.PVE.Password,
+		Gateway:    cfg.PVE.Gateway,
+		Port:       cfg.PVE.Port,
+		CAFile:     cfg.PVE.CAFile,
+	}
+}
+
 // Agent is the long-running pveconform process.
 type Agent struct {
 	log      *slog.Logger
@@ -76,18 +96,7 @@ func New(cfg *config.Config, log *slog.Logger, registry *prometheus.Registry, ve
 	a := &Agent{log: log, cfg: cfg, registry: registry, version: version}
 
 	// PVE client
-	pveOpts := pveclient.Options{
-		PVE: pveclient.PVEParams{
-			User:       cfg.PVE.User,
-			Auth:       string(cfg.PVE.Auth),
-			Token:      cfg.PVE.Token,
-			TokenValue: cfg.PVE.TokenValue,
-			Password:   cfg.PVE.Password,
-			Gateway:    cfg.PVE.Gateway,
-			Port:       cfg.PVE.Port,
-			CAFile:     cfg.PVE.CAFile,
-		},
-	}
+	pveOpts := pveclient.Options{PVE: PVEParamsFrom(cfg)}
 	// NOTE: BaseURL is intentionally NOT set here — the agent addresses PVE
 	// by node name. Tests inject their own pveclient.
 	c, err := pveclient.New(pveOpts, log)

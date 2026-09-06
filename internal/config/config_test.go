@@ -90,6 +90,69 @@ reconcile:
 	}
 }
 
+// TestLoadExpandsTilde pins config.Load's "tilde expansion" for data-dir and
+// ca-file. Without it, `data-dir: ~/x` produces a literal ./x relative to
+// $PWD (a stale "./~" directory), which is exactly the bug that broke the
+// user's first `pveconform diff` run after the PVE-token fix.
+func TestLoadExpandsTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	y := []byte("data-dir: ~/" + "share/pveconform\npve:\n  ca-file: ~/pve/ca.pem\n")
+	f := filepath.Join(t.TempDir(), "tilde.yaml")
+	if err := os.WriteFile(f, y, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDataDir := filepath.Join(home, "share/pveconform")
+	if c.DataDir != wantDataDir {
+		t.Errorf("DataDir = %q, want %q", c.DataDir, wantDataDir)
+	}
+	wantCA := filepath.Join(home, "pve/ca.pem")
+	if c.PVE.CAFile != wantCA {
+		t.Errorf("PVE.CAFile = %q, want %q", c.PVE.CAFile, wantCA)
+	}
+
+	// Sanity check: when a user types "~" as a bare word, YAML parses
+	// it as null (not a string) and leaves the default in place. That's
+	// correct YAML behavior; we do not reinterpret null as a tilde
+	// expansion.
+	// (The expandTilde("~-") case would also not trigger, because that
+	// string is not a prefix; it would pass through unchanged.)
+	y2 := []byte("data-dir: '~'\n")
+	f2 := filepath.Join(t.TempDir(), "tilde2.yaml")
+	if err := os.WriteFile(f2, y2, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := Load(f2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The YAML single-quoted '~' is the 1-char string "~", which should
+	// expand to the home dir.
+	if c2.DataDir != home {
+		t.Errorf("DataDir = %q, want %q (tilde-only)", c2.DataDir, home)
+	}
+
+	// Non-tilde paths pass through unchanged.
+	y3 := []byte("data-dir: /var/lib/pveconform\n")
+	f3 := filepath.Join(t.TempDir(), "tilde3.yaml")
+	if err := os.WriteFile(f3, y3, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c3, err := Load(f3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.DataDir != "/var/lib/pveconform" {
+		t.Errorf("DataDir = %q, want /var/lib/pveconform", c3.DataDir)
+	}
+}
+
 func TestLoadEmptyPathReturnsDefaults(t *testing.T) {
 	c, err := Load("")
 	if err != nil {
@@ -206,7 +269,7 @@ func TestEnvOverrides(t *testing.T) {
 	c.PVE.User = "u@pve"
 	c.PVE.Token = "from-yaml"
 	c.Git.URL = "https://x"
-	applyEnv(c)
+	OverlayFromEnv(c)
 	if c.PVE.Token != "from-env" {
 		t.Errorf("token not overridden by env: %q", c.PVE.Token)
 	}

@@ -117,34 +117,47 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(b, c); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	// YAML is a plain string format; "~" at the start of a filesystem path
+	// must be expanded manually (go's os.UserHomeDir doesn't do this for us).
+	// Without this, `data-dir: ~/.local/share/pveconform` produces a stale
+	// `./~` directory under $PWD.
+	c.DataDir = expandTilde(c.DataDir)
+	c.PVE.CAFile = expandTilde(c.PVE.CAFile)
 	return c, nil
 }
 
-// applyEnv overlays selected environment variables.
-// Credentials come ONLY from the environment.
-func applyEnv(c *Config) {
+// OverlayFromEnv applies pveconform's credential-override env vars onto a
+// config. Called by the CLI AFTER flag overlays, so the precedence chain is:
+// defaults < YAML < flags < env.
+//
+// Semantics (highest precedence first, only when the env var is set
+// non-empty):
+//
+//	PVECONFORM_PVE_TOKEN_VALUE  -> PVE.TokenValue (overrides user+id+token)
+//	PVECONFORM_PVE_TOKEN        -> PVE.Token
+//	PVECONFORM_PVE_PASSWORD     -> PVE.Password
+//	PVECONFORM_PVE_USER         -> PVE.User
+//	PVECONFORM_GIT_TOKEN        -> Git.Token
+//
+// PVECONFORM_PVE_USER is deliberately honored as an override (not just a
+// fallback): the documented model is "the environment carries credentials,
+// the YAML carries non-secrets". An operator who set it in the env expects
+// it to reach the PVE client.
+func OverlayFromEnv(c *Config) {
+	if v := os.Getenv("PVECONFORM_PVE_TOKEN_VALUE"); v != "" {
+		c.PVE.TokenValue = v
+	}
 	if v := os.Getenv("PVECONFORM_PVE_TOKEN"); v != "" {
 		c.PVE.Token = v
-	}
-	if v := os.Getenv("PVECONFORM_PVE_TOKEN_VALUE"); v != "" {
-		c.PVE.TokenValue = v
-	}
-	if v := os.Getenv("PVECONFORM_PVE_TOKEN_VALUE"); v != "" {
-		c.PVE.TokenValue = v
 	}
 	if v := os.Getenv("PVECONFORM_PVE_PASSWORD"); v != "" {
 		c.PVE.Password = v
 	}
+	if v := os.Getenv("PVECONFORM_PVE_USER"); v != "" {
+		c.PVE.User = v
+	}
 	if v := os.Getenv("PVECONFORM_GIT_TOKEN"); v != "" {
 		c.Git.Token = v
-	}
-}
-
-// resolveUserEnv applies PVECONFORM_PVE_USER when set (convenience for
-// ticket-auth deployments that cannot store the user in config at all).
-func resolveUserEnv(c *Config) {
-	if v, ok := os.LookupEnv("PVECONFORM_PVE_USER"); ok {
-		c.PVE.User = v
 	}
 }
 
@@ -222,6 +235,28 @@ func (c *Config) GitCacheDir() string {
 
 // CAFileResolved returns the effective CA file path, or "" when none is set.
 func (c *Config) CAFileResolved() string { return c.PVE.CAFile }
+
+// expandTilde expands a leading "~" or "~/" to the user home directory.
+// This is the semantics POSIX shell tools (e.g. bash tilde expansion)
+// provide; YAML configs are plain strings, so we do it explicitly. Other
+// occurrences of "~" in the string are left alone.
+func expandTilde(p string) string {
+	if p == "" {
+		return p
+	}
+	if p == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+		return p
+	}
+	if strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
+}
 
 func defaultDataDir() string {
 	if home, err := os.UserHomeDir(); err == nil {
