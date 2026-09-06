@@ -182,8 +182,6 @@ func TestTicketAuthReachesWire(t *testing.T) {
 			User:     "root@pam",
 			Auth:     "ticket",
 			Password: "secret-pass",
-			Gateway:  "pve",
-			Port:     8006,
 		},
 		BaseURL:     srv.URL,
 		HTTPTimeout: srvTimeout(),
@@ -265,6 +263,46 @@ func TestNoCredentialInErrorText(t *testing.T) {
 }
 
 func srvTimeout() time.Duration { return 0 } // 0 → pveclient.New defaults to 30s
+
+// TestURLRoutesNodeNameThroughSingleHost — the exact property that broke
+// against conformance-dev: a PVE node name is NOT necessarily a resolvable
+// DNS hostname. The client must fix the host from base-url and put the
+// node name ONLY in the path.
+func TestURLRoutesNodeNameThroughSingleHost(t *testing.T) {
+	// A node name that is NOT a valid host (no DNS, no FQDN).
+	nonFQDNNode := "pve-dev-01"
+	// A cluster FQDN that IS the API endpoint.
+	fqdnBase := "https://pve-dev-01.example.invalid:8006"
+
+	c, err := pveclient.New(pveclient.Options{
+		PVE: pveclient.PVEParams{
+			Auth:    "token",
+			User:    "root@pam",
+			TokenID: "proxops",
+			Token:   "t0k",
+			BaseURL: fqdnBase,
+			Nodes:   []string{nonFQDNNode},
+		},
+		HTTPTimeout: 0,
+	}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A per-node path on a non-FQDN node must STILL hit the FQDN base.
+	got := c.URL(nonFQDNNode, "nodes/"+nonFQDNNode+"/qemu")
+	want := fqdnBase + "/api2/json/nodes/" + nonFQDNNode + "/qemu"
+	if got != want {
+		t.Fatalf("URL = %q, want %q\n(host must be the base-url, never the node name)", got, want)
+	}
+
+	// Cluster-wide paths also hit the FQDN base.
+	gotCw := c.URL("gateway", "cluster/resources")
+	wantCw := fqdnBase + "/api2/json/cluster/resources"
+	if gotCw != wantCw {
+		t.Errorf("cluster URL = %q, want %q", gotCw, wantCw)
+	}
+}
 
 // TestPVEParamsCredentialComposition — pin the composition rules for
 // PVEParams.Credential(): TokenValue wins when set; otherwise

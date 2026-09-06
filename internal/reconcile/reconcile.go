@@ -26,6 +26,7 @@ import (
 	"github.com/GizzmoShifu/proxmox-operator/internal/parse"
 	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
 	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
+	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
 	"github.com/GizzmoShifu/proxmox-operator/internal/statusx"
 )
 
@@ -46,7 +47,13 @@ type Reconciler struct {
 	Fetcher Fetcher
 	Budget  plan.Budget
 	Store   *statusx.Store
-	log     *slog.Logger
+	// NodeAllowlist, when non-empty, restricts which PVE node names the
+	// agent will reconcile against. A manifest whose spec.node is not in
+	// this list aborts the cycle (fail-closed) with a clear message.
+	// This is the runtime enforcement of the pve.nodes config item —
+	// config.Validate() checks the shape only.
+	NodeAllowlist []string
+	log           *slog.Logger
 
 	exec         *exec.Executor // nil ⇒ dry-run
 	lastGood     *parse.Index
@@ -56,12 +63,13 @@ type Reconciler struct {
 
 // Options configure a Reconciler.
 type Options struct {
-	PVE      *pveclient.Client
-	Fetcher  Fetcher
-	Store    *statusx.Store
-	Budget   plan.Budget
-	Executor *exec.Executor // nil = dry-run
-	Log      *slog.Logger
+	PVE           *pveclient.Client
+	Fetcher       Fetcher
+	Store         *statusx.Store
+	Budget        plan.Budget
+	Executor      *exec.Executor // nil = dry-run
+	NodeAllowlist []string
+	Log           *slog.Logger
 }
 
 // New builds a Reconciler.
@@ -76,12 +84,13 @@ func New(o Options) (*Reconciler, error) {
 		o.Log = slog.Default()
 	}
 	return &Reconciler{
-		PVE:     o.PVE,
-		Fetcher: o.Fetcher,
-		Budget:  o.Budget,
-		Store:   o.Store,
-		exec:    o.Executor,
-		log:     o.Log,
+		PVE:           o.PVE,
+		Fetcher:       o.Fetcher,
+		Budget:        o.Budget,
+		Store:         o.Store,
+		NodeAllowlist: o.NodeAllowlist,
+		exec:          o.Executor,
+		log:           o.Log,
 	}, nil
 }
 
@@ -156,6 +165,20 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 	}
 	r.lastGood = idx
 	r.lastCommit = res.Commit
+
+	// (2b) Node allowlist: a manifest referencing a spec.node that is not in
+	// pve.nodes (when set) is a mis-route risk — abort before any PVE call
+	// instead of failing later with confusing per-request errors.
+	if err := r.checkNodeAllowlist(idx.List()); err != nil {
+		res.Aborted = true
+		res.AbortReason = "unknown node: " + err.Error()
+		r.Store.FinishCycle(true, res.AbortReason)
+		metrics.CyclesTotal.WithLabelValues("unknown_node").Inc()
+		r.log.Error("manifest references a node outside pve.nodes; aborting cycle",
+			slog.String("err", err.Error()),
+			slog.String("commit", res.Commit))
+		return res, nil, nil
+	}
 
 	// (3) load live PVE inventory + ISO presence.
 	live, err := plan.LoadLive(ctx, r.PVE, idx.List())
@@ -257,3 +280,26 @@ func (r *Reconciler) LastCommit() string { return r.lastCommit }
 // DesiredStale reports whether the reconciler is operating on a cached tree
 // because git sync has been failing.
 func (r *Reconciler) DesiredStale() bool { return r.desiredStale }
+
+// checkNodeAllowlist rejects any manifest whose spec.node is not in
+// NodeAllowlist (when that slice is non-empty). ISOs and any kind with a
+// numeric PVE id are covered, because all of them carry a PVE node. Empty
+// allowlist = all nodes accepted (MVP default until operators pin a list).
+// Returns an error naming the first-offending (kind, name, node) triple.
+func (r *Reconciler) checkNodeAllowlist(resources []schema.Resource) error {
+	if len(r.NodeAllowlist) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(r.NodeAllowlist))
+	for _, n := range r.NodeAllowlist {
+		allowed[n] = true
+	}
+	for _, res := range resources {
+		node := res.Node()
+		if node != "" && !allowed[node] {
+			return fmt.Errorf("%s references node %q which is not in pve.nodes (allowed: %v)",
+				res.Ref().String(), node, r.NodeAllowlist)
+		}
+	}
+	return nil
+}

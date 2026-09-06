@@ -56,7 +56,17 @@ cycle aborts, last-good tree retained.
 
 ### pveclient — thin PVE JSON API client
 
-No third-party PVE library. Only what the reconciler actually calls:
+No third-party PVE library. Only what the reconciler actually calls.
+
+**One endpoint, all traffic.** PVE exposes its complete JSON API on every node,
+so the agent talks to a *single* base URL (`pve.base-url`, e.g.
+`https://pve-dev-01.example.invalid:8006`) for everything — cluster-wide reads
+(`/cluster/resources`, `/version`), ticket exchange (`/access/ticket`), and
+per-node object calls. The PVE node identity (e.g. `pve-dev-01`) appears **only
+in the request path** (`/nodes/pve-dev-01/...`), never in the host. This is what
+makes the agent work when a node name is not a resolvable DNS hostname (the
+conformance-dev case). `pve.nodes` is an optional allowlist of known node names
+used to validate `spec.node` in manifests; it is not a set of hosts to dial.
 
 - Auth: PVE API token (`Authorization: PVEAPIToken=user@realm!id=value`) —
   default; or username+password ticket exchange (`POST /access/ticket` →

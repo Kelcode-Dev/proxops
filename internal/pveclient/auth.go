@@ -35,12 +35,12 @@ type Auth struct {
 	tokenValue string // fully-composed user@realm!id=uuid
 	token      string // raw uuid; composed with user+tokenID
 	password   string
-	gateway    string
-	port       int
 
-	// apiBase returns the https base for a node (no trailing /api2/json),
-	// honoring the client's BaseURL override when set.
-	apiBase func(node string) string
+	// apiBase is the single PVE API base URL (no /api2/json), shared by
+	// every request — per-node calls and the ticket exchange alike. PVE
+	// exposes its entire API on each node, so one endpoint reaches every
+	// object on every node.
+	apiBase string
 
 	refreshAfter time.Duration
 
@@ -59,19 +59,12 @@ type authParams struct {
 	TokenValue string
 	Token      string
 	Password   string
-	Gateway    string
-	Port       int
 }
 
-func newAuth(p authParams, apiBase func(node string) string) *Auth {
-	if p.Gateway == "" {
-		p.Gateway = "pve"
-	}
+// newAuth builds an Auth bound to a single PVE API base URL.
+func newAuth(p authParams, apiBase string) *Auth {
 	if p.Method == "" {
 		p.Method = "token"
-	}
-	if apiBase == nil {
-		apiBase = func(node string) string { return node }
 	}
 	return &Auth{
 		method:       p.Method,
@@ -80,8 +73,6 @@ func newAuth(p authParams, apiBase func(node string) string) *Auth {
 		tokenValue:   p.TokenValue,
 		token:        p.Token,
 		password:     p.Password,
-		gateway:      p.Gateway,
-		port:         p.Port,
 		apiBase:      apiBase,
 		refreshAfter: ticketRefreshSafetyMargin,
 	}
@@ -90,17 +81,9 @@ func newAuth(p authParams, apiBase func(node string) string) *Auth {
 // Method returns the active auth method.
 func (a *Auth) Method() string { return a.method }
 
-// gatewayHost is the hostname:port the gateway is reached on.
-func (a *Auth) gatewayHost() string {
-	if a.port > 0 {
-		return fmt.Sprintf("%s:%d", a.gateway, a.port)
-	}
-	return a.gateway
-}
-
-// ticketEndpoint builds the /access/ticket URL via the client's base-URL logic.
+// ticketEndpoint builds the /access/ticket URL on the single base URL.
 func (a *Auth) ticketEndpoint() string {
-	return a.apiBase(a.gateway) + "/api2/json/access/ticket"
+	return a.apiBase + "/api2/json/access/ticket"
 }
 
 // tokenAuthValue composes the PVEAPIToken credential.

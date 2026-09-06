@@ -31,7 +31,8 @@ import (
 // without constructing a full Agent (which would trigger a git fetch).
 //
 // It is a pure copy with no defaults: defaults are config's job, and
-// pveclient.New applies its own fallbacks for empty Gateway/Port.
+// pveclient.New validates that a base URL is present (config.Validate
+// already rejects empty BaseURL in the CLI path).
 func PVEParamsFrom(cfg *config.Config) pveclient.PVEParams {
 	return pveclient.PVEParams{
 		User:       cfg.PVE.User,
@@ -40,8 +41,8 @@ func PVEParamsFrom(cfg *config.Config) pveclient.PVEParams {
 		Token:      cfg.PVE.Token,
 		TokenValue: cfg.PVE.TokenValue,
 		Password:   cfg.PVE.Password,
-		Gateway:    cfg.PVE.Gateway,
-		Port:       cfg.PVE.Port,
+		BaseURL:    cfg.PVE.BaseURL,
+		Nodes:      cfg.PVE.Nodes,
 		CAFile:     cfg.PVE.CAFile,
 	}
 }
@@ -95,10 +96,10 @@ func New(cfg *config.Config, log *slog.Logger, registry *prometheus.Registry, ve
 	}
 	a := &Agent{log: log, cfg: cfg, registry: registry, version: version}
 
-	// PVE client
+	// PVE client. The single base URL comes from PVE.BaseURL (set in config).
+	// Tests that need to point at the stateful mock PVE construct their own
+	// pveclient with Options.BaseURL.
 	pveOpts := pveclient.Options{PVE: PVEParamsFrom(cfg)}
-	// NOTE: BaseURL is intentionally NOT set here — the agent addresses PVE
-	// by node name. Tests inject their own pveclient.
 	c, err := pveclient.New(pveOpts, log)
 	if err != nil {
 		return nil, fmt.Errorf("pveclient: %w", err)
@@ -128,12 +129,13 @@ func New(cfg *config.Config, log *slog.Logger, registry *prometheus.Registry, ve
 
 	// Reconcilers (share the PVE client + git source + store).
 	dry, err := reconcile.New(reconcile.Options{
-		PVE:      a.pve,
-		Fetcher:  a.git,
-		Store:    a.store,
-		Budget:   plan.Budget{Prune: cfg.Rec.PruneBudget},
-		Executor: nil, // dry-run
-		Log:      log,
+		PVE:           a.pve,
+		Fetcher:       a.git,
+		Store:         a.store,
+		Budget:        plan.Budget{Prune: cfg.Rec.PruneBudget},
+		Executor:      nil, // dry-run
+		NodeAllowlist: cfg.PVE.Nodes,
+		Log:           log,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dry reconcile: %w", err)
@@ -142,12 +144,13 @@ func New(cfg *config.Config, log *slog.Logger, registry *prometheus.Registry, ve
 
 	applyExec := exec.New(a.pve, cfg.Rec.TaskTimeout, 2*time.Second, a.store, log)
 	apl, err := reconcile.New(reconcile.Options{
-		PVE:      a.pve,
-		Fetcher:  a.git,
-		Store:    a.store,
-		Budget:   plan.Budget{Prune: cfg.Rec.PruneBudget},
-		Executor: applyExec,
-		Log:      log,
+		PVE:           a.pve,
+		Fetcher:       a.git,
+		Store:         a.store,
+		Budget:        plan.Budget{Prune: cfg.Rec.PruneBudget},
+		Executor:      applyExec,
+		NodeAllowlist: cfg.PVE.Nodes,
+		Log:           log,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("apply reconcile: %w", err)

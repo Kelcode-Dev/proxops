@@ -7,6 +7,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,14 +49,20 @@ type PVEConfig struct {
 	// Password is the user's password (ticket auth only).
 	// Prefer env PVECONFORM_PVE_PASSWORD.
 	Password string `yaml:"password"`
-	// Port is the PVE API (pveproxy) port. Default 8006.
-	Port int `yaml:"port"`
+	// BaseURL is the PVE API endpoint (scheme://host[:port]) the agent
+	// talks to. Every request — cluster-wide, per-node, ticket exchange —
+	// goes through this single endpoint; PVE exposes the entire API on each
+	// node, so the node identity lives only in the request path, never in
+	// the host. Example: "https://pve-dev-01.example.invalid:8006".
+	BaseURL string `yaml:"base-url"`
+	// Nodes is the allowlist of PVE node names this cluster is expected to
+	// contain. Used to validate manifest spec.node values at parse time so
+	// a typo in a node name fails fast instead of producing confusing
+	// per-request 404s. When empty, no allowlist check is performed.
+	Nodes []string `yaml:"nodes"`
 	// CAFile optionally points at the PVE cluster self-signed CA certificate.
 	// When empty the system trust store is used.
 	CAFile string `yaml:"ca-file"`
-	// Gateway is the node used to bootstrap ticket auth and reach
-	// cluster-wide endpoints. Default "pve".
-	Gateway string `yaml:"gateway"`
 }
 
 // GitConfig holds git source-of-truth settings.
@@ -91,11 +98,13 @@ type Config struct {
 	DataDir string          `yaml:"data-dir"` // git cache, CA pinning; default ~/.local/share/pveconform
 }
 
-// Defaults returns a Config with sensible default values.
+// Defaults returns a Config with sensible default values. PVE.BaseURL is
+// intentionally NOT defaulted: the API endpoint is environment-specific and
+// Validate() refuses to run the agent when it is absent.
 func Defaults() *Config {
 	return &Config{
 		Log:     LogConfig{Level: "info"},
-		PVE:     PVEConfig{Auth: AuthToken, Port: 8006, Gateway: "pve"},
+		PVE:     PVEConfig{Auth: AuthToken},
 		Git:     GitConfig{Branch: "main"},
 		Rec:     ReconcileConfig{PollInterval: 30 * time.Second, TaskTimeout: 30 * time.Minute, PruneBudget: 3},
 		Listen:  "127.0.0.1:9494",
@@ -194,8 +203,26 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Sprintf("pve.auth must be %q or %q, got %q", AuthToken, AuthTicket, c.PVE.Auth))
 	}
 
-	if c.PVE.Port < 1 || c.PVE.Port > 65535 {
-		errs = append(errs, "pve.port out of range")
+	// PVE connection shape: base-url must be present and a parseable
+	// http(s) URL; node names must be plain identifiers (no path or
+	// space characters). Reject duplicates.
+	if c.PVE.BaseURL == "" {
+		errs = append(errs, "pve.base-url is required (e.g. https://<host>[:port])")
+	} else {
+		if u, err := url.Parse(c.PVE.BaseURL); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, "pve.base-url must be a parseable http(s)://host[:port] URL with a host component")
+		}
+	}
+	seen := map[string]bool{}
+	for i, n := range c.PVE.Nodes {
+		if strings.TrimSpace(n) == "" || strings.ContainsAny(n, " /") {
+			errs = append(errs, fmt.Sprintf("pve.nodes[%d]: %q is not a valid PVE node name", i, n))
+			continue
+		}
+		if seen[n] {
+			errs = append(errs, fmt.Sprintf("pve.nodes: duplicate entry %q", n))
+		}
+		seen[n] = true
 	}
 
 	if c.Git.URL != "" && c.Git.Path != "" {

@@ -148,8 +148,6 @@ func newHarness(t *testing.T, gitFiles map[string]string, budget int) *harness {
 			Auth:    "token",
 			TokenID: "pveconform",
 			Token:   "deadbeef",
-			Gateway: node,
-			Port:    8006,
 		},
 		BaseURL:     m.URL(),
 		HTTPTimeout: 5 * time.Second,

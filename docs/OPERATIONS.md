@@ -47,9 +47,11 @@ pve:
   token-id: pveconform   # part of user@realm!tokenid=value
   # token: <uuid>       # prefer PVECONFORM_PVE_TOKEN env
   # token-value: <full> # prefer PVECONFORM_PVE_TOKEN_VALUE env — overrides pair
-  port: 8006
-  gateway: pve
-  ca-file:               # optional path to PVE cluster CA
+  base-url: https://pve-dev-01.example:8006   # single endpoint for ALL traffic
+  nodes:                # optional allowlist of PVE node names
+    - pve-dev-01
+    - pve-dev-02
+  ca-file:              # optional path to PVE cluster CA
 git:
   url: https://github.com/you/pveconform-manifests.git
   branch: main

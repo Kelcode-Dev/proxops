@@ -14,8 +14,13 @@ func TestDefaults(t *testing.T) {
 	if c.PVE.Auth != AuthToken {
 		t.Errorf("default auth = %q, want %q", c.PVE.Auth, AuthToken)
 	}
-	if c.PVE.Port != 8006 {
-		t.Errorf("default port = %d, want 8006", c.PVE.Port)
+	// BaseURL is intentionally NOT defaulted — it is environment-specific
+	// and Validate() rejects an empty value.
+	if c.PVE.BaseURL != "" {
+		t.Errorf("default base-url should be empty, got %q", c.PVE.BaseURL)
+	}
+	if len(c.PVE.Nodes) != 0 {
+		t.Errorf("default nodes should be empty, got %+v", c.PVE.Nodes)
 	}
 	if c.Git.Branch != "main" {
 		t.Errorf("default branch = %q, want main", c.Git.Branch)
@@ -42,8 +47,14 @@ func TestLoadMergesOverDefaults(t *testing.T) {
 log:
   level: debug
 pve:
+  auth: token
   user: pveops@pve
-  port: 9006
+  token-id: ci
+  token: tok-abc
+  base-url: https://pve-dev-01.example:8006
+  nodes:
+    - pve-dev-01
+    - pve-dev-02
 git:
   url: https://git.example.com/infra/pve.yaml
   branch: prod
@@ -60,14 +71,20 @@ reconcile:
 	if err != nil {
 		t.Fatal(err)
 	}
+	if verr := c.Validate(); verr != nil {
+		t.Fatalf("Validate on a fully-populated config: %v", verr)
+	}
 	if c.Log.Level != "debug" {
 		t.Errorf("log.level = %q, want debug", c.Log.Level)
 	}
 	if c.PVE.User != "pveops@pve" {
 		t.Errorf("pve.user = %q", c.PVE.User)
 	}
-	if c.PVE.Port != 9006 {
-		t.Errorf("pve.port = %d", c.PVE.Port)
+	if c.PVE.BaseURL != "https://pve-dev-01.example:8006" {
+		t.Errorf("pve.base-url = %q, want the YAML value", c.PVE.BaseURL)
+	}
+	if len(c.PVE.Nodes) != 2 || c.PVE.Nodes[0] != "pve-dev-01" || c.PVE.Nodes[1] != "pve-dev-02" {
+		t.Errorf("pve.nodes = %+v, want the two YAML entries", c.PVE.Nodes)
 	}
 	if c.PVE.Auth != AuthToken {
 		t.Errorf("pve.auth not preserved = %q", c.PVE.Auth)
@@ -238,6 +255,7 @@ func TestValidatePassesForValidConfigs(t *testing.T) {
 	c.PVE.User = "root@pam"
 	c.PVE.TokenID = "pveconform"
 	c.PVE.Token = "deadbeef"
+	c.PVE.BaseURL = "https://pve.example:8006"
 	if err := c.Validate(); err != nil {
 		t.Fatalf("token mode should validate: %v", err)
 	}
@@ -247,6 +265,7 @@ func TestValidatePassesForValidConfigs(t *testing.T) {
 	c3.Git.URL = "https://git.example.com/repo"
 	c3.PVE.User = "root@pam"
 	c3.PVE.TokenValue = "root@pam!pveconform=deadbeef"
+	c3.PVE.BaseURL = "https://pve.example:8006"
 	if err := c3.Validate(); err != nil {
 		t.Fatalf("token-value mode should validate: %v", err)
 	}
@@ -256,6 +275,7 @@ func TestValidatePassesForValidConfigs(t *testing.T) {
 	c2.PVE.Auth = AuthTicket
 	c2.PVE.User = "root@pam"
 	c2.PVE.Password = "s3cret"
+	c2.PVE.BaseURL = "https://pve.example:8006"
 	if err := c2.Validate(); err != nil {
 		t.Fatalf("ticket mode should validate: %v", err)
 	}

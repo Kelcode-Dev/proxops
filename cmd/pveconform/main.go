@@ -35,7 +35,7 @@ type globalFlags struct {
 	pruneBudget int
 	pveUser     string
 	pveAuth     string
-	pvePort     int
+	pveBaseURL  string
 	caFile      string
 	gitPath     string // air-gapped / local-mode source of truth
 }
@@ -83,7 +83,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&gf.gitPath, "git-path", "", "air-gapped / local mode: path to a git work tree (no fetch)")
 	root.PersistentFlags().StringVar(&gf.pveUser, "pve-user", "", "PVE user ID, e.g. root@pam")
 	root.PersistentFlags().StringVar(&gf.pveAuth, "pve-auth", "", "PVE auth method: token or ticket")
-	root.PersistentFlags().IntVar(&gf.pvePort, "pve-port", 0, "PVE API port (0: use config)")
+root.PersistentFlags().StringVar(&gf.pveBaseURL, "pve-base-url", "", "PVE API base URL, e.g. https://pve-dev-01:8006 (empty: use config)")
 	root.PersistentFlags().StringVar(&gf.caFile, "ca-file", "", "path to the PVE cluster CA certificate")
 
 	root.AddCommand(
@@ -121,11 +121,7 @@ func buildAgent(gf *globalFlags, log *slog.Logger, persistent, local *pflag.Flag
 	applyFlag("prune-budget", func() { cfg.Rec.PruneBudget = gf.pruneBudget })
 	applyFlag("pve-user", func() { cfg.PVE.User = gf.pveUser })
 	applyFlag("pve-auth", func() { cfg.PVE.Auth = config.AuthMethod(gf.pveAuth) })
-	applyFlag("pve-port", func() {
-		if gf.pvePort > 0 {
-			cfg.PVE.Port = gf.pvePort
-		}
-	})
+	applyFlag("pve-base-url", func() { cfg.PVE.BaseURL = gf.pveBaseURL })
 	applyFlag("git-path", func() { cfg.Git.Path = gf.gitPath })
 	applyFlag("ca-file", func() { cfg.PVE.CAFile = gf.caFile })
 

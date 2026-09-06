@@ -26,11 +26,11 @@ import (
 	"time"
 )
 
-// DefaultPort is the standard PVE API (pveproxy) port.
-const DefaultPort = 8006
-
-// gatewayLabel is the node placeholder accepted by Do() for cluster-wide
-// endpoints; it is resolved to the configured gateway host.
+// gatewayLabel is the node-name placeholder carried in Do()'s `node` argument
+// for cluster-wide endpoints. Every PVE request — cluster-wide, per-node, or
+// ticket exchange — is routed through the same single base URL configured on
+// Options / PVEParams; the node name lives only in the path segment, so
+// gatewayLabel is a marker, not a host reference.
 const gatewayLabel = "gateway"
 
 // maxRetries bounds transient retry attempts on a single request.
@@ -40,8 +40,18 @@ const maxRetries = 3
 // open. The client keeps reading PVE state; only mutations are gated.
 var ErrReadOnly = errors.New("pve write circuit breaker open: running read-only")
 
+// ErrNoBaseURL is returned by New when neither Options.GlobalBaseURL nor
+// PVEParams.BaseURL is set. Configuration should reject this via
+// config.Validate before the client is constructed; the test paths set
+// GlobalBaseURL directly.
+var ErrNoBaseURL = errors.New("pveclient: no base-url configured")
+
 // PVEParams carries PVE connection settings into New (decoupled from the
 // config package).
+//
+// PVE exposes the entire JSON API on every node; the agent talks to ONE
+// endpoint (BaseURL) for all traffic. Node identity lives only in the
+// request path, not the host.
 type PVEParams struct {
 	User       string // token owner or ticket user, e.g. "root@pam"
 	Auth       string // "token" (default) or "ticket"
@@ -49,9 +59,13 @@ type PVEParams struct {
 	TokenValue string // composed user@realm!id=uuid
 	Token      string
 	Password   string
-	Gateway    string
-	Port       int
-	CAFile     string
+	// BaseURL is "scheme://host[:port]". Required in production.
+	BaseURL string
+	// Nodes is an optional allowlist of PVE node names. Parsed/validated
+	// at the config layer; the client keeps it for informational purposes
+	// (a future "node not in allowlist" pre-check can use it).
+	Nodes []string
+	CAFile string
 }
 
 // Credential composes the PVEAPI token credential from the user, token id,
@@ -74,23 +88,31 @@ func (p PVEParams) Credential() string {
 
 // Options configure a Client.
 type Options struct {
-	PVE              PVEParams
-	HTTPTimeout      time.Duration // bounds a single API request (task waits are separate); default 30s
-	BreakerThreshold int           // consecutive write failures before read-only mode; default 20
-	BreakerDuration  time.Duration // how long the write circuit stays open; default 10m
-	// BaseURL, when set, overrides the per-node https:// base for ALL nodes.
-	// Intended for tests pointing at an httptest mock server; production always
-	// derives bases from node name + port.
+	PVE PVEParams
+	// HTTPTimeout bounds a single API request (task waits are separate); default 30s.
+	HTTPTimeout time.Duration
+	// BreakerThreshold is consecutive write failures before read-only mode; default 20.
+	BreakerThreshold int
+	// BreakerDuration is how long the write circuit stays open; default 10m.
+	BreakerDuration time.Duration
+	// BaseURL, when set, overrides PVE.BaseURL and routes EVERY request
+	// (cluster-wide, per-node, ticket exchange) here. Used by tests that
+	// point the client at the stateful mock PVE. Production leaves it empty
+	// and relies on PVE.BaseURL.
 	BaseURL string
 }
 
 // Client is a PVE API client. Safe for concurrent use.
+//
+// All traffic is routed through one base URL (c.baseURL). The PVE node name
+// appears in the request path (/nodes/<n>/...) and in the UPID prefix, but
+// NEVER in the host: PVE's cluster-wide endpoints (/cluster/resources,
+// /access/ticket, /version) exist on every node, so one API endpoint is
+// enough to reach every object on every node.
 type Client struct {
 	auth    *Auth
 	http    *http.Client
-	gateway string
-	port    int
-	baseURL func(node string) string
+	baseURL string
 	breaker *writeBreaker
 	log     *slog.Logger
 
@@ -100,11 +122,23 @@ type Client struct {
 }
 
 // New builds a Client. CAFile may be empty (the system trust store is used).
+//
+// The effective base URL is Options.BaseURL when set (test override), else
+// PVEParams.BaseURL. New returns ErrNoBaseURL if neither is set — that is a
+// configuration error config.Validate catches earlier in production.
 func New(o Options, log *slog.Logger) (*Client, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	o = *normalizeOptions(&o)
+	if o.HTTPTimeout <= 0 {
+		o.HTTPTimeout = 30 * time.Second
+	}
+	if o.BreakerThreshold <= 0 {
+		o.BreakerThreshold = 20
+	}
+	if o.BreakerDuration <= 0 {
+		o.BreakerDuration = 10 * time.Minute
+	}
 
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if o.PVE.CAFile != "" {
@@ -119,17 +153,12 @@ func New(o Options, log *slog.Logger) (*Client, error) {
 		tlsCfg.RootCAs = pool
 	}
 
-	// baseURLFn builds a base URL for a node, honoring Options.BaseURL.
-	var baseURLFn func(node string) string
-	if o.BaseURL != "" {
-		baseURLFn = func(node string) string { return o.BaseURL }
-	} else {
-		baseURLFn = func(node string) string {
-			if node == gatewayLabel {
-				node = o.PVE.Gateway
-			}
-			return fmt.Sprintf("https://%s:%d", node, o.PVE.Port)
-		}
+	base := o.BaseURL
+	if base == "" {
+		base = o.PVE.BaseURL
+	}
+	if base == "" {
+		return nil, ErrNoBaseURL
 	}
 
 	return &Client{
@@ -140,42 +169,20 @@ func New(o Options, log *slog.Logger) (*Client, error) {
 			TokenValue: o.PVE.TokenValue,
 			Token:      o.PVE.Token,
 			Password:   o.PVE.Password,
-			Gateway:    o.PVE.Gateway,
-			Port:       o.PVE.Port,
-		}, baseURLFn),
+		}, base),
 		http:    &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: o.HTTPTimeout},
-		gateway: o.PVE.Gateway,
-		port:    o.PVE.Port,
-		baseURL: baseURLFn,
+		baseURL: base,
 		breaker: newWriteBreaker(o.BreakerThreshold, o.BreakerDuration),
 		log:     log,
 	}, nil
 }
 
-func normalizeOptions(o *Options) *Options {
-	if o.PVE.Port <= 0 {
-		o.PVE.Port = DefaultPort
-	}
-	if o.PVE.Gateway == "" {
-		o.PVE.Gateway = "pve"
-	}
-	if o.BreakerThreshold <= 0 {
-		o.BreakerThreshold = 20
-	}
-	if o.BreakerDuration <= 0 {
-		o.BreakerDuration = 10 * time.Minute
-	}
-	if o.HTTPTimeout <= 0 {
-		o.HTTPTimeout = 30 * time.Second
-	}
-	return o
-}
-
-// URL returns the full API URL for a node and json-api path. gatewayLabel is
-// resolved to the gateway host (unless BaseURL is set).
+// URL returns the full API URL for the request. The `node` argument is part
+// of the path only — it has NO effect on host selection. This is the key
+// property of the single-endpoint PVE model: a node name that is not a DNS
+// hostname can still be reached, because the host is fixed from config.
 func (c *Client) URL(node, path string) string {
-	base := c.baseURL(node)
-	return base + "/api2/json/" + strings.TrimLeft(path, "/")
+	return c.baseURL + "/api2/json/" + strings.TrimLeft(path, "/")
 }
 
 // Do performs a PVE API request with retry/backoff. It applies authentication,
@@ -390,6 +397,8 @@ type ClusterResource struct {
 }
 
 // PveVersion returns the PVE major version as reported by /version.
+// The `gatewayLabel` node is a marker that "this is a cluster-wide call";
+// routing still goes through c.baseURL.
 func (c *Client) PveVersion(ctx context.Context) (int, error) {
 	var out int
 	if _, err := c.Do(ctx, http.MethodGet, gatewayLabel, "/version", nil, &out); err != nil {
@@ -397,12 +406,6 @@ func (c *Client) PveVersion(ctx context.Context) (int, error) {
 	}
 	return out, nil
 }
-
-// Gateway returns the configured gateway node name.
-func (c *Client) Gateway() string { return c.gateway }
-
-// Port returns the configured PVE API port.
-func (c *Client) Port() int { return c.port }
 
 // httpClient returns the underlying http.Client (used by Auth for ticket exchange).
 func (c *Client) httpClient() *http.Client { return c.http }

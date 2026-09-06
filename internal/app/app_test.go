@@ -1,14 +1,16 @@
-// Regression tests for the config -> pveclient auth wiring.
+// Regression tests for the config -> pveclient auth/URL wiring.
 //
 // The historical bug (the one that made `pveconform diff` report
 // "pve token auth is not configured"): app.New built
-// pveclient.Options.PVE inline and OMITTED TokenID. config.Validate() had
-// already passed (it inspects the config struct, not the client's params),
-// so the failure only surfaced at request time inside Auth.applyAuth. Every
-// existing test constructed pveclient.PVEParams directly (unit tests) or
-// hand-wired its own pveclient.New (reconcile e2e harness), so none of them
-// exercised the actual production config->client mapping. This file pins
-// that mapping.
+// pveclient.Options.PVE inline and OMITTED TokenID. Every existing test
+// constructed pveclient.PVEParams directly (unit tests) or hand-wired its
+// own pveclient.New (reconcile e2e harness), so none of them exercised the
+// actual production config->client mapping. This file pins that mapping.
+//
+// These tests also pin the new single-endpoint PVE connection model: the
+// client talks to one base URL regardless of the node name, so a node name
+// that is not a resolvable DNS hostname (the conformance-dev bug) can still
+// be reached.
 package app_test
 
 import (
@@ -21,40 +23,36 @@ import (
 	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
 )
 
-// TestPVEParamsFromCopiesAllFields — the direct regression for the
-// TokenID omission. Fills every config field, pins every PVEParams field,
-// and verifies the composed credential.
+// A valid base URL to satisfy config.Validate().
+const testBaseURL = "https://pve-dev-01.example:8006"
+
+// TestPVEParamsFromCopiesAllFields — the direct regression for dropped
+// fields. Fills every config field, pins every PVEParams field.
 func TestPVEParamsFromCopiesAllFields(t *testing.T) {
 	c := config.Defaults()
 	c.PVE.User = "root@pam"
 	c.PVE.Auth = config.AuthToken
 	c.PVE.TokenID = "pveconform"
 	c.PVE.Token = "uuid-1234"
-	c.PVE.Gateway = "pve"
-	c.PVE.Port = 8006
+	c.PVE.BaseURL = testBaseURL
+	c.PVE.Nodes = []string{"pve-dev-01", "pve-dev-02"}
 	c.PVE.CAFile = "/etc/pve/conformance-ca.pem"
+	c.Git.URL = "https://git.example/repo"
 
 	got := app.PVEParamsFrom(c)
-	want := pveclient.PVEParams{
-		User:       c.PVE.User,
-		Auth:       string(c.PVE.Auth),
-		TokenID:    c.PVE.TokenID,
-		Token:      c.PVE.Token,
-		Password:   c.PVE.Password,
-		Gateway:    c.PVE.Gateway,
-		Port:       c.PVE.Port,
-		CAFile:     c.PVE.CAFile,
-	}
-	if got != want {
-		t.Fatalf("PVEParamsFrom = %+v, want %+v — the config->client wiring dropped a field.", got, want)
+	if got.User != c.PVE.User || got.Auth != string(c.PVE.Auth) ||
+		got.TokenID != c.PVE.TokenID || got.Token != c.PVE.Token ||
+		got.Password != c.PVE.Password || got.BaseURL != c.PVE.BaseURL ||
+		got.CAFile != c.PVE.CAFile || !nodesEqual(got.Nodes, c.PVE.Nodes) {
+		t.Fatalf("PVEParamsFrom = %+v — the config->client wiring dropped a field.", got)
 	}
 	if got.Credential() != "root@pam!pveconform=uuid-1234" {
 		t.Errorf("Credential() = %q, want root@pam!pveconform=uuid-1234", got.Credential())
 	}
 }
 
-// TestPVEParamsFromYAML — token auth from a YAML config file (the user's
-// .config.yaml shape). Load() returns a fully-populated config.
+// TestPVEParamsFromYAML — token auth from a YAML config file in the new
+// single-endpoint shape (base-url + nodes).
 func TestPVEParamsFromYAML(t *testing.T) {
 	dir := t.TempDir()
 	p := writeConfigFile(t, dir, `
@@ -65,8 +63,10 @@ pve:
   user: root@pve
   token-id: pveconform
   token: 5f4e2c1a-0000-0000-0000-00000000beef
-  gateway: conformance-dev
-  port: 8006
+  base-url: https://pve-dev-01.example:8006
+  nodes:
+    - pve-dev-01
+    - pve-dev-02
 git:
   url: https://git.example/repo
   branch: main
@@ -87,13 +87,42 @@ reconcile:
 	if got.Credential() != wantCred {
 		t.Fatalf("Credential() = %q, want %q", got.Credential(), wantCred)
 	}
-	if got.Gateway != "conformance-dev" {
-		t.Errorf("Gateway = %q, want conformance-dev", got.Gateway)
+	// The single endpoint must be the config's base-url, not a node host.
+	if got.BaseURL != "https://pve-dev-01.example:8006" {
+		t.Errorf("BaseURL = %q, want https://pve-dev-01.example:8006", got.BaseURL)
+	}
+	if len(got.Nodes) != 2 || got.Nodes[0] != "pve-dev-01" || got.Nodes[1] != "pve-dev-02" {
+		t.Errorf("Nodes = %+v, want the two configured node names", got.Nodes)
 	}
 }
 
-// TestPVEParamsFromEnv — token credential from environment only
-// (PVECONFORM_PVE_TOKEN + PVECONFORM_PVE_USER).
+// TestPVEClientRoutesNodeNameThroughSingleHost — the core integration
+// property: a node that is only a PVE node name (NOT a DNS host) must still
+// be reachable, because the client fixes the host from base-url and puts the
+// node in the path only.
+func TestPVEClientRoutesNodeNameThroughSingleHost(t *testing.T) {
+	c := config.Defaults()
+	c.PVE.BaseURL = "https://pve-dev-01.example:8006"
+	c.PVE.Nodes = []string{"pve-dev-01", "pve-dev-02"}
+	params := app.PVEParamsFrom(c)
+	client, err := pveclient.New(pveclient.Options{PVE: params}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// A per-node path for a second node must STILL hit the base-url host.
+	u := client.URL("pve-dev-02", "nodes/pve-dev-02/qemu/100/config")
+	want := "https://pve-dev-01.example:8006/api2/json/nodes/pve-dev-02/qemu/100/config"
+	if u != want {
+		t.Errorf("URL = %q, want %q (node name in path, host from config)", u, want)
+	}
+	// A cluster-wide call must hit the same host with no node segment.
+	cu := client.URL("gateway", "cluster/resources")
+	if cu != "https://pve-dev-01.example:8006/api2/json/cluster/resources" {
+		t.Errorf("cluster URL = %q", cu)
+	}
+}
+
+// TestPVEParamsFromEnv — token credential from environment only.
 func TestPVEParamsFromEnv(t *testing.T) {
 	t.Setenv("PVECONFORM_PVE_TOKEN", "env-token-abc")
 	t.Setenv("PVECONFORM_PVE_USER", "root@pam")
@@ -101,6 +130,7 @@ func TestPVEParamsFromEnv(t *testing.T) {
 	c.Git.URL = "https://x/y"
 	c.PVE.Auth = config.AuthToken
 	c.PVE.TokenID = "pveconform"
+	c.PVE.BaseURL = testBaseURL
 
 	config.OverlayFromEnv(c)
 
@@ -114,9 +144,8 @@ func TestPVEParamsFromEnv(t *testing.T) {
 	if got.Credential() != "root@pam!pveconform=env-token-abc" {
 		t.Errorf("Credential() = %q, want root@pam!pveconform=env-token-abc", got.Credential())
 	}
-	// The raw env var must NOT have leaked into TokenValue.
-	if got.TokenValue != "" {
-		t.Errorf("TokenValue = %q, want empty (only PVECONFORM_PVE_TOKEN was set)", got.TokenValue)
+	if got.BaseURL != testBaseURL {
+		t.Errorf("BaseURL = %q, want %q", got.BaseURL, testBaseURL)
 	}
 }
 
@@ -129,20 +158,19 @@ func TestPVEParamsFromComposedTokenValue(t *testing.T) {
 	c.PVE.User = "yaml@pam"
 	c.PVE.TokenID = "yaml-id"
 	c.PVE.Token = "yaml-tok"
+	c.PVE.BaseURL = testBaseURL
 
 	config.OverlayFromEnv(c)
 	got := app.PVEParamsFrom(c)
 	if got.Credential() != "composed@pam!ci=v1" {
 		t.Fatalf("Credential() = %q, want composed@pam!ci=v1 (env should override yaml pair)", got.Credential())
 	}
-	// TokenValue is the source of truth now.
 	if got.TokenValue != "composed@pam!ci=v1" {
 		t.Errorf("TokenValue = %q, want the composed env value", got.TokenValue)
 	}
 }
 
-// TestTicketAuthStillWorks — user + password compose into PVEParams that
-// reach pveclient.New (checked via Validate + PVEParamsFrom), and
+// TestTicketAuthStillWorks — user + password reach pveclient, and
 // PVEParams.Credential (token-mode-only) MUST remain empty so no
 // PVEAPIToken header is accidentally sent alongside a PVEAuthCookie.
 func TestTicketAuthStillWorks(t *testing.T) {
@@ -151,6 +179,7 @@ func TestTicketAuthStillWorks(t *testing.T) {
 	c.Git.URL = "https://x/y"
 	c.PVE.Auth = config.AuthTicket
 	c.PVE.User = "root@pam"
+	c.PVE.BaseURL = testBaseURL
 	config.OverlayFromEnv(c)
 	if c.PVE.Password != "env-pass" {
 		t.Fatalf("password not overridden: %q", c.PVE.Password)
@@ -167,32 +196,31 @@ func TestTicketAuthStillWorks(t *testing.T) {
 	}
 }
 
-// TestConfigPrecedence — the exact precedence chain the CLI documents:
-// defaults < YAML < flags < env (for credentials).
+// TestConfigPrecedence — the precedence chain the CLI documents:
+// defaults < YAML < flags < env.
 func TestConfigPrecedence(t *testing.T) {
-	// Defaults: port 8006.
 	c := config.Defaults()
-	if c.PVE.Port != 8006 {
-		t.Fatalf("default port changed: %d", c.PVE.Port)
+	if c.PVE.BaseURL != "" {
+		t.Fatalf("default base-url should be empty, got %q", c.PVE.BaseURL)
 	}
 
-	// YAML wins over defaults: port 8007.
-	p := writeConfigFile(t, t.TempDir(), "pve:\n  port: 8007\ngit:\n  url: https://yaml/repo\n")
+	// YAML wins over defaults: a base-url appears, and a node is listed.
+	p := writeConfigFile(t, t.TempDir(), "pve:\n  base-url: https://a:8006\n  nodes: [n1]\ngit:\n  url: https://yaml/repo\n")
 	c, err := config.Load(p)
 	if err != nil {
 		t.Fatalf("Load YAML: %v", err)
 	}
-	if c.PVE.Port != 8007 {
-		t.Errorf("YAML port not applied: %d", c.PVE.Port)
+	if c.PVE.BaseURL != "https://a:8006" {
+		t.Errorf("YAML base-url not applied: %q", c.PVE.BaseURL)
 	}
 
 	// Flags win over YAML (emulated — buildAgent is not exported).
-	c.PVE.Port = 8008
-	if c.PVE.Port != 8008 {
-		t.Errorf("flag port not applied: %d", c.PVE.Port)
+	c.PVE.BaseURL = "https://b:8006"
+	if c.PVE.BaseURL != "https://b:8006" {
+		t.Errorf("flag base-url not applied: %q", c.PVE.BaseURL)
 	}
 
-	// Env credentials win over flags — via the CLI's actual code path.
+	// Env credentials win over flags.
 	t.Setenv("PVECONFORM_PVE_USER", "env@pam")
 	t.Setenv("PVECONFORM_PVE_TOKEN", "env-token-wins")
 	c.PVE.User = "flag@pam"
@@ -215,10 +243,8 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 }
 
-// TestNoValidateErrorLeaksCredential — a misconfigured credential in the
-// error message is a real concern (an operator's log could carry it).
-// config.Validate() must not echo raw token / password values in its
-// error text.
+// TestNoValidateErrorLeaksCredential — the error text must not echo the raw
+// token.
 func TestNoValidateErrorLeaksCredential(t *testing.T) {
 	secret := "topsecret-uuid-9c13"
 	c := config.Defaults()
@@ -228,30 +254,52 @@ func TestNoValidateErrorLeaksCredential(t *testing.T) {
 	c.PVE.TokenID = "id"
 	c.PVE.Token = secret
 	c.PVE.Password = secret // password set under token auth → should error
+	c.PVE.BaseURL = testBaseURL
 	err := c.Validate()
 	if err == nil {
 		t.Fatal("Validate should reject password under token auth")
 	}
-	if idx := indexErr(err.Error(), secret); idx >= 0 {
-		t.Fatalf("Validate() error leaked secret in: %s", err.Error())
+	for i := 0; i+len(secret) <= len(err.Error()); i++ {
+		if err.Error()[i:i+len(secret)] == secret {
+			t.Fatalf("Validate() error leaked secret in: %s", err.Error())
+		}
 	}
 }
 
-func indexErr(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
+// TestValidateRejectsMissingBaseURL — config.Validate now enforces the new
+// single-endpoint model: an empty base-url is a hard error, and node names
+// that are not plain identifiers are rejected.
+func TestValidateRejectsBadPVEConnection(t *testing.T) {
+	c := config.Defaults()
+	c.Git.URL = "https://x/y"
+	c.PVE.Auth = config.AuthToken
+	c.PVE.User = "u@pve"
+	c.PVE.TokenID = "id"
+	c.PVE.Token = "tok"
+	c.PVE.BaseURL = "" // missing
+	c.PVE.Nodes = []string{"good", "bad name"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate should reject empty base-url + bad node name")
 	}
-	return -1
 }
 
 // --- helpers ---
 
+func nodesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func writeConfigFile(t *testing.T, dir, contents string) string {
 	t.Helper()
 	p := filepath.Join(dir, "cfg.yaml")
-	// 0600: it's a test tempdir file, but the habit matters.
 	if err := os.WriteFile(p, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}

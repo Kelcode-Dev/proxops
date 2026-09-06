@@ -17,8 +17,19 @@ pve:
   # token-value: ""        # fully-composed "user@realm!tokenid=uuid" —
                            # use env PVECONFORM_PVE_TOKEN_VALUE (overrides the pair)
   # password: ""           # ticket auth only — use env PVECONFORM_PVE_PASSWORD
-  port: 8006               # PVE API (pveproxy) port
-  gateway: pve             # cluster gateway node name (bootstrap + cluster-wide endpoints)
+  # Single PVE API endpoint. PVE exposes its full API on every node, so ONE
+  # host:port reaches every object on every node; the node name lives only
+  # in the request path. Point this at any cluster node whose FQDN is
+  # resolvable from the agent. Do not use a short node name here — it is
+  # not a DNS hostname.
+  base-url: https://pve-dev-01.example:8006
+  # Optional allowlist of PVE node names this cluster contains. When set,
+  # the agent aborts a cycle (fail-closed) if any manifest's spec.node is
+  # not in this list, catching node-name typos before any PVE call.
+  # Leave empty to accept any node name.
+  nodes:
+    - pve-dev-01
+    - pve-dev-02
   # ca-file: ""            # PVE cluster self-signed CA; empty = system trust store
 
 git:

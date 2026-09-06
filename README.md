@@ -36,8 +36,11 @@ serially, and with explicit safety rails on deletion.
   never force-destroys a running object (stop first).
 - **Explicit** — `diff` / `--dry-run` report the full would-be plan,
   including would-be deletes, without writing anything. `adopt` scaffolds
-  manifests for existing PVE objects instead of delete-then-create.
-
+  manifests for existing PVE objects instead of delete-then-create.- **One PVE endpoint** — a single `pve.base-url` (e.g.
+  `https://pve-dev-01.example.invalid:8006`) serves every request. Because PVE
+  exposes its full API on each node, the PVE node name (e.g. `pve-dev-01` in
+  `spec.node`) is carried only in the request path, never in the host. This
+  works even when a node name is not a resolvable DNS hostname.
 ## Layout
 
 ```
