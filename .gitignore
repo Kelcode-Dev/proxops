@@ -3,3 +3,5 @@ dist/
 *.test
 coverage.out
 pveconform.yaml.local
+.env
+.config.yaml
