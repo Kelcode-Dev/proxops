@@ -64,7 +64,7 @@ type PVEParams struct {
 	// Nodes is an optional allowlist of PVE node names. Parsed/validated
 	// at the config layer; the client keeps it for informational purposes
 	// (a future "node not in allowlist" pre-check can use it).
-	Nodes []string
+	Nodes  []string
 	CAFile string
 }
 

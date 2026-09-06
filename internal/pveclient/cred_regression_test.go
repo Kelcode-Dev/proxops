@@ -37,11 +37,11 @@ func recordingServer(t *testing.T, records *[]recordedReq) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api2/json/cluster/resources", func(w http.ResponseWriter, r *http.Request) {
 		rec := recordedReq{
-			Method:   r.Method,
-			Path:     r.URL.Path,
-			Auth:     r.Header.Get("Authorization"),
-			Cookie:   r.Header.Get("Cookie"),
-			CSRF:     r.Header.Get("X-CSRF-Token"),
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Auth:   r.Header.Get("Authorization"),
+			Cookie: r.Header.Get("Cookie"),
+			CSRF:   r.Header.Get("X-CSRF-Token"),
 		}
 		body, _ := io.ReadAll(r.Body)
 		rec.Body = string(body)
@@ -51,11 +51,11 @@ func recordingServer(t *testing.T, records *[]recordedReq) *httptest.Server {
 	})
 	mux.HandleFunc("/api2/json/access/ticket", func(w http.ResponseWriter, r *http.Request) {
 		rec := recordedReq{
-			Method:   r.Method,
-			Path:     r.URL.Path,
-			Auth:     r.Header.Get("Authorization"),
-			Cookie:   r.Header.Get("Cookie"),
-			CSRF:     r.Header.Get("X-CSRF-Token"),
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Auth:   r.Header.Get("Authorization"),
+			Cookie: r.Header.Get("Cookie"),
+			CSRF:   r.Header.Get("X-CSRF-Token"),
 		}
 		body, _ := io.ReadAll(r.Body)
 		rec.Body = string(body)
@@ -236,11 +236,11 @@ func TestNoCredentialInErrorText(t *testing.T) {
 		defer srv.Close()
 		c, err := pveclient.New(pveclient.Options{
 			PVE: pveclient.PVEParams{
-				User:       "root@pam",
-				Auth:       "ticket",
-				Password:   secretPassword,
-				Token:      secretToken,
-				TokenID:    "id",
+				User:     "root@pam",
+				Auth:     "ticket",
+				Password: secretPassword,
+				Token:    secretToken,
+				TokenID:  "id",
 			},
 			BaseURL:     srv.URL,
 			HTTPTimeout: srvTimeout(),

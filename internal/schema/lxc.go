@@ -179,32 +179,94 @@ func (l *LXC) ToCreateParams() (map[string]any, error) {
 	if l.Spec.Swap != "" {
 		p["swap"] = memKiB(l.Spec.Swap)
 	}
-	// Network: PVE uses "net0: veth=...,bridge=...,rate=..." (model "veth" is
-	// the default; we emit "veth=MAC,bridge=BR[,tag=N]").
-	seen := map[string]bool{}
+	// Network: PVE uses "net0: veth[,hwaddr=...],bridge=...,tag=..." (see
+	// lxcNetString for the device-type/empty-MAC semantics).
 	for i, n := range l.Spec.Networks {
-		model := n.Model
-		if model == "" {
-			model = "veth"
-		}
-		hw := strings.ToLower(n.HWAddr)
-		spec := model + "=" + hw + ","
-		if n.Bridge != "" {
-			spec += "bridge=" + n.Bridge + ","
-		}
-		if n.Tag > 0 {
-			spec += "tag=" + itoa(n.Tag) + ","
-		}
-		spec = strings.TrimSuffix(spec, ",")
-		slot := fmt.Sprintf("net%d", i)
-		p[slot] = spec
-		seen[slot] = true
+		spec := lxcNetString(n.Model, strings.ToLower(n.HWAddr), n.Bridge, n.Tag)
+		p[fmt.Sprintf("net%d", i)] = spec
 	}
-	_ = seen
 	for k, v := range l.Spec.Extra {
 		p[k] = v
 	}
 	return p, nil
+}
+
+// lxcNetString builds PVE's LXC "netN" value: "<model>[=<hwaddr>][,bridge=..][,tag=N]".
+// A bare model name (no MAC pinned) is a valid PVE device type ("veth,bridge=x");
+// "veth=<empty>" would fail PVE's comma-separated property parser with
+// "missing key in comma-separated list property" (same class of error that
+// hit the VM virtio NIC path).
+func lxcNetString(model, hwAddr, bridge string, tag int) string {
+	m := model
+	if m == "" {
+		m = "veth"
+	}
+	spec := m
+	if hwAddr != "" {
+		spec += "=" + hwAddr
+	}
+	spec += ","
+	if bridge != "" {
+		spec += "bridge=" + bridge + ","
+	}
+	if tag > 0 {
+		spec += "tag=" + itoa(tag) + ","
+	}
+	return strings.TrimSuffix(spec, ",")
+}
+
+// lxcNetMatches reports whether PVE's reported LXC net string satisfies the
+// owned fields of the desired LXCNetwork. PVE reports the full form
+// ("veth=52:54:00:aa:bb:cc,bridge=vmbr0,tag=1"). We compare:
+//
+//   - model (first token before '='; a pinned-MAC report carries it)
+//   - bridge (PVE-owned)
+//   - tag   (only when we pinned one)
+//   - MAC   (only when we pinned one; PVE assigns a random one otherwise)
+//
+// This avoids false-drift for PVE-assigned MACs we did not request.
+func lxcNetMatches(cur, model, hwAddr, bridge string, tag int) bool {
+	cur = strings.TrimSpace(cur)
+	if cur == "" {
+		return false
+	}
+	wantModel := model
+	if wantModel == "" {
+		wantModel = "veth"
+	}
+	head := cur
+	if i := strings.IndexByte(head, ','); i >= 0 {
+		head = head[:i]
+	}
+	gotModel, mac, hasMac := head, "", false
+	if eq := strings.IndexByte(head, '='); eq >= 0 {
+		gotModel = head[:eq]
+		mac = head[eq+1:]
+		hasMac = true
+	}
+	if gotModel != wantModel {
+		return false
+	}
+	if bridge != "" && !lxcNetHasKV(cur, "bridge", bridge) {
+		return false
+	}
+	if tag > 0 && !lxcNetHasKV(cur, "tag", itoa(tag)) {
+		return false
+	}
+	if hwAddr != "" && (!hasMac || !strings.EqualFold(mac, hwAddr)) {
+		return false
+	}
+	return true
+}
+
+// lxcNetHasKV reports whether the comma list contains "k=v".
+func lxcNetHasKV(list, k, v string) bool {
+	for _, kv := range strings.Split(list, ",") {
+		if strings.TrimPrefix(strings.TrimSpace(kv), k+"=") == v && strings.HasPrefix(strings.TrimSpace(kv), k+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // Drift implements Resource.
@@ -234,18 +296,12 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 		upd["rootfs"] = wantRoot
 		stop = true
 	}
-	// nics
+	// nics — compare owned fields (model, hwaddr, bridge, tag).
 	for i, n := range l.Spec.Networks {
-		model := n.Model
-		if model == "" {
-			model = "veth"
-		}
 		hw := strings.ToLower(n.HWAddr)
 		slot := fmt.Sprintf("net%d", i)
-		cur := pveStr(current[slot])
-		if !nicContainsBridge(cur, n.Bridge) {
-			want := model + "=" + hw + ",bridge=" + n.Bridge
-			upd[slot] = want
+		if !lxcNetMatches(pveStr(current[slot]), n.Model, hw, n.Bridge, n.Tag) {
+			upd[slot] = lxcNetString(n.Model, hw, n.Bridge, n.Tag)
 			stop = true
 		}
 	}
@@ -278,22 +334,6 @@ func (l *LXC) allTags() []string {
 		out = append(out, PveOwnershipTag)
 	}
 	return out
-}
-
-// nicContainsBridge reports whether a PVE "net0: ..." string uses this bridge.
-func nicContainsBridge(s, bridge string) bool {
-	if s == "" || bridge == "" {
-		return false
-	}
-	if !strings.Contains(s, "bridge=") {
-		return false
-	}
-	for _, kv := range strings.Split(s, ",") {
-		if kv == "bridge="+bridge || strings.HasPrefix(kv, "bridge="+bridge) {
-			return true
-		}
-	}
-	return false
 }
 
 func itoa(i int) string {

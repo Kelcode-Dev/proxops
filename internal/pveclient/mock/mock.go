@@ -48,8 +48,8 @@ type Server struct {
 	mu      sync.Mutex
 	cfg     Config
 	tickets map[string]bool
-	objs    map[string]map[int]VM // node -> id -> record
-	cid     uint32                // last assigned clone id
+	objs    map[string]map[int]VM                 // node -> id -> record
+	cid     uint32                                // last assigned clone id
 	isos    map[string]map[string]map[string]bool // node -> storage -> filename
 	tasks   map[string]*task
 	taskSeq int
@@ -148,7 +148,9 @@ func (s *Server) object(node string, id int) (VM, bool) {
 
 // VMConfig returns the live config of an object (nil if absent).
 func (s *Server) VMConfig(node string, vmid int) map[string]string {
-	if v, ok := s.object(node, vmid); ok { return v.Config }
+	if v, ok := s.object(node, vmid); ok {
+		return v.Config
+	}
 	return nil
 }
 
@@ -160,7 +162,9 @@ func (s *Server) LXCConfig(node string, cid int) map[string]string { return s.VM
 
 // VMStatus returns the object status (false if absent).
 func (s *Server) VMStatus(node string, vmid int) (string, bool) {
-	if v, ok := s.object(node, vmid); ok { return v.Status, true }
+	if v, ok := s.object(node, vmid); ok {
+		return v.Status, true
+	}
 	return "", false
 }
 
@@ -583,7 +587,7 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 			key = "cid"
 		}
 		out := map[string]any{
-			key:    id,
+			key:      id,
 			"status": rec.Status,
 		}
 		if mem, ok2 := rec.Config["memory"]; ok2 {

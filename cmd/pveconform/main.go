@@ -83,7 +83,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&gf.gitPath, "git-path", "", "air-gapped / local mode: path to a git work tree (no fetch)")
 	root.PersistentFlags().StringVar(&gf.pveUser, "pve-user", "", "PVE user ID, e.g. root@pam")
 	root.PersistentFlags().StringVar(&gf.pveAuth, "pve-auth", "", "PVE auth method: token or ticket")
-root.PersistentFlags().StringVar(&gf.pveBaseURL, "pve-base-url", "", "PVE API base URL, e.g. https://pve-dev-01:8006 (empty: use config)")
+	root.PersistentFlags().StringVar(&gf.pveBaseURL, "pve-base-url", "", "PVE API base URL, e.g. https://pve-dev-01:8006 (empty: use config)")
 	root.PersistentFlags().StringVar(&gf.caFile, "ca-file", "", "path to the PVE cluster CA certificate")
 
 	root.AddCommand(

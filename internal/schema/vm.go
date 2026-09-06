@@ -365,11 +365,16 @@ func memKiB(human string) int64 {
 	return b
 }
 
-// diskVolumeString builds PVE's disk device value for create/update.
-// Emits "pool,size=<bytes>" — PVE allocates the volume name for us.
+// diskVolumeString builds PVE's create-time disk device value in the
+// <pool>:<size> form (e.g. "local-lvm:8G"). PVE allocates a new volume with
+// that size on the pool; we do not own the volume name. This is the form
+// PVE's /qemu create API accepts. PVE's config *report* uses a different
+// form ("<pool>:vmid-vol-id" after volume allocation), and Drift's
+// comparison below normalizes to (pool, size-bytes) so both forms diff
+// correctly.
 func diskVolumeString(d Disk, slot string) string {
 	_ = slot
-	return fmt.Sprintf("%s,size=%d", d.Storage, diskBytes(d.Size))
+	return fmt.Sprintf("%s:%s", d.Storage, FormatDiskBytes(diskBytes(d.Size)))
 }
 
 func diskBytes(human string) int64 {
@@ -426,29 +431,45 @@ func splitDiskOwned(s string) (string, int64) {
 	return pool, size
 }
 
-// nicString builds PVE's "model=MAC,bridge=BRIDGE[,firewall=0|1]" string.
+// nicString builds PVE's "net0" value string. Two forms:
+//
+//   - MAC pinned:  "virtio=aa:bb:cc:dd:ee:ff,bridge=vmbr0,firewall=0"
+//   - MAC unpinned: "virtio,bridge=vmbr0,firewall=0"   (bare model name;
+//     PVE will assign a MAC. The "virtio=<empty>" form is invalid: PVE's
+//     comma-separated property parser rejects a key with no value, exactly
+//     the "missing key in comma-separated list property" error.)
+//
+// Bridge is required (validated upstream); firewall=0 is PVE's default and
+// is emitted explicitly so a later Drift comparison is self-describing.
 func nicString(n NIC) string {
 	model := n.Model
 	if model == "" {
 		model = "virtio"
 	}
-	mac := n.MAC
-	if mac != "" {
-		mac = strings.ToLower(mac)
-	}
 	bridge := n.Bridge
-	return model + "=" + mac + ",bridge=" + bridge + ",firewall=0"
+	var sb strings.Builder
+	if mac := strings.ToLower(n.MAC); mac != "" {
+		fmt.Fprintf(&sb, "%s=%s,bridge=%s,firewall=0", model, mac, bridge)
+	} else {
+		fmt.Fprintf(&sb, "%s,bridge=%s,firewall=0", model, bridge)
+	}
+	return sb.String()
 }
 
-// nicMatches compares two PVE NIC strings on the owned fields: model, bridge
-// (MACs are PVE-assigned unless we pinned one; firewall is PVE-default 0).
+// nicMatches compares two PVE NIC strings on the owned fields: model,
+// bridge, and MAC (only when the desired NIC pins one — PVE assigns a
+// random MAC at create time otherwise, so the unpinned-MAC report must not
+// count as drift).
 func nicMatches(cur, want string) bool {
-	cm, cb, _ := splitNIC(cur)
-	wm, wb, _ := splitNIC(want)
+	cm, cb, cMac := splitNIC(cur)
+	wm, wb, wMac := splitNIC(want)
 	if cm != wm {
 		return false
 	}
 	if cb != wb {
+		return false
+	}
+	if wMac != "" && !strings.EqualFold(wMac, cMac) {
 		return false
 	}
 	return true
