@@ -72,10 +72,25 @@ func (s *Storage) Content(ctx context.Context, node, storage string) ([]ContentE
 
 // Download issues an ISO or CTTemplate download to the storage backend.
 // The `content` parameter tells PVE which pool the file belongs to:
-//   - "iso":    PVE downloads to `<storage>:iso/<filename>`
-//   - "vztmpl": PVE downloads to `<storage>:vztmpl/<filename>`
+//   - "iso":       PVE downloads to `<storage>:iso/<filename>`
+//   - "vztmpl":    PVE downloads to `<storage>:vztmpl/<filename>`
 //
-// PVE's download task returns a UPID.
+// Endpoint contract (PVE 9.2.x — probed live on conformance-dev,
+// PVE 9.2.2 release):
+//
+//	POST /nodes/{n}/storage/{s}/download-url
+//	  form: url=<https URI>, filename=<name>, content=<iso|vztmpl>
+//
+// returns a task UPID. `POST .../download` was the PVE 8-era path and on
+// PVE 9.2 dir storage returns 501 "Method 'POST /nodes/.../storage/.../download'
+// not implemented" — the endpoint was renamed. Probes also confirmed
+// `GET` on `/download-url` is 501 (POST-only) and that a URL the node
+// cannot fetch still returns 200 + task UPID, with exitstatus
+// `"download failed: exit code 8"` on the task (curl exit 8 = "Could not
+// connect to server"). pveconform therefore always treats a 5xx or task
+// exitstatus-other-than-OK as a real failure and relies on
+// Storage.HasContent for the eventual convergence test: the file appears
+// on the storage pool after the task succeeds.
 func (s *Storage) Download(ctx context.Context, node, storage, downloadURL, filename, content string) (string, error) {
 	p := url.Values{
 		"url":      {downloadURL},
@@ -84,7 +99,7 @@ func (s *Storage) Download(ctx context.Context, node, storage, downloadURL, file
 	if content != "" {
 		p.Set("content", content)
 	}
-	path := "nodes/" + node + "/storage/" + storage + "/download"
+	path := "nodes/" + node + "/storage/" + storage + "/download-url"
 	return s.c.Do(ctx, http.MethodPost, node, path, p, nil)
 }
 

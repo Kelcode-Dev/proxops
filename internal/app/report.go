@@ -55,8 +55,9 @@ func renderPlan(p *plan.Plan) string {
 	section("will delete (prune)", prunes)
 	section("deferred prunes (budget)", p.Deferred)
 	section("skipped (no pveconform tag)", p.Skipped)
+	section("anomalies (live-only slots pveconform will NOT auto-remove)", p.Anomalies)
 
-	if len(actions) == 0 && len(p.Deferred) == 0 && len(p.Skipped) == 0 {
+	if len(actions) == 0 && len(p.Deferred) == 0 && len(p.Skipped) == 0 && len(p.Anomalies) == 0 {
 		return ""
 	}
 	return sb.String()

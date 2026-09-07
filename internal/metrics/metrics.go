@@ -45,7 +45,12 @@ var (
 	Anomalies = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pveconform_anomalies_total",
 		Help: "Anomalous events detected by the reconciler.",
-	}, []string{"type"}) // empty_desired | dag_cycle | api_error_shaped_unexpected
+	}, []string{"type"}) // empty_desired | live_only_slot | dag_cycle | api_error_shaped_unexpected
+
+	// AnomaliesTotal is a non-versioned alias for Anomalies used in new code
+	// paths that bump the live-only-slot counter (drift anomalies). Same
+	// counter family as `Anomalies`.
+	AnomaliesTotal = Anomalies
 
 	// ReadOnly is 1 when the write circuit breaker is open.
 	ReadOnly = prometheus.NewGauge(prometheus.GaugeOpts{

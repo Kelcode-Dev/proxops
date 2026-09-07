@@ -620,6 +620,50 @@ func lxcValidNetSlot(s string) bool {
 // "searchdomain" as field names (probe-verified on PVE 9.2, identical to
 // the create-side keys). This is different from PVE 8, where the report
 // used "name" — pveconform only targets PVE 9.x.
+
+// DriftAnomalies surfaces live-only LXC mount-point slots (mp*) that the
+// manifest does not declare. Same semantics as VM.DriftAnomalies for disks:
+// pveconform will not automatically delete a live-only mount point (PVE's
+// `mpN=none` is detach-only, not volume-destroy), and a manifest-author
+// unaware of a hand-added mount point is exactly the shape we want to
+// surface on /status rather than silently delete.
+func (l *LXC) DriftAnomalies(current map[string]any) []string {
+	if current == nil {
+		return nil
+	}
+	want := map[string]bool{}
+	for i, m := range l.Spec.MountPoints {
+		slot := m.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("mp%d", i)
+		}
+		want[slot] = true
+	}
+	out := make([]string, 0, 2)
+	for k, raw := range current {
+		if !isMPSlot(k) {
+			continue
+		}
+		if !want[k] && !isNoneSlot(pveStr(raw)) {
+			out = append(out, fmt.Sprintf("live-only LXC mountpoint slot %s=%s is not in spec.mount-points; pveconform will not automatically remove it", k, pveStr(raw)))
+		}
+	}
+	return out
+}
+
+// isMPSlot matches PVE's LXC mount-point slot naming: mp*.
+func isMPSlot(k string) bool {
+	if len(k) < 3 || k[:2] != "mp" {
+		return false
+	}
+	for _, c := range k[2:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	if current == nil {
 		return nil, false, false

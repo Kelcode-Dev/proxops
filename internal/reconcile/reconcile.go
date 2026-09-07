@@ -107,7 +107,9 @@ type Result struct {
 	Pruned        int
 	PruneDeferred int
 	Skipped       int
-	Anomaly       string
+	Anomalies     int      // live-only-slot observations recorded this cycle
+	AnomaliesList []string // human reasons (one per anomaly; empty when none)
+	Anomaly       string   // full-cycle anomaly-guard text (empty-desired)
 }
 
 // RunOneCycle performs a single reconcile cycle.
@@ -218,6 +220,31 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 			slog.String("anomaly", pl.Anomaly))
 	}
 
+	// Anomalies: non-destructive live-only-slot observations. NEVER PVE
+	// writes — pveconform deliberately does not auto-delete a disk or
+	// mount point the manifest does not declare (PVE's scsiN=none only
+	// detaches; the underlying LVM volume remains). They are surfaced on
+	// /status (state=anomalous), /metrics (pveconform_anomalies_total{
+	// type="live_only_slot"}), and this log — the operator removes them
+	// manually if that is the intended move.
+	for _, an := range pl.Anomalies {
+		res.Anomalies++
+		res.AnomaliesList = append(res.AnomaliesList, an.Reason)
+		metrics.AnomaliesTotal.WithLabelValues("live_only_slot").Inc()
+		r.Store.BumpAnomaly()
+		r.Store.SetObject(&statusx.Object{
+			Kind: an.Kind, Name: an.Name, Node: an.Node, ID: an.ID,
+			State: statusx.Anomalous, LastAction: string(an.What),
+			LastError: an.Reason,
+		})
+		r.log.Warn("pveconform.anomaly",
+			slog.String("kind", string(an.Kind)),
+			slog.String("name", an.Name),
+			slog.String("node", an.Node),
+			slog.Int("id", an.ID),
+			slog.String("reason", an.Reason))
+	}
+
 	// Record desired-state objects so /status shows intended-but-yet-created.
 	for _, a := range pl.Actions {
 		if a.What == plan.Create || a.What == plan.Update {
@@ -241,6 +268,7 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 			slog.Int("actions", res.Actions),
 			slog.Int("skipped", res.Skipped),
 			slog.Int("prune_deferred", res.PruneDeferred),
+			slog.Int("anomalies", res.Anomalies),
 			slog.String("anomaly", res.Anomaly))
 		return res, pl, nil
 	}
@@ -274,13 +302,14 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 		slog.Int("pruned", res.Pruned),
 		slog.Int("prune_deferred", res.PruneDeferred),
 		slog.Int("skipped", res.Skipped),
+		slog.Int("anomalies", res.Anomalies),
 		slog.String("anomaly", res.Anomaly),
 		slog.String("commit", res.Commit),
 		slog.Bool("stale", res.DesiredStale))
 	return res, pl, nil
 }
 
-// LastGood is the last successfully parsed desired index (may be nil before
+// LastGood returns the last successfully parsed desired index (nil before
 // the first successful parse).
 func (r *Reconciler) LastGood() *parse.Index { return r.lastGood }
 

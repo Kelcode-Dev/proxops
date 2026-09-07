@@ -88,6 +88,10 @@ func (c *CTTemplate) DesiredState() string { return "" }
 // Deps implements Resource — CTTs have no pveconform-side references.
 func (c *CTTemplate) Deps() []Ref { return nil }
 
+// DriftAnomalies always returns nil: a CTTemplate is a storage artifact, not
+// a PVE object with per-slot live devices.
+func (c *CTTemplate) DriftAnomalies(current map[string]any) []string { return nil }
+
 // Validate implements Resource.
 func (c *CTTemplate) Validate() error {
 	nodes := c.Nodes()

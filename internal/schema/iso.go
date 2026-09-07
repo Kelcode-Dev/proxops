@@ -129,6 +129,11 @@ func (i *ISO) DesiredState() string { return "" }
 // Deps implements Resource — ISOs have no pveconform-side references.
 func (i *ISO) Deps() []Ref { return nil }
 
+// DriftAnomalies always returns nil: an ISO is a storage artifact, not a
+// PVE object with per-slot live devices. There is no "live-only ISO" shape
+// pveconform would have to surface.
+func (i *ISO) DriftAnomalies(current map[string]any) []string { return nil }
+
 // Validate implements Resource.
 func (i *ISO) Validate() error {
 	nodes := i.Nodes()

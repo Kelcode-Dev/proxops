@@ -32,7 +32,8 @@ const (
 	Start      ActionKind = "start"
 	Stop       ActionKind = "stop"
 	Delete     ActionKind = "delete"
-	StatusOnly ActionKind = "verify" // read-back
+	StatusOnly ActionKind = "verify"  // read-back
+	Anomaly    ActionKind = "anomaly" // non-destructive live-only slot surfacing
 )
 
 // Action is one planned operation on one PVE object.
@@ -69,6 +70,10 @@ type Action struct {
 	// Ref is the pveconform manifest Ref this action targets (nil for
 	// prunes of PVE-side objects not in git).
 	Ref schema.Ref
+	// Anomaly marks this action as a no-write observation. The executor
+	// skips it; the planner records it on Plan.Anomalies so /status +
+	// /metrics surface the live-only slot to the operator.
+	Anomaly bool
 }
 
 // Plan is the ordered result of one planning pass.
@@ -76,7 +81,11 @@ type Plan struct {
 	Actions  []Action
 	Skipped  []Action // live objects with no pveconform tag (never touched)
 	Deferred []Action // prunes beyond the per-cycle budget
-	Anomaly  string   // probable-bad-push signal, if any
+	Anomaly  string   // probable-bad-push signal (empty-desired anomaly guard)
+	// Anomalies: live-only-slot observations (pveconform will NOT delete
+	// them; the operator does that manually). Surfaced on /status +
+	// /metrics; never executed.
+	Anomalies []Action
 }
 
 // LiveInventory is the PVE-side snapshot the planner reads from.
@@ -140,9 +149,10 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 	_ = ctx
 
 	p := &Plan{
-		Actions:  make([]Action, 0, 32),
-		Skipped:  make([]Action, 0, 4),
-		Deferred: make([]Action, 0, 4),
+		Actions:   make([]Action, 0, 32),
+		Skipped:   make([]Action, 0, 4),
+		Anomalies: make([]Action, 0, 4),
+		Deferred:  make([]Action, 0, 4),
 	}
 	levels := opts.Levels
 	if levels == nil {
@@ -183,6 +193,30 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		}
 
 		updParams, stopFirst, changed := r.Drift(cfg)
+
+		// Non-destructive anomalies: live-only slots (VM disks / NICs / LXC
+		// mount-points) that the manifest does not declare. pveconform will
+		// NOT auto-delete these (the executor skips Anomaly actions); they
+		// are surfaced on /status + /metrics so the operator can remove
+		// them by hand.
+		if anomalies := r.DriftAnomalies(cfg); anomalies != nil {
+			for _, msg := range anomalies {
+				an := Action{
+					Tier:    0,
+					Kind:    kt,
+					Name:    ref.Name,
+					Node:    r.Node(),
+					ID:      r.ID(),
+					What:    Anomaly,
+					Level:   levels(ref),
+					Ref:     ref,
+					Reason:  ref.String() + ": " + msg,
+					Anomaly: true,
+				}
+				p.Anomalies = append(p.Anomalies, an)
+			}
+		}
+
 		if changed {
 			reason := ref.String() + ": config drift"
 			if stopFirst {
@@ -360,7 +394,7 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 	//      first), then What (Create < Update < power), Node, ID, Name.
 	//   3. Within tier 9: prunes are all VM/LXC — no dependencies in
 	//      the artifact layer; ordering is stable-deterministic.
-	whatRank := map[ActionKind]int{Create: 0, Update: 1, StatusOnly: 2, Start: 3, Stop: 4, Delete: 9}
+	whatRank := map[ActionKind]int{Create: 0, Update: 1, StatusOnly: 2, Start: 3, Stop: 4, Delete: 9, Anomaly: 10}
 	sort.SliceStable(p.Actions, func(i, j int) bool {
 		a, b := p.Actions[i], p.Actions[j]
 		if a.Tier != b.Tier {

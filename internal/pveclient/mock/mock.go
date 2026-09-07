@@ -728,10 +728,21 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, node string, id 
 }
 
 // storageRoute handles /nodes/{n}/storage/{sid}[/{sub}[/{content}]].
-// The pveclient only issues:
-//   - GET  /nodes/{n}/storage/{sid}             → storage info
-//   - GET  /nodes/{n}/storage/{sid}/content/iso → ISO listing (volid array)
-//   - POST /nodes/{n}/storage/{sid}/download    → download (async task)
+// PVE 9.2 contract (probed live on conformance-dev; see docs/OPERATIONS.md):
+//   - GET  /nodes/{n}/storage/{sid}                      → storage info
+//   - GET  /nodes/{n}/storage/{sid}/content              → bare listing
+//   - GET  /nodes/{n}/storage/{sid}/content/{iso|vztmpl} → PVE 9.2 quirk:
+//     500 "unable to
+//     parse directory
+//     volume name"
+//   - POST /nodes/{n}/storage/{sid}/download-url         → PVE 9.2 artifact
+//     download (url,
+//     filename, content)
+//   - POST /nodes/{n}/storage/{sid}/download             → PVE 9.2 realism:
+//     501 "Method not
+//     implemented" (the
+//     PVE 8-era path;
+//     renamed upstream)
 func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest string) {
 	parts := strings.Split(rest, "/")
 	if len(parts) < 2 || parts[0] != "storage" {
@@ -782,12 +793,16 @@ func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest
 		s.mu.Unlock()
 		writeOK(w, out)
 
-	// POST /storage/{sid}/download → async download task. Content type is
-	// selected by the `content` form param: "iso" (default) or "vztmpl".
-	// The mock routes to the corresponding pool.
-	case len(parts) == 3 && parts[2] == "download":
+	// PVE 9.2 contract (probed live on conformance-dev): the artifact
+	// download endpoint is POST /storage/{sid}/download-url with form
+	// params url, filename, content ("iso" or "vztmpl"). The old PVE 8-era
+	// path /storage/{sid}/download returns 501 "Method ... not implemented"
+	// on PVE 9.2 dir storage. The mock mirrors both so that regression
+	// tests catch future flips.
+	case len(parts) == 3 && parts[2] == "download-url":
 		if r.Method != http.MethodPost {
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			// PVE returns 501 for GET /download-url.
+			writeErr(w, http.StatusNotImplemented, "Method 'GET /nodes/"+node+"/storage/"+sid+"/download-url' not implemented")
 			return
 		}
 		s.mu.Lock()
@@ -830,6 +845,20 @@ func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest
 		upid := s.newTaskLocked(node, "download")
 		s.mu.Unlock()
 		writeOK(w, upid)
+
+	// Legacy PVE 8-era /download path. PVE 9.2 dir storage returns 501
+	// "Method 'POST /nodes/.../storage/.../download' not implemented" —
+	// the endpoint was renamed /download-url. The mock mirrors this
+	// realism so any regression to the old path pokes 501 on the mock
+	// exactly as it would against PVE 9.2.
+	case len(parts) == 3 && parts[2] == "download":
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusNotImplemented,
+				fmt.Sprintf("Method '%s /nodes/%s/storage/%s/download' not implemented", r.Method, node, sid))
+			return
+		}
+		writeErr(w, http.StatusNotImplemented,
+			fmt.Sprintf("Method 'POST /nodes/%s/storage/%s/download' not implemented — PVE 9.2 moved artifact download to /download-url", node, sid))
 
 	// GET /storage/{sid} → storage info (also catches longer unknown tails
 	// conservatively: only the bare form matches, the rest 404).

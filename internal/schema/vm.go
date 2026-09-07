@@ -616,6 +616,116 @@ func (v *VM) cdromSlot() string {
 // cloud-init → ide3 rule).
 func (v *VM) CdromSlot() string { return v.cdromSlot() }
 
+// DriftAnomalies surfaces live-only disk and NIC slots that pveconform's
+// manifest does not declare but PVE reports on this VM. These are
+// "manual drift" — a human added a drive/NIC in the PVE GUI that the
+// manifest doesn't know about. pveconform NEVER auto-deletes them:
+//
+//   - PVE's `scsiN=none` detach does not delete the LVM volume
+//     (probe-verified on PVE 9.2) — the only reliable deletion is
+//     `DELETE /qemu/{id}/storage/{pool}/{volid}`, which is a host-level
+//     data-destroying action we must not take without explicit user intent.
+//   - Deleting a NIC is less destructive but still user-visible.
+//
+// The planner records each anomaly as a `Skipped` action so the
+// operator sees it on /status and /metrics without pveconform changing
+// PVE. Removing the live-only device is a separate, explicit operator
+// step (e.g. `qm set` or `pvesm` in the PVE Web UI).
+func (v *VM) DriftAnomalies(current map[string]any) []string {
+	if current == nil {
+		return nil
+	}
+	// Desired disk slots: every spec.disks entry + any slot the manifest
+	// uses as a default (scsi<i> when slot is empty).
+	wantDisks := map[string]bool{}
+	for i, d := range v.Spec.Disks {
+		slot := d.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("scsi%d", i)
+		}
+		wantDisks[slot] = true
+	}
+	out := make([]string, 0, 4)
+	for k, raw := range current {
+		switch {
+		case isDiskSlot(k):
+			if !wantDisks[k] && !isNoneSlot(pveStr(raw)) {
+				out = append(out, fmt.Sprintf("live-only disk slot %s=%s is not in spec.disks; pveconform will not automatically remove a live-only disk", k, pveStr(raw)))
+			}
+		case isNICSlot(k):
+			want := map[string]bool{}
+			for i, n := range v.Spec.NICs {
+				slot := n.Slot
+				if slot == "" {
+					slot = fmt.Sprintf("net%d", i)
+				}
+				want[slot] = true
+			}
+			if !want[k] {
+				out = append(out, fmt.Sprintf("live-only NIC slot %s=%s is not in spec.networks; pveconform will not automatically remove it", k, pveStr(raw)))
+			}
+		}
+	}
+	// Sort for determinism.
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j] < out[i] {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
+// isDiskSlot matches PVE's QEMU data-disk slot naming: scsi*, virtio*, sata*.
+// `ide0`/`ide1` are cloud-init + EFI-vars slots; `ide2`/`ide3` are CD/DVD
+// slots and are matched by DriftAnomalies only via the CDDrive state
+// machine (pveconform models cdrom via `spec.hardware.cdrom`, never via a
+// disk entry), so we exclude them here.
+func isDiskSlot(k string) bool {
+	for _, prefix := range []string{"scsi", "virtio", "sata"} {
+		if strings.HasPrefix(k, prefix) {
+			rest := k[len(prefix):]
+			if rest == "" {
+				return false
+			}
+			for _, c := range rest {
+				if c < '0' || c > '9' {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// isNICSlot matches PVE's QEMU NIC slot naming: net*.
+func isNICSlot(k string) bool {
+	if !strings.HasPrefix(k, "net") {
+		return false
+	}
+	rest := k[len("net"):]
+	if rest == "" {
+		return false
+	}
+	for _, c := range rest {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isNoneSlot reports whether PVE reported the slot in its "detached / none"
+// form. PVE reports `scsiN = none,media=cdrom` for a slot it detached via
+// `scsiN=none`; it reports the bare `scsiN = none` when it cleared via the
+// UI "delete" button. Both are treated as no-live-device, not an anomaly.
+func isNoneSlot(s string) bool {
+	s = strings.TrimSpace(s)
+	return s == "none" || strings.HasPrefix(s, "none,") || strings.HasPrefix(s, "none;")
+}
+
 // cdromManagedState returns whether the manifest declares a `cdrom` block
 // and, if so, whether it is the "attach" (real ISO ref) or the "detach"
 // (iso: none sentinel) state. Used at ToCreateParams/Drift time so the

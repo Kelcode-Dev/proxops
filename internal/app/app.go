@@ -306,8 +306,8 @@ func (a *Agent) statusReport() string {
 	if cyc.DesiredStale {
 		buf.lines = append(buf.lines, "DESIRED STATE IS STALE (git fetch has been failing)")
 	}
-	buf.lines = append(buf.lines, fmt.Sprintf("objects=%d actions_ok=%d actions_err=%d pruned=%d prune_deferred=%d",
-		cyc.Objects, cyc.ActionsOK, cyc.ActionsError, cyc.Pruned, cyc.PruneDeferred))
+	buf.lines = append(buf.lines, fmt.Sprintf("objects=%d actions_ok=%d actions_err=%d pruned=%d prune_deferred=%d anomalies=%d",
+		cyc.Objects, cyc.ActionsOK, cyc.ActionsError, cyc.Pruned, cyc.PruneDeferred, cyc.Anomalies))
 	for _, o := range a.store.Objects() {
 		line := fmt.Sprintf("  %-8s %-40s %-10s %-12s %s",
 			o.Kind, o.Name, shortID(o.ID), shortState(o.State), o.PruneReason)
@@ -341,6 +341,12 @@ func (a *Agent) Diff(ctx context.Context) (string, error) {
 	}
 	if res.Anomaly != "" {
 		b += "\nANOMALY: " + res.Anomaly + "\n"
+	}
+	if len(res.AnomaliesList) > 0 {
+		b += fmt.Sprintf("\nANOMALIES (%d live-only slots pveconform will NOT auto-remove):\n", len(res.AnomaliesList))
+		for _, msg := range res.AnomaliesList {
+			b += "  - " + msg + "\n"
+		}
 	}
 	if b == "" {
 		b = "no drift — PVE matches git"

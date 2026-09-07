@@ -31,6 +31,9 @@ const (
 	Pruned State = "pruned"
 	// Skipped: not acted on this cycle (deferred / untagged / read-only).
 	Skipped State = "skipped"
+	// Anomalous: live-only PVE devices that pveconform intentionally does
+	// NOT auto-delete; surfaced to the operator on /status.
+	Anomalous State = "anomalous"
 	// InProgress: an action is underway.
 	InProgress State = "in_progress"
 	// Failed: the last action errored.
@@ -67,6 +70,7 @@ type Cycle struct {
 	ActionsError  int       `json:"actions_error"`
 	Pruned        int       `json:"pruned"`
 	PruneDeferred int       `json:"prune_deferred"`
+	Anomalies     int       `json:"anomalies"`
 	DesiredStale  bool      `json:"desired_stale"`
 	ReadOnly      bool      `json:"read_only"`
 	Aborted       bool      `json:"aborted"`
@@ -144,6 +148,17 @@ func (s *Store) BumpPruneDeferred() {
 	defer s.mu.Unlock()
 	if s.last != nil {
 		s.last.PruneDeferred++
+	}
+}
+
+// BumpAnomaly increments the anomaly counter on the current cycle.
+// Anomalies are live-only-slot observations pveconform intentionally did
+// not act on (non-destructive by design).
+func (s *Store) BumpAnomaly() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.last != nil {
+		s.last.Anomalies++
 	}
 }
 
