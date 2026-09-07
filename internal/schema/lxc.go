@@ -665,10 +665,13 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	if pveStr(current["hostname"]) != wantHost {
 		upd["hostname"] = wantHost
 	}
-	// nameserver (CSV on PVE /config)
+	// nameserver: PVE accepts comma-separated CSV on create/update
+	// ("1.1.1.1,8.8.8.8") but reports space-separated on /config
+	// ("1.1.1.1 8.8.8.8"). Normalize both sides and compare as a set
+	// so PVE's whitespace reformat does not trip drift.
 	if len(l.Spec.DNS.Nameservers) > 0 {
 		want := strings.Join(l.Spec.DNS.Nameservers, ",")
-		if pveStr(current["nameserver"]) != want {
+		if !nameserverEquals(pveStr(current["nameserver"]), want) {
 			upd["nameserver"] = want
 		}
 	}
@@ -678,9 +681,13 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 			upd["searchdomain"] = l.Spec.DNS.Domain
 		}
 	}
-	// description
-	if l.Spec.PveDescription != "" && pveStr(current["description"]) != l.Spec.PveDescription {
-		upd["description"] = l.Spec.PveDescription
+	// description: PVE reports descriptions with a trailing newline when
+	// the manifest set a newline; trim both sides so a trailing \n does
+	// not trip drift.
+	if l.Spec.PveDescription != "" {
+		if strings.TrimSpace(pveStr(current["description"])) != strings.TrimSpace(l.Spec.PveDescription) {
+			upd["description"] = l.Spec.PveDescription
+		}
 	}
 	// tags
 	if !tagsEqual(current["tags"], l.allTags()) {

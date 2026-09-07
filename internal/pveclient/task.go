@@ -38,7 +38,27 @@ type TaskStatus struct {
 func (s TaskStatus) IsStopped() bool { return s.Status == "stopped" }
 
 // IsOK reports whether the task terminated successfully.
-func (s TaskStatus) IsOK() bool { return s.Status == "stopped" && s.ExitStatus == "OK" }
+//
+// PVE task exit-status vocabulary:
+//   - "OK"               → success
+//   - "WARNINGS: N"      → success with N cosmetic warnings (PVE's exit code
+//     "0 with warnings"; still a success)
+//   - "ERROR: <text>" /
+//     "FAILED: <text>"   → failure
+//
+// Treating "WARNINGS:" as success matches PVE's own semantics (e.g. `qm`
+// returns exit code 0 when it emits a warning).
+func (s TaskStatus) IsOK() bool {
+	if s.Status != "stopped" {
+		return false
+	}
+	switch {
+	case strings.EqualFold(s.ExitStatus, "OK"),
+		strings.HasPrefix(strings.ToUpper(s.ExitStatus), "WARNINGS:"):
+		return true
+	}
+	return false
+}
 
 // TaskID identifies a PVE task.
 type TaskID struct {
