@@ -60,10 +60,15 @@ type NIC struct {
 //   - be "none" (no CD attached), in which case iso is empty and pveconform
 //     renders `cdrom=none`.
 //
-// The ISO reference creates an inferred dependency (see VM.Deps).
+// The ISO reference creates an inferred dependency only in the attach
+// state; both "absent" and "none" leave VM.Deps() empty.
+const CDROMNone = "none"
+
 type CDDrive struct {
-	// Iso is a pveconform ISO metadata.name. Empty + media unset or "none"
-	// renders `cdrom=none` (no CD attached).
+	// Iso is a pveconform ISO metadata.name, or the CDROMNone sentinel.
+	// An empty Iso is used only when the manifest has an intentionally
+	// empty `hardware.cdrom` block — pveconform then treats the PVE IDE
+	// cdrom slot as not owned.
 	Iso string `yaml:"iso,omitempty" json:"iso,omitempty"`
 	// Media is PVE's `media=` option on the cdrom ("cdrom" default).
 	Media string `yaml:"media,omitempty" json:"media,omitempty"`
@@ -114,7 +119,7 @@ type VMHardware struct {
 	BIOS string `yaml:"bios,omitempty" json:"bios,omitempty"`
 	// Vga / Display is PVE's `vga` ("std" default).
 	Display string `yaml:"display,omitempty" json:"display,omitempty"`
-	// Cdrom is the PVE cdrom device.
+	// Cdrom is the PVE cdrom device. See CDROMNone for the sentinel.
 	Cdrom CDDrive `yaml:"cdrom,omitempty" json:"cdrom,omitempty"`
 	// EFIDisk is PVE's `efidisk0` (only valid when bios=ovmf).
 	EFIDisk *EFIDisk `yaml:"efi-disk,omitempty" json:"efi-disk,omitempty"`
@@ -199,13 +204,14 @@ type VM struct {
 	Metadata   Metadata `yaml:"metadata" json:"metadata"`
 	Spec       VMSpec   `yaml:"spec" json:"spec"`
 
-	// Resolved artifact-reference bookkeeping, populated by
-	// ResolveArtifactRefs before the planner runs. cdromVolid is the PVE
-	// cdrom wire value ("local:iso/x.iso,media=cdrom") or "" when no ISO is
-	// referenced. cdromHasISO reports whether the VM references an ISO at
-	// all.
-	cdromVolid  string
-	cdromHasISO bool
+	// cdromVolid holds the PVE ISO volume id ("<pool>:iso/<file>") when
+	// spec.hardware.cdrom.iso references an ISO artifact, or "" otherwise
+	// (iso: none / iso: <missing> / no cdrom). It is populated by
+	// ResolveArtifactRefs. The 3-state cdrom classification (unmanaged /
+	// attach / detach) derives from the manifest itself (see
+	// cdromManagedState), independent of this field, so ToCreateParams/Drift
+	// behave consistently even in pre-resolution unit tests.
+	cdromVolid string
 }
 
 // NewVM returns an empty VM.
@@ -240,12 +246,12 @@ func (v *VM) DesiredState() string {
 
 // Deps implements Resource. A VM has exactly one structured dependency:
 // an ISO reference on spec.hardware.cdrom.iso. Returns [] when the VM does
-// not reference an ISO.
+// not reference an ISO (either cdrom omitted or cdrom.iso = "none").
 //
 // The planner merges Deps with the metadata.depends-on annotation edge and
 // enforces the DAG (unknown references fail closed; cycles fail closed).
 func (v *VM) Deps() []Ref {
-	if v.Spec.Hardware.Cdrom.Iso == "" {
+	if iso := strings.TrimSpace(v.Spec.Hardware.Cdrom.Iso); iso == "" || iso == CDROMNone {
 		return nil
 	}
 	return []Ref{{Kind: KindISO, Name: v.Spec.Hardware.Cdrom.Iso}}
@@ -490,12 +496,32 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 	if hw.CloudInit.Enabled {
 		p["ide2"] = fmt.Sprintf("%s:cloudinit,size=%s", hw.CloudInit.Storage, hw.CloudInit.Size)
 	}
-	// cdrom slot: PVE normalizes cdrom= to ide2/ide3 depending on
-	// cloud-init placement. Emit the resolved volid when we reference an
-	// ISO; the planner is responsible for ordering the ISO create before
-	// this VM (so the file exists on PVE by the time the VM is created).
-	if v.cdromHasISO && v.cdromVolid != "" {
-		p[v.cdromSlot()] = v.cdromVolid
+	// cdrom slot: pveconform only owns the IDE cdrom slot when
+	// spec.hardware.cdrom is declared. When declared and iso=<artifact>,
+	// pveconform emits the resolved PVE volid (or the ISO name when
+	// ResolveArtifactRefs hasn't run yet — unit tests); when declared
+	// and iso=none, pveconform emits "none" (detach). When the manifest
+	// has no cdrom block, pveconform leaves the PVE slot alone.
+	//
+	// PVE 9.2: always ide2 regardless of cloud-init placement (verified
+	// via the cdrom= alias on i440fx AND q35, both with+without
+	// cloud-init). PVE stores cdrom on ide2 and aliases `cdrom=X` to
+	// `ide2` in config reports.
+	if managed, hasISO := v.cdromManagedState(); managed {
+		if hasISO {
+			src := v.cdromVolid
+			if src == "" {
+				src = v.Spec.Hardware.Cdrom.Iso
+			}
+			media := v.Spec.Hardware.Cdrom.Media
+			if media == "" {
+				media = "cdrom"
+			}
+			p[v.cdromSlot()] = src + ",media=" + media
+		} else {
+			// detach state: cdrom.iso = "none".
+			p[v.cdromSlot()] = CDROMNone
+		}
 	}
 	if hw.EFIDisk != nil {
 		efiStr := fmt.Sprintf("%s:%s", hw.EFIDisk.Storage, GiBString(diskBytes(hw.EFIDisk.Size)))
@@ -590,16 +616,48 @@ func (v *VM) cdromSlot() string {
 // cloud-init → ide3 rule).
 func (v *VM) CdromSlot() string { return v.cdromSlot() }
 
-// CdromWireValue returns PVE's cdrom wire form
-// ("local:iso/x.iso,media=cdrom") when the VM references an ISO, or ""
-// when no ISO is referenced. The value is resolved during parse (via
-// ResolveArtifactRefs) so the planner can order the ISO download before the
-// VM create without the VM itself needing to know the artifact's storage.
+// cdromManagedState returns whether the manifest declares a `cdrom` block
+// and, if so, whether it is the "attach" (real ISO ref) or the "detach"
+// (iso: none sentinel) state. Used at ToCreateParams/Drift time so the
+// 3-state cdrom is consistent even before ResolveArtifactRefs has run
+// (unit tests that exercise ToCreateParams directly see the right
+// state). Resolved cdromVolid is only non-empty after resolve runs; this
+// detector is independent and is the single source of truth.
+func (v *VM) cdromManagedState() (managed bool, hasISO bool) {
+	iso := strings.TrimSpace(v.Spec.Hardware.Cdrom.Iso)
+	if iso == "" {
+		return false, false
+	}
+	if iso == CDROMNone {
+		return true, false
+	}
+	return true, true
+}
+
+// CdromWireValue returns the full PVE cdrom wire value pveconform will put
+// on the IDE slot, mirroring ToCreateParams:
+//   - attach (iso: <ref>)  → "<src>,media=<m>" where <src> is the resolved
+//     PVE volid (or the spec name when ResolveArtifactRefs hasn't run) and
+//     <m> is the manifest media (default "cdrom").
+//   - detach (iso: none)   → "none".
+//   - unmanaged (no block) → "".
 func (v *VM) CdromWireValue() string {
-	if !v.cdromHasISO {
+	managed, hasISO := v.cdromManagedState()
+	if !managed {
 		return ""
 	}
-	return v.cdromVolid
+	if !hasISO {
+		return CDROMNone
+	}
+	src := v.cdromVolid
+	if src == "" {
+		src = v.Spec.Hardware.Cdrom.Iso
+	}
+	media := v.Spec.Hardware.Cdrom.Media
+	if media == "" {
+		media = "cdrom"
+	}
+	return src + ",media=" + media
 }
 
 // Drift implements Resource. Given a current PVE config (as returned by
@@ -754,21 +812,51 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 		}
 	}
 
-	// cdrom: PVE stores the CD/DVD at the ide slot (ide2 unless cloud-init
-	// is enabled, then ide3). We own pool + filename + media. PVE attaches
-	// a size token to the report that we do NOT own ("local-lvm:...-cd-0,
-	// media=cdrom,size=755M"). Compare on the ISO identity.
-	{
+	// cdrom: PVE stores the CD/DVD at the ide slot (PVE 9.2: always ide2,
+	// regardless of cloud-init placement — verified via the `cdrom=<vol>,
+	// media=cdrom` form alias on i440fx AND q35 machines, both with and
+	// without a cloud-init drive). PVE reports the cdrom with a PVE-assigned
+	// `media=` option + a size token. pveconform owns pool + filename +
+	// media when spec.hardware.cdrom is declared; when the manifest has no
+	// cdrom block, pveconform does NOT own the PVE slot.
+	//
+	// Three-state:
+	//   1. cdromManaged=false (absent)            → skip
+	//   2. cdromManaged=true, cdromHasISO=true    → compare ISO pool+file
+	//   3. cdromManaged=true, cdromHasISO=false   → cdrom.iso = "none" →
+	//                                       compare against PVE's "none"
+	//                                       rendering and emit `ide2=none`
+	//                                       when PVE still has a CD on it.
+	// cdrom: PVE 9.2 cdrom slots are ALWAYS ide2 regardless of cloud-init
+	// placement (verified live). PVE reports cdrom with a PVE-assigned
+	// `media=` option + `size=` token. pveconform owns the slot when
+	// `cdrom` is declared; not owned when absent. Three-state:
+	//   1. managed=false (absent)               → skip
+	//   2. managed=true, hasISO=true            → compare resolved volid
+	//   3. managed=true, hasISO=false (iso:none)→ compare against PVE's
+	//                                               "none" rendering; emit
+	//                                               `ide2=none` when PVE
+	//                                               still has a CD.
+	if managed, hasISO := v.cdromManagedState(); managed {
 		slot := v.cdromSlot()
 		curCdrom := pveStr(current[slot])
-		// Only compare/emit when the VM owns the cdrom slot. If the slot
-		// holds PVE-assigned content we don't manage (e.g. user attached an
-		// ISO by hand before adoption) and the manifest declares no cdrom,
-		// leave it alone — pveconform only owns what spec.hardware.cdrom
-		// declares.
-		if v.cdromHasISO {
-			if !cdromMatches(curCdrom, v.cdromVolid) {
-				upd[slot] = v.cdromVolid
+		if hasISO {
+			src := v.cdromVolid
+			if src == "" {
+				src = v.Spec.Hardware.Cdrom.Iso
+			}
+			if !cdromMatches(curCdrom, src) {
+				media := v.Spec.Hardware.Cdrom.Media
+				if media == "" {
+					media = "cdrom"
+				}
+				upd[slot] = src + ",media=" + media
+				stop = true
+			}
+		} else {
+			trimmed := strings.TrimSpace(curCdrom)
+			if trimmed != "" && trimmed != CDROMNone && !strings.HasPrefix(trimmed, CDROMNone) {
+				upd[slot] = CDROMNone
 				stop = true
 			}
 		}

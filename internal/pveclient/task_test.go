@@ -9,9 +9,9 @@ import "testing"
 // flagged WARNINGS as failures.
 func TestTaskStatusIsOK(t *testing.T) {
 	cases := []struct {
-		name    string
-		status  TaskStatus
-		wantOK  bool
+		name   string
+		status TaskStatus
+		wantOK bool
 	}{
 		{"ok", TaskStatus{Status: "stopped", ExitStatus: "OK"}, true},
 		{"warnings1", TaskStatus{Status: "stopped", ExitStatus: "WARNINGS: 1"}, true},

@@ -61,9 +61,9 @@ func TestLXCNameserverDriftsOnRealChange(t *testing.T) {
 	live := map[string]any{
 		"memory": int64(1024), "cores": 1,
 		"tags": []any{"pveconform"}, "hostname": "lxc",
-		"nameserver":   "1.1.1.1 8.8.8.8", // PVE's current state: does not match
-		"rootfs":       "local:vm-9200-disk-0,size=4G",
-		"net0":         "name=net0,bridge=vmbr0",
+		"nameserver": "1.1.1.1 8.8.8.8", // PVE's current state: does not match
+		"rootfs":     "local:vm-9200-disk-0,size=4G",
+		"net0":       "name=net0,bridge=vmbr0",
 	}
 	upd, _, changed := lxc.Drift(live)
 	if !changed {

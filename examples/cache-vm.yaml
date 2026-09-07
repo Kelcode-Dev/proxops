@@ -32,14 +32,21 @@ spec:
     # machine: q35     # i440fx (PVE default) | q35
     # bios: ovmf       # seabios (PVE default) | ovmf
     # display: std     # PVE `vga` (default)
-    # cdrom:
-    #   iso: base-iso  # references an ISO manifest -> inferred dependency
-    # efi-disk:        # valid only when bios=ovmf
+    # cdrom — three states:
+    #   (block absent)          pveconform does NOT own the PVE IDE slot; PVE
+    #                           keeps its default
+    #   cdrom:                  pveconform owns the slot and attaches the
+    #     iso: base-iso         referenced ISO. Creates a structured VM->ISO
+    #                           dependency (planner orders the download).
+    #   cdrom:                  pveconform owns the slot and DETACHES it
+    #     iso: none             (emits `ide<N>=none`). Use to model "no CD
+    #                           ever", or to remove an ISO ref previously.
+    # efi-disk:                 # valid only when bios=ovmf
     #   storage: local-lvm
     #   size: 8MiB
     # cloud-init:
     #   enabled: true
-    #   storage: local
+    #   storage: local          # claims ide2 → cdrom slot shifts to ide3
     # tpm:
     #   version: v2.0
     # serial0: socket

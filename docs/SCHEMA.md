@@ -116,10 +116,13 @@ Behaviour:
 | `machine` | no | `machine` | `i440fx` (default) \| `q35`. Stop-required to change. |
 | `bios` | no | `bios` | `seabios` (default) \| `ovmf` on PVE 9.2. Stop-required. |
 | `display` | no | `vga` | e.g. `std`. |
-| `cdrom.iso` | no | `ide2`/`ide3` = `<storage>:iso/<filename>,media=cdrom` | **An ISO `metadata.name`.** Creates a structured `VM → ISO` dependency. When present, the VM is not created until the ISO has been downloaded on that node. |
+| `cdrom` (block) | no | `ide2` / `ide3` | Three-state CD/DVD ownership (see below). |
+| `cdrom.iso` (attach) | no | `ide2`/`ide3` = `<storage>:iso/<filename>,media=cdrom` | **An ISO `metadata.name`.** Attaches the ISO to the CD/DVD slot and creates a structured `VM → ISO` dependency: the VM is not created until the ISO has been downloaded on that node. |
+| `cdrom.iso` = `none` (detach) | no | `ide2`/`ide3` = `none` | **Detach sentinel.** pveconform owns the slot and writes `none`. Use to model "no CD ever", or remove a previously-attached ISO (change `cdrom.iso: <name>` → `cdrom.iso: none`, reconcile to detach). |
+| (block absent) | no | — | pveconform does **not** own the PVE IDE slot; PVE keeps its default. No dependency inferred. |
 | `cdrom.media` | no | `,media=` | `cdrom` (default) \| `disk`. |
-| `efi-disk` | no | `efidisk0` | Valid with `bios: ovmf`. Owns pool + size; PVE volume name not owned. |
-| `cloud-init` | no | `ide2` = `<storage>:cloudinit,size=…` | When enabled, PVE claims `ide2`; cdrom shifts to `ide3`. |
+| `efi-disk` | no | `efidisk0` | Valid with `bios: ovmf`. Owns pool + size; PVE volume name not owned. PVE clamps small EFI sizes to 4 MiB. |
+| `cloud-init` | no | `ide2` = `<storage>:cloudinit,size=…` | When enabled, pveconform claims `ide2` for cloud-init and shifts the CD/DVD slot to `ide3` (demonstrated coexistence on PVE 9.2). |
 | `tpm` | no | `tpm0` | `v1.2` \| `v2.0`. With `bios: ovmf` + `machine: q35`. |
 | `serial0` | no | `serial0` | e.g. `socket`. |
 
@@ -279,7 +282,7 @@ on pveconform.
 Reconcile semantics mirror CTTemplate (download per missing node, idempotent,
 never pruned, fail-closed on unreadable listing).
 
-VMs reference an ISO by `metadata.name` via `spec.hardware.cdrom.iso`; that
+VMs reference an ISO by `metadata.name` via `spec.hardware.cdrom.iso` (attach state); that
 edge is a structured dependency (so the ISO is downloaded on the VM's node
 before the VM is created) and requires no `depends-on`.
 

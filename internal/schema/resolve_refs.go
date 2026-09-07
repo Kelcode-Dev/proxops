@@ -1,6 +1,9 @@
 package schema
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // This file holds the artifact-reference resolver: it turns the structured
 // references that VM (spec.hardware.cdrom.iso) and LXC (spec.template) carry
@@ -45,9 +48,18 @@ func ResolveArtifactRefs(resources []Resource) error {
 
 // resolveCDrom binds the VM's spec.hardware.cdrom.iso reference to the
 // referenced ISO's PVE volid and records the IDE slot PVE will wire it at.
+// Three states:
+//   - iso empty            → cdromManaged=false (pveconform does NOT own the slot)
+//   - iso = CDROMNone      → cdromManaged=true, cdromVolid="none"
+//   - iso = <ISO name>     → cdromManaged=true, cdromVolid="<storage>:iso/<filename>[,media=X]"
+//
+// When iso=<ISO name>, pveconform also validates that the ISO is
+// placed on the VM's node (the ISO must be downloaded before the VM's
+// cdrom is attached at create time).
 func (v *VM) resolveCDrom(byRef map[Ref]Resource) error {
-	isoName := v.Spec.Hardware.Cdrom.Iso
-	if isoName == "" {
+	isoName := strings.TrimSpace(v.Spec.Hardware.Cdrom.Iso)
+	if isoName == "" || isoName == CDROMNone {
+		// Unmanaged or detach ("none") — no ISO artifact to resolve.
 		v.cdromVolid = ""
 		return nil
 	}
@@ -63,14 +75,7 @@ func (v *VM) resolveCDrom(byRef map[Ref]Resource) error {
 		return fmt.Errorf("%s: spec.hardware.cdrom.iso %q is not placed on node %s (ISO nodes: %v)",
 			v.Ref(), isoName, v.Spec.Node, iso.Nodes())
 	}
-	// PVE's ISO volid on dir storage is "<storage>:iso/<filename>".
-	vol := iso.Spec.Storage + ":iso/" + iso.Spec.Filename
-	media := v.Spec.Hardware.Cdrom.Media
-	if media == "" {
-		media = "cdrom"
-	}
-	v.cdromVolid = vol + ",media=" + media
-	v.cdromHasISO = true
+	v.cdromVolid = iso.Spec.Storage + ":iso/" + iso.Spec.Filename
 	return nil
 }
 
