@@ -1,14 +1,24 @@
-# Demonstrates `depends-on`: this VM wants a base image before it is ever
-# created. The annotation documents intent and is validated (unknown target /
-# cycle -> cycle abort). It is NOT a hard topological gate in the MVP
-# planner — see docs/SCHEMA.md ("depends-on") for current semantics.
+# Demonstrates dependency inference.
+#
+# Two independent mechanisms build this VM's prerequisites:
+#
+#  1. STRUCTURED (inferred): spec.hardware.cdrom.iso names an ISO manifest
+#     ("talos-1-8-0"). pveconform derives an ISO -> VM edge from it, so the
+#     installer ISO is downloaded before the VM is created. No annotation
+#     required.
+#  2. ANNOTATION (escape hatch): the proxops/depends-on edge declares
+#     this VM also wants the "golden-base" CTTemplate ready. Use this for
+#     relationships that are not expressible in a structured field.
+#
+# Both edge sets are merged by the parser; unknown targets and cycles fail
+# the whole cycle (fail-closed). The planner creates prerequisites first,
+# in deterministic topological order.
 apiVersion: proxops/v1alpha1
 kind: VM
 metadata:
   name: app-vm
   annotations:
-    # Comma-separated "Kind:name" refs to other manifests in this tree.
-    proxops/depends-on: "CTTemplate:golden-base,ISO:talos-1-8-0"
+    proxops/depends-on: "CTTemplate:golden-base"
 spec:
   node: pve01
   vmid: 400
@@ -21,6 +31,9 @@ spec:
       size: 20GiB
       interface: scsi0
       controller: virtio-scsi-single
+  hardware:
+    cdrom:
+      iso: talos-1-8-0    # -> inferred dependency on ISO "talos-1-8-0"
   networks:
     - model: virtio
       bridge: vmbr0

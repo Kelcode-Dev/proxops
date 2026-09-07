@@ -48,11 +48,22 @@ file beyond the git cache.
 ### parse — manifest tree → typed Index
 
 Walks `*.yaml`/`*.yml`, decodes each document into the right `schema.Resource`
-(VM / LXC / CTTemplate / ISO), validates it (including pinned-`vmid` > 0,
-node-name shape, quantity units), checks for duplicate refs AND duplicate
-PVE-ids within a node (the id space is shared), and resolves the `depends-on`
-DAG (cycle → error → cycle aborts). Parse errors are **fail-closed**: the whole
-cycle aborts, last-good tree retained.
+(VM / LXC / CTTemplate / ISO), validates it (including pinned-`vmid` > 0 for
+ids, node-name shape, quantity units, and that LXCs reference a template),
+checks for duplicate refs AND duplicate PVE-ids within a node (the id space is
+shared for VM/LXC; artifacts have no id), then resolves the **dependency DAG**:
+
+- **structured edges** — `schema.Resource.Deps()` yields inferred edges
+  (`VM → ISO` via `spec.hardware.cdrom.iso`, `LXC → CTTemplate` via
+  `spec.template`);
+- **annotation edges** — the `proxops/depends-on` `Kind:name` list.
+
+`parse.ResolveArtifactRefs` (via `schema.ResolveArtifactRefs`) validates both
+edge sets: unknown targets and reference cycles fail closed and abort the whole
+cycle; it also rewrites the referencing VM/LXC so the resolved PVE storage
+volume (`local:iso/…`, `local:vztmpl/…`) is embedded and the referencing node is
+a declared placement node of the artifact. `Index.Levels()` computes the
+topological create-level (Kahn) of every ref; the planner consumes it.
 
 ### pveclient — thin PVE JSON API client
 
@@ -73,12 +84,18 @@ used to validate `spec.node` in manifests; it is not a set of hosts to dial.
   `PVEAuthCookie`, with `X-CSRF-Token`).
 - Read: `GET /version`, `GET /cluster/resources`, per-object
   `GET /qemu|lxc/{id}/config`, `GET /nodes/{n}/{qemu|lxc}/{id}/status/current`,
-  `GET /nodes/{n}/storage/{s}/content/iso`.
+  `GET /nodes/{n}/storage/{s}/content` (artifact listing).
 - Write: `POST /qemu|lxc` (create), `POST .../config` (update),
-  `POST .../status/{start|stop|shutdown|reboot}` (power), `POST .../vmdelete`
-  (VM delete), `DELETE /lxc/{id}` (CT delete), `POST .../resize` (VM),
-  `POST /lxc/{src}/clone` + `POST /lxc/{dst}/template` (CTT),
-  `POST /nodes/{n}/storage/{s}/download` (ISO).
+  `POST .../status/{start|stop|shutdown|reboot}` (power),
+  `DELETE /qemu|lxc/{id}` (PVE 9.x delete), `POST .../resize` (VM),
+  `POST /nodes/{n}/storage/{s}/download` (ISO **and** CTTemplate vztmpl —
+  routed by the `content` form parameter).
+
+> **PVE 9.2 storage quirk.** `GET /nodes/{n}/storage/{s}/content/iso` and
+> `…/content/vztmpl` return `500 "unable to parse directory volume name"`
+> because PVE's dir-storage *listing* treats the type segment as a volume id.
+> The bare `GET …/content` (no type) works and returns entries tagged with a
+> `content` field; `Storage.HasContent` filters on it. See OPERATIONS.md.
 - Async: any mutating call that returns a string `data` is a task UPID; the
   `TaskWaiter` polls `GET /tasks/{upid}/status` until `stopped`+`OK`
   (bounded by `reconcile.task-timeout`).
@@ -95,27 +112,34 @@ against a **real git work tree** for the full e2e pipe.
 
 ### plan — pure planner + safety model
 
-`plan.LoadLive(ctx, client, desired)` snapshots PVE: cluster listing →
-per-object config + power; for every desired ISO, a `HasISO` storage probe →
-`{present: bool}` at the ISO key.
+`plan.LoadLive(ctx, client, desired)` snapshots PVE:
+- cluster listing → per-object config + power for every **VM** and **LXC**;
+- for every desired **artifact** (an ISO and a CTTemplate — see
+  `schema.ArtifactKind`), probes the PVE storage content listing once per
+  `(node, storage, content)` and records `{present: bool}` at
+  `artifactKey(node, storage, filename, kind)` in the inventory. `HasContent`
+  filters the bare `GET …/content` result (PVE 9.2 quirk noted above).
 
 `plan.PlanActions(ctx, desired, live, opts)` is a free function returning
 `*Plan` — **it never writes**. It emits:
 
 1. **Tier 0, pass A** — for each desired object:
-   - absent → `Create` (with `ToCreateParams()`);
-   - present → `Drift(current)` → `Update` (optionally `StopFirst`);
-   - power verb → `Start`/`Stop` (independent of config drift);
-   - CTT: `StopFirst` forced when re-templating a running CT;
-   - ISO: no numeric id; "create" is a download; "present" → zero actions;
-     unreadable storage → fail-closed skip.
+   - artifact → `planArtifact`: for each node in `spec.nodes`, presence from
+     `live.Configs` → `Create` (a `Storage().Download`) when missing, zero
+     actions when present, `Skipped` when the storage listing is unreadable.
+     One create per missing node; artifacts are never pruned.
+   - VM/LXC → standard flow: absent → `Create`; present →
+     `Drift(current)` → `Update` (optionally `StopFirst`); power verb →
+     `Start`/`Stop` (independent of config drift). The VM/LXC `Create` action
+     carries **`Level`** (topological, from `Index.Levels`) and **`Deps`**
+     (from `Index.EdgesFor`) so the executor can defer the dependant when a
+     prerequisite fails in-cycle.
 2. **Tier 9, pass B (prune)** — for each live PVE-listing entry of a managed
-   kind, NOT claimed by desired, tagged `pveconform`:
+   **VM** or **LXC**, NOT claimed by desired, tagged `pveconform`:
    - untagged → `Skipped` (never touched);
    - tagged → prune candidate.
-   Membership is checked two ways: PVE id+node AND ref string. A live LXC
-   whose cid is a desired CTT is **not** an orphan (`isCTTOfDesired`) even
-   though PVE lists it as `lxc`.
+   Membership is by PVE id+node AND ref string. Artifacts are not PVE
+   listing entries, so they are invisible to prune (conservative-no-delete).
 
 The safety model:
 
@@ -128,18 +152,23 @@ The safety model:
   suppressed, `Plan.Anomaly` is set, and the cycle logs it. This catches the
   classic "someone deleted all VM manifests by accident" shape without losing
   the safety model for ordinary small-scale deletions.
-- **Determinism**: within tier 0, creates before updates before power;
-  prunes are tier 9 and always last. Ordering inside a tier is by node, then
-  id, so runs are reproducible.
-- **depends-on syntax**: annotation value is a comma-separated string of
-  `Kind:name` references (`proxops/depends-on:`).
-- **depends-on**: the parser resolves the `depends-on` annotation graph and
-  rejects cycles (fail-closed, whole-cycle abort). The annotation currently
-  documents intent and validates the graph; PVE id-pinning plus clone-source
-  semantics are what make creation ordering safe in practice (a VM created
-  from a template is only ever planned after the source template exists).
-  Topological scheduling of dependent creates is a post-MVP planner
-  enhancement and is NOT relied on today.
+- **Determinism + topological order**: within tier 0 the plan sorts by
+  `(Tier, Level, What, Node, ID, Name)`. Level 0 resources (artifacts:
+  ISOs + CTTemplates with no PVE reference) are always planned before
+  level-1 resources that reference them, so PVE's storage download completes
+  before any VM/LXC that embeds its volume id. Prunes (tier 9) use level
+  descending — dependants are deleted first.
+- **Structured dependencies**: pveconform infers edges from first-class
+  schema fields: `VM.spec.hardware.cdrom.iso → ISO`,
+  `LXC.spec.template → CTTemplate`. These are merged with the
+  `proxops/depends-on` annotation edges at parse time.
+- **Dependancy deferral (in-cycle)**: the executor tracks which
+  Refs failed earlier this cycle; any later action whose `Deps` intersect
+  that set is recorded as `Skipped: deferred: prerequisite <ref> failed
+  this cycle` instead of being attempted. The next cycle re-derives from
+  live state; no persistent bookkeeping.
+- **Unknown-ref + cycle**: both reject the whole cycle at parse time, no
+  PVE writes.
 
 ### exec — serial executor
 
@@ -191,8 +220,10 @@ environment (see README).
 | PVE task fails | Action failed; statused `failed` |
 | PVE 5xx on read (transient) | Retried w/ backoff; eventually aborts the cycle |
 | Anomaly: 0 desired + many tagged | Prunes suppressed, `anomaly` on `/status` |
-| ISO storage unreadable | Download skipped; next cycle retries |
-| CTT running + re-template | Stop-first; PVE refuses the stop → cycle-level failure logged |
+| ISO / vztmpl storage listing unreadable | Download skipped; next cycle retries (fail-closed) |
+| ISO / vztmpl download fails | Action failed; any LXC / VM that references it is **deferred** this cycle |
+| LXC create fails (missing template etc.) | Action failed; next cycle retries |
+| VM create fails | Action failed; next cycle retries |
 
 ## Extending the set of kinds
 

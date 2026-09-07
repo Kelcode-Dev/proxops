@@ -1,0 +1,111 @@
+package schema
+
+import "fmt"
+
+// This file holds the artifact-reference resolver: it turns the structured
+// references that VM (spec.hardware.cdrom.iso) and LXC (spec.template) carry
+// into concrete PVE storage volumes, and validates that the referencing
+// object's node is one of the referenced artifact's declared nodes.
+//
+// Resolution is performed exactly once per desired index (by parse, and
+// re-run by the planner as a defensive gate) and mutates the resources in
+// place: a VM gets its cdromVolid populated, an LXC gets its
+// ostemplateVolid populated. ToCreateParams and Drift read those resolved
+// fields, so the owned-field projection stays correct after resolution.
+
+// ResolveArtifactRefs validates every structured artifact reference in
+// resources and fills the resolved PVE volume fields. It fails closed when a
+// reference is unknown, or when the referencing object's node is not declared
+// as a placement node of the artifact.
+//
+// The function is idempotent: re-running it on the same index yields the same
+// resolved volumes.
+func ResolveArtifactRefs(resources []Resource) error {
+	if len(resources) == 0 {
+		return nil
+	}
+	byRef := make(map[Ref]Resource, len(resources))
+	for _, r := range resources {
+		byRef[r.Ref()] = r
+	}
+	for _, r := range resources {
+		switch v := r.(type) {
+		case *VM:
+			if err := v.resolveCDrom(byRef); err != nil {
+				return err
+			}
+		case *LXC:
+			if err := v.resolveTemplate(byRef); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// resolveCDrom binds the VM's spec.hardware.cdrom.iso reference to the
+// referenced ISO's PVE volid and records the IDE slot PVE will wire it at.
+func (v *VM) resolveCDrom(byRef map[Ref]Resource) error {
+	isoName := v.Spec.Hardware.Cdrom.Iso
+	if isoName == "" {
+		v.cdromVolid = ""
+		return nil
+	}
+	isoRes, ok := byRef[Ref{Kind: KindISO, Name: isoName}]
+	if !ok {
+		return fmt.Errorf("%s: spec.hardware.cdrom.iso references unknown ISO %q", v.Ref(), isoName)
+	}
+	iso, ok := isoRes.(*ISO)
+	if !ok {
+		return fmt.Errorf("%s: spec.hardware.cdrom.iso references %s which is not an ISO", v.Ref(), isoName)
+	}
+	if !containsString(iso.Nodes(), v.Spec.Node) {
+		return fmt.Errorf("%s: spec.hardware.cdrom.iso %q is not placed on node %s (ISO nodes: %v)",
+			v.Ref(), isoName, v.Spec.Node, iso.Nodes())
+	}
+	// PVE's ISO volid on dir storage is "<storage>:iso/<filename>".
+	vol := iso.Spec.Storage + ":iso/" + iso.Spec.Filename
+	media := v.Spec.Hardware.Cdrom.Media
+	if media == "" {
+		media = "cdrom"
+	}
+	v.cdromVolid = vol + ",media=" + media
+	v.cdromHasISO = true
+	return nil
+}
+
+// resolveTemplate binds the LXC's spec.template reference to the referenced
+// CTTemplate's PVE vztmpl volid.
+func (l *LXC) resolveTemplate(byRef map[Ref]Resource) error {
+	tplName := l.Spec.Template
+	if tplName == "" {
+		// Validate() already rejects an LXC without a template.
+		l.ostemplateVolid = ""
+		return nil
+	}
+	isoRes, ok := byRef[Ref{Kind: KindCTTemplate, Name: tplName}]
+	if !ok {
+		return fmt.Errorf("%s: spec.template references unknown CTTemplate %q", l.Ref(), tplName)
+	}
+	ctt, ok := isoRes.(*CTTemplate)
+	if !ok {
+		return fmt.Errorf("%s: spec.template references %s which is not a CTTemplate", l.Ref(), tplName)
+	}
+	if !containsString(ctt.Nodes(), l.Spec.Node) {
+		return fmt.Errorf("%s: spec.template %q is not placed on node %s (CTTemplate nodes: %v)",
+			l.Ref(), tplName, l.Spec.Node, ctt.Nodes())
+	}
+	// PVE's vztmpl volid on dir storage is "<storage>:vztmpl/<filename>".
+	l.ostemplateVolid = ctt.Spec.Storage + ":vztmpl/" + ctt.Spec.Filename
+	return nil
+}
+
+// containsString reports whether s is in the slice.
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}

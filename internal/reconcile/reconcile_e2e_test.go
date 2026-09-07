@@ -399,7 +399,26 @@ func TestE2EDiffIsDryRun(t *testing.T) {
 	}
 }
 
+// cttManifest returns a minimal CTTemplate (vztmpl artifact) manifest —
+// no PVE numeric id, no clone; just a downloadable template archive.
+func cttManifest(name, filename string) string {
+	return `apiVersion: proxops/v1alpha1
+kind: CTTemplate
+metadata:
+  name: ` + name + `
+spec:
+  nodes: [pve01]
+  storage: local
+  filename: ` + filename + `
+  url: https://example.com/` + filename + `
+`
+}
+
 // lxcManifest returns a fully-valid minimal LXC manifest for e2e tests.
+//
+// PVE 9.x /lxc create REQUIRES `ostemplate`; pveconform encodes this as
+// spec.template = <CTTemplate name>. To keep each fixture self-contained,
+// the test caller must include a ctt.yaml that defines "base-ctt".
 func lxcManifest(name string, cid int) string {
 	return `apiVersion: proxops/v1alpha1
 kind: LXC
@@ -411,19 +430,22 @@ spec:
   memory: 1GiB
   cpu:
     cores: 1
+  template: base-ctt
   root:
     storage: local
     size: 4GiB
   networks:
-    - model: veth
-      bridge: vmbr0
+    - bridge: vmbr0
 `
 }
 
-// TestE2ELXCCreatesConverges: an LXC in git, absent on PVE → created + idempotent.
+// TestE2ELXCCreatesConverges: an LXC in git, absent on PVE → created +
+// idempotent. The companion CTTemplate (downloaded once by PVE, not
+// simulated here) is required for parsing.
 func TestE2ELXCCreatesConverges(t *testing.T) {
 	h := newHarness(t, map[string]string{
 		"lxc.yaml": lxcManifest("cache-01", 9000),
+		"ctt.yaml": cttManifest("base-ctt", "debian-13.tar.zst"),
 	}, 3)
 
 	p := h.apply(t)
@@ -440,6 +462,61 @@ func TestE2ELXCCreatesConverges(t *testing.T) {
 	}
 	if len(p2.Actions) > 0 {
 		t.Errorf("expected 0 actions on converged LXC, got %+v", p2.Actions)
+	}
+}
+
+// TestE2EDeferralWhenPrerequisiteFails: a LXC that depends on a CTTemplate
+// (spec.template). The planner orders the CTTemplate download (level 0)
+// before the LXC create (level 1); if the CTTemplate download FAILS in-cycle,
+// the LXC create is deferred (the executor never attempts a dependant whose
+// prerequisite just failed). A second cycle retries and converges.
+func TestE2EDeferralWhenPrerequisiteFails(t *testing.T) {
+	h := newHarness(t, map[string]string{
+		"lxc.yaml": lxcManifest("cache-01", 9000),
+		"ctt.yaml": cttManifest("base-ctt", "debian-13.tar.zst"),
+	}, 3)
+
+	// Force the CTTemplate download task to fail in the mock.
+	h.mock.SetDownloadFail(true)
+
+	p := h.apply(t)
+	if p == nil {
+		t.Fatal("apply returned nil plan")
+	}
+	// The CTTemplate should be the level-0 create; LXC the level-1 create.
+	var cttCreate, lxcCreate bool
+	for _, a := range p.Actions {
+		if a.Kind == schema.KindCTTemplate && a.What == plan.Create {
+			cttCreate = true
+		}
+		if a.Kind == schema.KindLXC && a.What == plan.Create {
+			lxcCreate = true
+		}
+	}
+	if !cttCreate || !lxcCreate {
+		t.Fatalf("expected both CTTemplate and LXC creates planned, got ctt=%v lxc=%v: %+v",
+			cttCreate, lxcCreate, p.Actions)
+	}
+	// LXC must not have been created (it was deferred because the
+	// CTTemplate download failed in-cycle).
+	if h.mock.VMExists(node, 9000) {
+		t.Fatal("LXC 9000 should NOT be created when the CTTemplate prerequisite failed in-cycle")
+	}
+
+	// Re-enable the download; a second cycle should now both succeed.
+	h.mock.SetDownloadFail(false)
+	p2 := h.apply(t)
+	if p2 == nil {
+		t.Fatal("second apply returned nil plan")
+	}
+	if !h.mock.VMExists(node, 9000) {
+		t.Fatalf("LXC 9000 should be created after the CTTemplate succeeded; plan=%+v", p2.Actions)
+	}
+
+	// Converged.
+	p3 := h.apply(t)
+	if len(p3.Actions) != 0 {
+		t.Errorf("expected 0 actions on converged state, got %+v", p3.Actions)
 	}
 }
 

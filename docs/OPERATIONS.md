@@ -98,6 +98,76 @@ curl -s 127.0.0.1:9494/status | jq .counters
 journalctl -u pveconform -f | grep 'anomaly\|abort\|stale'
 ```
 
+## PVE 9.2 storage listing quirk (ISO + CTTemplate presence)
+
+On a node-local `dir` storage, PVE 9.2's per-type content-listing endpoint
+500s with `unable to parse directory volume name 'iso'` (or `'vztmpl'`):
+
+```sh
+GET /nodes/{n}/storage/local/content/iso      # → 500 (PVE 9.2 dir storage)
+GET /nodes/{n}/storage/local/content/vztmpl   # → 500
+GET /nodes/{n}/storage/local/content         # → 200 — use this
+```
+
+The bare listing returns every pool on that storage with a `content` field per
+entry; pveconform's `Storage.HasContent(ctx, node, storage, contentType,
+filename)` filters on it. This is why ISO / CTTemplate presence detection does
+**not** use `…/content/iso` or `…/content/vztmpl`. Downloads still go through
+`POST /nodes/{n}/storage/{s}/download` with the `content=iso|vztmpl` form
+parameter. pveconform treats a listing read failure as **fail-closed**: it
+skips the download for that node this cycle (a `Skipped` record) rather than
+blindly re-downloading, and retries next cycle.
+
+## ISO and CTTemplate are storage artifacts
+
+Both kinds:
+- have **no PVE numeric id** — PVE-side identity is `(node, storage, filename)`;
+- reconcile via a PVE storage `download` task + a bare `content` listing for
+  presence;
+- are **never pruned** by pveconform — removing a manifest stops re-downloads
+  but does not delete the PVE-side file;
+- support `spec.nodes` (a node list). The legacy single `spec.node` is still
+  honored as a one-element list; every declared node is checked independently.
+
+Practical consequences: add a new PVE node and add it to the artifact's
+`spec.nodes` — pveconform downloads the file onto that node's storage.
+Removing a node from `spec.nodes` stops checking that node but does not remove
+the file there.
+
+## Structured dependencies (inferred — no `depends-on` needed)
+
+pveconform infers two cross-kind edges from the manifest itself:
+
+```text
+VM.spec.hardware.cdrom.iso   →  ISO.metadata.name
+LXC.spec.template            →  CTTemplate.metadata.name
+```
+
+Behaviour:
+- **Unknown references** abort the whole cycle at parse time (fail-closed); no
+  PVE writes happen.
+- **Reference cycles** abort the whole cycle at parse time.
+- **Creation order** is topological: artifacts plan at level 0, the VMs/LXCs
+  that reference them at level 1, and so on. Prunes use the reverse order
+  (dependants deleted before prerequisites).
+- **In-cycle deferral**: if a prerequisite fails (e.g. a CTT download), a
+  dependant that references it (e.g. an LXC) is **not attempted** this cycle.
+  The next cycle re-derives everything from live state and retries. No
+  persistent state file is introduced.
+- The `proxops/depends-on` annotation remains an **escape hatch** for
+  relationships that cannot be expressed in a structured field; it is merged
+  with the inferred edges.
+
+## Pruning safety and artifact conservatism
+
+The ownership gate remains: only PVE objects tagged `pveconform` are eligible
+for pruning. The per-cycle **prune budget** (default 3) caps deletions, and the
+**empty-desired anomaly guard** suppresses prunes when a kind has 0 manifests
+but more tagged live objects than the budget. For ISO / CTTemplate, pveconform
+**never plans a delete** (the "conservative artifact deletion" guarantee):
+PVE storage content may be shared with tooling the agent does not manage, and
+PVE has no "delete by pveconform name" semantics.
+
 ## Recovery
 
 ### A cycle aborted with an anomaly

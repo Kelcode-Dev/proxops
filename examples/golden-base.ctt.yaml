@@ -1,14 +1,15 @@
-# Golden CTT: clone PVE CT 200 (an existing base container on pve01) into
-# the pinned id 1000, then mark it as a template.
+# Golden CTTemplate: a downloadable PVE "vztmpl" container template that
+# pveconform keeps present on every node it declares. New LXCs are
+# bootstrapped from this file by PVE itself (via `ostemplate` at create
+# time); pveconform owns only the storage artifact, not the LXC.
 #
-# In PVE's listing this object will appear with type "lxc" and
-# "template"=1. New containers are bootstrapped from it by PVE/automation
-# out-of-band; pveconform only guarantees the template exists and is
-# flagged.
-#
-# Prerequisite before first `pveconform apply`:
-#   - CT 200 exists on pve01 (created manually or by other tooling).
-#   - CT 200 is stopped (PVE refuses to clone a running CT).
+# - No PVE numeric id: CTTemplate is a storage artifact, not a cloneable
+#   PVE LXC. The legacy "clone a CT then mark-as-template" model was
+#   removed in the M6 rework.
+# - Multi-node placement via spec.nodes: the file must exist on each
+#   declared node/storage pair; the planner downloads per missing node.
+# - Never pruned: removing this manifest does not delete the file on
+#   PVE storage (conservative artifact-deletion guarantee).
 apiVersion: proxops/v1alpha1
 kind: CTTemplate
 metadata:
@@ -16,8 +17,13 @@ metadata:
   labels:
     role: image
 spec:
-  node: pve01
-  vmid: 1000       # pinned destination cid
-  source: 200      # clone source cid (existing PVE CT)
-  pve-description: pveconform-managed golden base image
-  # full: false    # CoW clone (PVE default); set true for a full copy
+  nodes:
+    - pve01
+  storage: local
+  filename: debian-13-standard_13.6.1-1_amd64.tar.zst
+  url: https://ftp-master.debian.org/debian/dists/trixie/main/installer-amd64/current/images/container-images/amd64/debian-13-standard_13.6.1-1_amd64.tar.zst
+  # optional pin on a known-good checksum (review aid; PVE 9.2's download
+  # API does not accept a verify parameter — see docs/OPERATIONS.md).
+  # checksum:
+  #   algorithm: sha256
+  #   value: <sha256-hex>

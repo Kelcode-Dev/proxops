@@ -193,7 +193,17 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 	metrics.PVELastAuthAgeSeconds.Set(0)
 
 	// (4) plan (pure).
-	pl, err := plan.PlanActions(ctx, idx.List(), live, plan.PlanOptions{Budget: r.Budget})
+	levels := idx.Levels()
+	pl, err := plan.PlanActions(ctx, idx.List(), live, plan.PlanOptions{
+		Budget: r.Budget,
+		Levels: func(ref schema.Ref) int {
+			if lvl, ok := levels[ref]; ok {
+				return lvl
+			}
+			return 0
+		},
+		Edges: idx.EdgesFor,
+	})
 	if err != nil {
 		res.Aborted = true
 		res.AbortReason = "plan error: " + err.Error()
@@ -281,10 +291,12 @@ func (r *Reconciler) LastCommit() string { return r.lastCommit }
 // because git sync has been failing.
 func (r *Reconciler) DesiredStale() bool { return r.desiredStale }
 
-// checkNodeAllowlist rejects any manifest whose spec.node is not in
-// NodeAllowlist (when that slice is non-empty). ISOs and any kind with a
-// numeric PVE id are covered, because all of them carry a PVE node. Empty
-// allowlist = all nodes accepted (MVP default until operators pin a list).
+// checkNodeAllowlist rejects any manifest whose declared PVE nodes are not
+// all in NodeAllowlist (when that slice is non-empty). Multi-node artifacts
+// (ISO / CTTemplate with spec.nodes) check every declared node, not just the
+// primary. VM / LXC have a single spec.node. Empty allowlist = all nodes
+// accepted (MVP default until operators pin a list).
+//
 // Returns an error naming the first-offending (kind, name, node) triple.
 func (r *Reconciler) checkNodeAllowlist(resources []schema.Resource) error {
 	if len(r.NodeAllowlist) == 0 {
@@ -295,10 +307,11 @@ func (r *Reconciler) checkNodeAllowlist(resources []schema.Resource) error {
 		allowed[n] = true
 	}
 	for _, res := range resources {
-		node := res.Node()
-		if node != "" && !allowed[node] {
-			return fmt.Errorf("%s references node %q which is not in pve.nodes (allowed: %v)",
-				res.Ref().String(), node, r.NodeAllowlist)
+		for _, node := range res.Nodes() {
+			if node != "" && !allowed[node] {
+				return fmt.Errorf("%s references node %q which is not in pve.nodes (allowed: %v)",
+					res.Ref().String(), node, r.NodeAllowlist)
+			}
 		}
 	}
 	return nil

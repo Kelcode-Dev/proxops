@@ -80,9 +80,10 @@ func TestUserFailingManifestCreateWire(t *testing.T) {
 	if got, want := p["scsihw"], "virtio-scsi-single"; got != want {
 		t.Errorf("scsihw = %v, want %q", got, want)
 	}
-	// net0: unpinned-MAC virtio on vmbr0.
-	if got, want := p["net0"], "virtio,bridge=vmbr0,firewall=0"; got != want {
-		t.Errorf("net0 = %v, want %q (no '=' on unpinned-MAC virtio)", got, want)
+	// net0: unpinned-MAC virtio on vmbr0. PVE 9.2 omits firewall=0 when not
+	// enabled; pveconform emits it only when spec.networks[].firewall is set.
+	if got, want := p["net0"], "virtio,bridge=vmbr0"; got != want {
+		t.Errorf("net0 = %v, want %q (no '=' on unpinned-MAC virtio; no firewall token when unset)", got, want)
 	}
 	// memory: PVE's create-time `memory` is an integer MIB count (qm.conf:
 	// "in MiB"). 1GiB → 1024. (The former KiB form, 1048576, would have

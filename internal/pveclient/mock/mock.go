@@ -45,16 +45,22 @@ type VM struct {
 
 // Server is the stateful fake PVE.
 type Server struct {
-	mu      sync.Mutex
-	cfg     Config
-	tickets map[string]bool
-	objs    map[string]map[int]VM                 // node -> id -> record
-	cid     uint32                                // last assigned clone id
-	isos    map[string]map[string]map[string]bool // node -> storage -> filename
-	tasks   map[string]*task
-	taskSeq int
+	mu        sync.Mutex
+	cfg       Config
+	tickets   map[string]bool
+	objs      map[string]map[int]VM                 // node -> id -> record
+	cid       uint32                                // last assigned clone id
+	isos      map[string]map[string]map[string]bool // node -> storage -> filename
+	templates map[string]map[string]map[string]bool // node -> storage -> filename (vztmpl pool)
+	tasks     map[string]*task
+	taskSeq   int
 
-	created, updated, deleted, cloned, tpl, untpl, isl int
+	created, updated, deleted, cloned, tpl, untpl, isl, tdl int
+
+	// downloadFail makes POST /storage/{s}/download return HTTP 500 so a test
+	// can exercise the executor's in-cycle dependency deferral (failed
+	// prerequisite → dependant deferred). Set via SetDownloadFail.
+	downloadFail bool
 
 	ts *httptest.Server
 }
@@ -67,11 +73,12 @@ func New(cfg Config) *Server {
 		cfg.TaskTicks = 1
 	}
 	s := &Server{
-		cfg:     cfg,
-		tickets: map[string]bool{},
-		objs:    map[string]map[int]VM{},
-		isos:    map[string]map[string]map[string]bool{},
-		tasks:   map[string]*task{},
+		cfg:       cfg,
+		tickets:   map[string]bool{},
+		objs:      map[string]map[int]VM{},
+		isos:      map[string]map[string]map[string]bool{},
+		templates: map[string]map[string]map[string]bool{},
+		tasks:     map[string]*task{},
 	}
 	s.ts = httptest.NewServer(http.HandlerFunc(s.serve))
 	return s
@@ -82,6 +89,14 @@ func (s *Server) URL() string { return s.ts.URL }
 
 // Close stops the mock.
 func (s *Server) Close() { s.ts.Close() }
+
+// SetDownloadFail toggles forced HTTP 500 on POST /storage/{s}/download. Used
+// to exercise the executor's failed-prerequisite deferral path.
+func (s *Server) SetDownloadFail(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.downloadFail = fail
+}
 
 // --- test setup / introspection ---
 
@@ -122,6 +137,19 @@ func (s *Server) PreloadISO(node, storage, filename string) {
 		s.isos[node][storage] = map[string]bool{}
 	}
 	s.isos[node][storage][filename] = true
+}
+
+// PreloadTemplate adds an already-present vztmpl template on a storage.
+func (s *Server) PreloadTemplate(node, storage, filename string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.templates[node] == nil {
+		s.templates[node] = map[string]map[string]bool{}
+	}
+	if s.templates[node][storage] == nil {
+		s.templates[node][storage] = map[string]bool{}
+	}
+	s.templates[node][storage][filename] = true
 }
 
 func (s *Server) set(node string, id int, kind string, cfg map[string]string, status string) {
@@ -189,11 +217,21 @@ func (s *Server) CTIsTemplate(node string, cid int) bool {
 	return ok && v.Config["template"] == "1"
 }
 
-// ISOExists reports whether a filename is present on a node-storage.
+// ISOExists reports whether a filename is present on a node-storage ISO pool.
 func (s *Server) ISOExists(node, storage, filename string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if st := s.isos[node][storage]; st != nil {
+		return st[filename]
+	}
+	return false
+}
+
+// TemplateExists reports whether a vztmpl filename is present on a node-storage pool.
+func (s *Server) TemplateExists(node, storage, filename string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st := s.templates[node][storage]; st != nil {
 		return st[filename]
 	}
 	return false
@@ -703,38 +741,62 @@ func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest
 	sid := parts[1]
 
 	switch {
-	// GET /storage/{sid}/content/iso → listing
-	case len(parts) == 4 && parts[2] == "content" && parts[3] == "iso":
+	// GET /storage/{sid}/content/iso OR /content/vztmpl → PVE 9.2 quirk:
+	// dir storage's `content/{type}` 500 with "unable to parse directory
+	// volume name '{type}'". The mock replicates this so tests exercise
+	// the correct bare-content path.
+	case len(parts) == 4 && parts[2] == "content":
+		writeErr(w, http.StatusInternalServerError,
+			fmt.Sprintf("unable to parse directory volume name '%s'\n", parts[3]))
+
+	// GET /storage/{sid}/content → bare listing (works on PVE 9.2). Returns
+	// every entry across all content pools, tagged with the entry's
+	// `content` field so clients can filter.
+	case len(parts) == 3 && parts[2] == "content":
 		if r.Method != http.MethodGet {
 			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		out := make([]map[string]any, 0, 8)
 		s.mu.Lock()
-		var names []string
 		if sts := s.isos[node][sid]; sts != nil {
 			for f := range sts {
-				names = append(names, f)
+				out = append(out, map[string]any{
+					"volid":   sid + ":iso/" + f,
+					"content": "iso",
+					"format":  "iso",
+					"size":    int64(1024 * 1024),
+				})
+			}
+		}
+		if sts := s.templates[node][sid]; sts != nil {
+			for f := range sts {
+				out = append(out, map[string]any{
+					"volid":   sid + ":vztmpl/" + f,
+					"content": "vztmpl",
+					"format":  "tzst",
+					"size":    int64(64 * 1024 * 1024),
+				})
 			}
 		}
 		s.mu.Unlock()
-		sort.Strings(names)
-		out := make([]map[string]any, 0, len(names))
-		for _, f := range names {
-			out = append(out, map[string]any{
-				"volid":    sid + ":iso/" + f,
-				"filename": f,
-			})
-		}
 		writeOK(w, out)
 
-	// Other /content/{type} listings are empty in the mock.
-	case len(parts) == 4 && parts[2] == "content":
-		writeOK(w, []map[string]any{})
-
-	// POST /storage/{sid}/download → async download task.
+	// POST /storage/{sid}/download → async download task. Content type is
+	// selected by the `content` form param: "iso" (default) or "vztmpl".
+	// The mock routes to the corresponding pool.
 	case len(parts) == 3 && parts[2] == "download":
 		if r.Method != http.MethodPost {
 			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.mu.Lock()
+		fail := s.downloadFail
+		s.mu.Unlock()
+		if fail {
+			// 400 → pveclient Do() returns immediately (no transient retry),
+			// so tests that exercise failed-prerequisite deferral stay fast.
+			writeErr(w, http.StatusBadRequest, "download failed (mock forced failure)")
 			return
 		}
 		_ = r.ParseForm()
@@ -743,16 +805,29 @@ func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest
 			writeErr(w, http.StatusBadRequest, "filename required for download")
 			return
 		}
+		content := r.PostFormValue("content")
 		s.mu.Lock()
-		if s.isos[node] == nil {
-			s.isos[node] = map[string]map[string]bool{}
+		switch content {
+		case "vztmpl":
+			if s.templates[node] == nil {
+				s.templates[node] = map[string]map[string]bool{}
+			}
+			if s.templates[node][sid] == nil {
+				s.templates[node][sid] = map[string]bool{}
+			}
+			s.templates[node][sid][filename] = true
+			s.tdl++
+		default: // "" | "iso"
+			if s.isos[node] == nil {
+				s.isos[node] = map[string]map[string]bool{}
+			}
+			if s.isos[node][sid] == nil {
+				s.isos[node][sid] = map[string]bool{}
+			}
+			s.isos[node][sid][filename] = true
+			s.isl++
 		}
-		if s.isos[node][sid] == nil {
-			s.isos[node][sid] = map[string]bool{}
-		}
-		s.isos[node][sid][filename] = true
-		upid := s.newTaskLocked(node, "iso-download")
-		s.isl++
+		upid := s.newTaskLocked(node, "download")
 		s.mu.Unlock()
 		writeOK(w, upid)
 
@@ -767,10 +842,10 @@ func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest
 			"storage": sid,
 			"node":    node,
 			"active":  true,
-			"content": []string{"iso"},
+			"content": []string{"iso", "vztmpl"},
 			"type":    "dir",
 			"format":  "file",
-			"path":    "/var/lib/vz/template/iso",
+			"path":    "/var/lib/vz/template",
 		})
 
 	default:

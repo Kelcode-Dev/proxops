@@ -87,24 +87,137 @@ func BuildIndex(rootDir string) (*Index, error) {
 	return idx, nil
 }
 
-// checkDeps resolves depends-on edges and rejects cycles.
+// checkDeps validates the dependency DAG: structured schema refs resolve,
+// every edge target exists, and no cycle. It also runs artifact reference
+// resolution (schema.ResolveArtifactRefs) so the planner reads resolved
+// PVE volumes straight off the resources.
 func (idx *Index) checkDeps() error {
-	edges := map[schema.Ref][]schema.Ref{}
+	if err := schema.ResolveArtifactRefs(idx.List()); err != nil {
+		return err
+	}
 	for _, ref := range idx.order {
 		res := idx.byRef[ref]
-		deps, err := metadataOf(res).DependsOn()
-		if err != nil {
-			return fmt.Errorf("%s: %w", ref, err)
+		if annErr := metadataOf(res).DependsOnError(); annErr != nil {
+			return fmt.Errorf("%s: %w", ref, annErr)
 		}
-		for _, d := range deps {
-			target := d.Ref()
+		for _, target := range idx.EdgesFor(ref) {
 			if _, ok := idx.byRef[target]; !ok {
-				return fmt.Errorf("%s: depends-on target %s is not defined in the repo", ref, target)
+				return fmt.Errorf("%s: dependency target %s is not defined in the repo", ref, target)
 			}
-			edges[ref] = append(edges[ref], target)
 		}
 	}
-	return detectCycle(idx.order, edges)
+	if cyc := indexOfCycle(idx.order, idx.EdgesFor); cyc != nil {
+		return fmt.Errorf("dependency cycle detected: %s", refToCycleString(cyc))
+	}
+	return nil
+}
+
+// EdgesFor returns the merged dependency edge set for ref:
+//   - structured schema edges (res.Deps() — VM→ISO, LXC→CTTemplate)
+//   - annotation edges (metadata.depends-on — escape hatch)
+func (idx *Index) EdgesFor(ref schema.Ref) []schema.Ref {
+	res, ok := idx.byRef[ref]
+	if !ok {
+		return nil
+	}
+	seen := map[schema.Ref]bool{}
+	var out []schema.Ref
+	for _, d := range res.Deps() {
+		if !seen[d] {
+			out = append(out, d)
+			seen[d] = true
+		}
+	}
+	ann, _ := metadataOf(res).DependsOn()
+	for _, d := range ann {
+		target := d.Ref()
+		if !seen[target] {
+			out = append(out, target)
+			seen[target] = true
+		}
+	}
+	return out
+}
+
+// Levels returns the topological create-level of every resource: level 0 =
+// no dependencies; level n = depends on resources at level < n (max parent
+// level + 1). The planner uses this to order creates so prerequisites finish
+// before dependants. Deterministic across re-cycles for identical input.
+func (idx *Index) Levels() map[schema.Ref]int {
+	levels := map[schema.Ref]int{}
+	done := map[schema.Ref]bool{}
+	var levelOf func(ref schema.Ref) int
+	levelOf = func(ref schema.Ref) int {
+		if done[ref] {
+			if l, ok := levels[ref]; ok {
+				return l
+			}
+		}
+		lvl := 0
+		for _, dep := range idx.EdgesFor(ref) {
+			dl := levelOf(dep)
+			if dl+1 > lvl {
+				lvl = dl + 1
+			}
+		}
+		levels[ref] = lvl
+		done[ref] = true
+		return lvl
+	}
+	for _, r := range idx.order {
+		_ = levelOf(r)
+	}
+	return levels
+}
+
+// indexOfCycle walks the merged edge graph and returns one concrete cycle
+// when a back-edge is found (or nil if acyclic).
+func indexOfCycle(order []schema.Ref, edgesFor func(schema.Ref) []schema.Ref) []schema.Ref {
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := map[schema.Ref]int{}
+	var path []schema.Ref
+	var visit func(ref schema.Ref) []schema.Ref
+	visit = func(ref schema.Ref) []schema.Ref {
+		color[ref] = gray
+		path = append(path, ref)
+		for _, dep := range edgesFor(ref) {
+			switch color[dep] {
+			case gray:
+				for i, p := range path {
+					if p == dep {
+						return append(append([]schema.Ref{}, path[i:]...), dep)
+					}
+				}
+			case white:
+				if c := visit(dep); c != nil {
+					return c
+				}
+			}
+		}
+		path = path[:len(path)-1]
+		color[ref] = black
+		return nil
+	}
+	for _, r := range order {
+		if color[r] == white {
+			if c := visit(r); c != nil {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
+func refToCycleString(cyc []schema.Ref) string {
+	parts := make([]string, len(cyc))
+	for i, r := range cyc {
+		parts[i] = r.String()
+	}
+	return strings.Join(parts, " → ")
 }
 
 // detectCycle is iterative DFS (white→gray→black) over the dependency DAG.

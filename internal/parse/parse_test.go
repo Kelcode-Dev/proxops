@@ -41,6 +41,28 @@ spec:
     - {model: virtio, bridge: vmbr2}
 `
 
+const cttA = `apiVersion: proxops/v1alpha1
+kind: CTTemplate
+metadata:
+  name: base-ctt
+spec:
+  nodes: [pve01]
+  storage: local
+  filename: debian-13.tar.zst
+  url: https://example.com/debian-13.tar.zst
+`
+
+const isoA = `apiVersion: proxops/v1alpha1
+kind: ISO
+metadata:
+  name: talos-iso
+spec:
+  nodes: [pve01]
+  storage: local
+  filename: talos.iso
+  url: https://example.com/talos.iso
+`
+
 const lxcA = `apiVersion: proxops/v1alpha1
 kind: LXC
 metadata:
@@ -50,13 +72,14 @@ spec:
   vmid: 901
   memory: 2GiB
   cpu: {cores: 1}
+  template: base-ctt
   root: {storage: local, size: 10GiB}
   networks:
-    - {model: veth, bridge: vmbr0}
+    - {bridge: vmbr0}
 `
 
 func TestBuildIndexValid(t *testing.T) {
-	root := writeRepo(t, map[string]string{"vm.yaml": vmA, "lxc.yaml": lxcA})
+	root := writeRepo(t, map[string]string{"vm.yaml": vmA, "lxc.yaml": lxcA, "ctt.yaml": cttA})
 	idx, err := parse.BuildIndex(root)
 	if err != nil {
 		t.Fatalf("BuildIndex: %v", err)
@@ -68,6 +91,9 @@ func TestBuildIndexValid(t *testing.T) {
 	if counts[schema.KindLXC] != 1 {
 		t.Errorf("LXC = %d, want 1", counts[schema.KindLXC])
 	}
+	if counts[schema.KindCTTemplate] != 1 {
+		t.Errorf("CTTemplate = %d, want 1", counts[schema.KindCTTemplate])
+	}
 	vm, ok := idx.ByRef(schema.Ref{Kind: schema.KindVM, Name: "talos-worker-01"})
 	if !ok {
 		t.Fatalf("VM not indexed")
@@ -75,11 +101,20 @@ func TestBuildIndexValid(t *testing.T) {
 	if vm.ID() != 142 || vm.Node() != "pve01" || vm.DesiredState() != "started" {
 		t.Errorf("VM identity: id=%d node=%s state=%s", vm.ID(), vm.Node(), vm.DesiredState())
 	}
-	if len(idx.List()) != 2 {
-		t.Errorf("List len = %d, want 2", len(idx.List()))
+	if len(idx.List()) != 3 {
+		t.Errorf("List len = %d, want 3", len(idx.List()))
 	}
-	if len(idx.Files()) != 2 {
-		t.Errorf("Files len = %d, want 2", len(idx.Files()))
+	if len(idx.Files()) != 3 {
+		t.Errorf("Files len = %d, want 3", len(idx.Files()))
+	}
+	// The LXC→CTTemplate dependency must be inferred: level(cache-01)==1,
+	// level(base-ctt)==0.
+	lv := idx.Levels()
+	if got := lv[schema.Ref{Kind: schema.KindLXC, Name: "cache-01"}]; got != 1 {
+		t.Errorf("LXC level = %d, want 1 (depends on CTTemplate)", got)
+	}
+	if got := lv[schema.Ref{Kind: schema.KindCTTemplate, Name: "base-ctt"}]; got != 0 {
+		t.Errorf("CTTemplate level = %d, want 0", got)
 	}
 }
 
@@ -103,8 +138,10 @@ spec:
   vmid: 142
   memory: 2GiB
   cpu: {cores: 1}
+  template: base-ctt
   root: {storage: local, size: 4GiB}
 `,
+		"ctt.yaml": cttA,
 	})
 	_, err := parse.BuildIndex(root)
 	if err == nil || !strings.Contains(err.Error(), "PVE id 142") {
@@ -247,9 +284,20 @@ spec:
     - {model: virtio, bridge: vmbr2}
 `,
 		"lxc.yaml": lxcA,
+		"ctt.yaml": cttA,
 	})
-	if _, err := parse.BuildIndex(root); err != nil {
+	idx, err := parse.BuildIndex(root)
+	if err != nil {
 		t.Errorf("valid depends-on must not error: %v", err)
+	}
+	// Annotation-driven VM→LXC edge: level of talos-worker-01 must be 2 (LXC
+	// is 1 via template, VM is 2 via the annotation).
+	if idx == nil {
+		return
+	}
+	lv := idx.Levels()
+	if got := lv[schema.Ref{Kind: schema.KindVM, Name: "talos-worker-01"}]; got != 2 {
+		t.Errorf("VM level = %d, want 2 (annotation edge LXC→CTTemplate)", got)
 	}
 }
 

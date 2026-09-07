@@ -1,8 +1,13 @@
-# An LXC container pinned to pve01/ctid 9000, booting a minimal cache box.
+# An LXC container pinned to pve01/cid 9000, booting a minimal cache box.
 #
 # LXCs share PVE's per-node integer id pool with VMs — the pinned `vmid`
-# (the PVE wire key is `ctid`, the schema keeps `vmid` for symmetry) must be
+# (the PVE wire key is `cid`, the schema keeps `vmid` for symmetry) must be
 # unique across ALL object kinds on the node.
+#
+# PVE 9.x /lxc create requires `ostemplate`; pveconform models this as
+# `spec.template: <CTTemplate name>` — the planner resolves it against the
+# CTTemplate manifest in the same tree and injects the PVE wire value at
+# create time.
 apiVersion: proxops/v1alpha1
 kind: LXC
 metadata:
@@ -17,13 +22,30 @@ spec:
   swap: 512MiB
   cpu:
     cores: 1
+  template: golden-base    # CTTemplate manifest in this tree
   root:
     storage: local
     size: 4GiB
+  mount-points:            # optional additional mp* volumes
+    - storage: local-lvm
+      size: 4GiB
+      mount-point: /mnt/data
   networks:
     - bridge: vmbr0
-      # model: veth       # PVE veth is the default; explicit if you need tap
+      # iface: wired0     # PVE's netX.name (defaults to net<N>)
+      # tag: 100          # VLAN tag
       # hwaddr: "aa:bb:cc:dd:ee:90"
-  # os: debian-12         # PVE ostype hint
-  # arch: x86_64
-  # pve-description: "cache box under pveconform"
+      # rate-limit: 50    # MBit/s
+      # firewall: true
+  dns:
+    hostname: cache-01
+    nameservers:
+      - 1.1.1.1
+      - 8.8.8.8
+    domain: example.com
+  arch: amd64
+  options:
+    unprivileged: true
+    onboot: true
+    startup: "order=10"
+  pve-description: "cache box under pveconform"

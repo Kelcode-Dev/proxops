@@ -70,6 +70,26 @@ const DependsOnKey = "proxops/depends-on"
 // dependsRe matches "ISO:ubuntu", "CTTemplate:base", "Pool:default".
 var dependsRe = regexp.MustCompile(`^([A-Za-z]+):([A-Za-z0-9.\-_]+)$`)
 
+// DependsOnError returns the parse-error from the DependsOnKey annotation, if
+// any, WITHOUT materialising the Deps. parse uses this to surface annotation
+// typos without needing to re-run the annotation parse.
+func (m Metadata) DependsOnError() error {
+	raw, ok := m.Annotations[DependsOnKey]
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if mm := dependsRe.FindStringSubmatch(part); mm == nil {
+			return fmt.Errorf("bad depends-on %q: expected KindName", part)
+		}
+	}
+	return nil
+}
+
 // DependsOn parses the DependsOnKey annotation value into (kind, name) edges.
 // Multiple values are comma-separated.
 func (m Metadata) DependsOn() ([]Dep, error) {

@@ -28,7 +28,28 @@ spec:
   networks:
     - model: virtio
       bridge: vmbr2
-  # pve-description: "talos worker"     # optional PVE description
-  # extra:                               # escape hatch, sent verbatim to PVE
-  #   tablet0: usb0,usb1
-  #   boot: order=scsi0;net0,enabled=1
+  hardware:
+    # machine: q35     # i440fx (PVE default) | q35
+    # bios: ovmf       # seabios (PVE default) | ovmf
+    # display: std     # PVE `vga` (default)
+    # cdrom:
+    #   iso: base-iso  # references an ISO manifest -> inferred dependency
+    # efi-disk:        # valid only when bios=ovmf
+    #   storage: local-lvm
+    #   size: 8MiB
+    # cloud-init:
+    #   enabled: true
+    #   storage: local
+    # tpm:
+    #   version: v2.0
+    # serial0: socket
+  options:
+    onboot: true                # auto-start when the node boots
+    startup: "order=10"         # PVE `startup` ordering / shutdown hint
+    protection: false           # blocks accidental destroy (off here)
+    agent: true                 # virtio qemu-guest-agent
+    tablet: false
+    # boot-order: [scsi0, net0] # PVE `boot=order=...` (unset -> PVE default)
+  pve-description: "talos worker"
+  # extra:                       # escape hatch, sent verbatim to PVE
+  #   watchdog: i6300esb

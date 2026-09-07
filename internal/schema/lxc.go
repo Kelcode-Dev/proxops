@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -22,15 +23,110 @@ type LXCRoot struct {
 }
 
 // LXCNetwork is one LXC NIC.
+//
+// PVE 9.2 LXC /lxc create requires `name=<iface>` in the per-NIC property
+// list (bare "veth,bridge=vmbr0" is rejected with "value without key, but
+// schema does not define a default key"). The default `name` is `net<i>` to
+// match the slot — but PVE actually stores it as a guest-visible interface
+// name (wired0 by default in PVE 9.x web UI).
+//
+// PVE 9.2 LXC netX valid form-values: name, bridge, tag, vlan, hwaddr,
+// type, rate, firewall (see pct.conf(5)); `multi_bridge`/`macvlan_mode`
+// are NOT in PVE's netX schema (PVE 9.2 probe-verified: rejected by the
+// create API).
 type LXCNetwork struct {
-	// Model: "veth" (default), "macvlan", "bridged".
-	Model string `yaml:"model,omitempty" json:"model,omitempty"`
+	// Iface is PVE's `name=<iface>` (guest-side interface name, e.g.
+	// "wired0" default when PVE's UI creates a net, "net0" legacy). When
+	// empty, pveconform defaults to "net<i>" to be deterministic.
+	Iface string `yaml:"iface,omitempty" json:"iface,omitempty"`
 	// Bridge, e.g. "vmbr0".
 	Bridge string `yaml:"bridge" json:"bridge"`
+	// Type is PVE's `type=` on LXC NICs: "veth" default. Probe-verified
+	// that PVE 9.2 LXC accepts "type=veth".
+	Type string `yaml:"type,omitempty" json:"type,omitempty"`
 	// HWAddr is a fixed MAC; empty lets PVE pick one.
 	HWAddr string `yaml:"hwaddr,omitempty" json:"hwaddr,omitempty"`
-	// Tag is a VLAN tag.
+	// Tag is a VLAN tag applied to the LXC NIC.
 	Tag int `yaml:"tag,omitempty" json:"tag,omitempty"`
+	// RateLimit is PVE's rate= option (MBit/s).
+	RateLimit int `yaml:"rate-limit,omitempty" json:"rate-limit,omitempty"`
+	// Firewall enables PVE's LXC firewall on this NIC.
+	Firewall bool `yaml:"firewall,omitempty" json:"firewall,omitempty"`
+	// Slot overrides the default net<i>.
+	Slot string `yaml:"slot,omitempty" json:"slot,omitempty"`
+}
+
+// LXCVolume is an LXC storage volume entry (rootfs or an additional
+// mountpoint mp0/mp1/...).
+type LXCVolume struct {
+	// Storage is the PVE storage id with `rootdir` content (e.g. "local-lvm").
+	Storage string `yaml:"storage" json:"storage"`
+	// Size is the volume size, e.g. "8GiB". Only valid for rootfs and
+	// mountpoints that PVE allocates; ignored for pre-existing paths.
+	Size string `yaml:"size,omitempty" json:"size,omitempty"`
+	// MountPoint overrides the PVE default mountpoint path. For rootfs
+	// this is "/"; for mp0+ PVE defaults to /mnt/mp<i>.
+	MountPoint string `yaml:"mount-point,omitempty" json:"mount-point,omitempty"`
+}
+
+// LXCDNS is PVE's LXC DNS configuration. PVE 9.2 accepts the following
+// form-values on /lxc create + /config update (probe-verified):
+//   - host        (settable on create and update)
+//   - hostname    (settable on create; becomes pct.conf `hostname`)
+//   - nameserver  (settable on create; "ns1,ns2" CSV form)
+//   - searchdomain (settable on create; PVE normalizes to search-domain)
+//
+// The bare `dns=` and `ttys=` form-values are rejected on PVE 9.2 create
+// (probe-verified) — those are UI helpers that PVE expands to the
+// above four.
+type LXCDNS struct {
+	// HostName is PVE's `hostname` (the guest kernel hostname).
+	// Defaults to metadata.name when unset.
+	HostName string `yaml:"hostname,omitempty" json:"hostname,omitempty"`
+	// Nameservers is PVE's `nameserver` (CSV of IP addresses).
+	Nameservers []string `yaml:"nameservers,omitempty" json:"nameservers,omitempty"`
+	// Domain is PVE's `searchdomain` / `domain` (the DNS domain appended to
+	// relative names).
+	Domain string `yaml:"domain,omitempty" json:"domain,omitempty"`
+}
+
+// LXCMountOptions are per-mountpoint LXC options. PVE 9.2 LXC accepts mpN
+// form-values: storage, size, mountpoint, mpN=storage,size=... for
+// rootdir-allocation mountpoints, plus `fssize=` and `quota=` on LVM
+// pools. The declarative schema exposes only the owned fields.
+type LXCMountOptions struct {
+	// Quota is PVE's `quota=<bytes or N%>` for dir-based storage.
+	Quota string `yaml:"quota,omitempty" json:"quota,omitempty"`
+	// ReadOnly attaches the mount read-only.
+	ReadOnly bool `yaml:"read-only,omitempty" json:"read-only,omitempty"`
+}
+
+// LXCOptions captures PVE LXC common options panel.
+type LXCOptions struct {
+	// Unprivileged is PVE's `unprivileged` (PCT 1 = default in PVE 9.x).
+	// When true, pveconform emits `unprivileged=1`.
+	Unprivileged bool `yaml:"unprivileged,omitempty" json:"unprivileged,omitempty"`
+	// Protection is PVE's `protection` (prevents accidental destroy).
+	Protection bool `yaml:"protection,omitempty" json:"protection,omitempty"`
+	// Nesting is PVE's `nesting` (allows nested LXC/VM).
+	Nesting bool `yaml:"nesting,omitempty" json:"nesting,omitempty"`
+	// KeyCtl is PVE's `keyctl` (allows keyctl in guest).
+	KeyCtl bool `yaml:"keyctl,omitempty" json:"keyctl,omitempty"`
+	// Fuse is PVE's `fuse` (allows FUSE mounts inside guest).
+	Fuse bool `yaml:"fuse,omitempty" json:"fuse,omitempty"`
+	// OnBoot is PVE's `onboot` (auto-start on node boot).
+	OnBoot bool `yaml:"onboot,omitempty" json:"onboot,omitempty"`
+	// Startup is PVE's `startup` (e.g. "order=10", "start=1").
+	Startup string `yaml:"startup,omitempty" json:"startup,omitempty"`
+	// TTYCount is PVE's `ttys=` (PVE 9.2 create rejects this; only
+	// settable on /config update).
+	// pveconform records the intent and applies it at update time if
+	// the container needs a TTY change.
+	// When the field is left empty, pveconform does NOT send it.
+	TTYCount int `yaml:"ttys,omitempty" json:"ttys,omitempty"`
+	// Console enables/updates PVE's `console=` option (PVE 9.2 create
+	// rejects a non-boolean `console=tty`).
+	Console bool `yaml:"console,omitempty" json:"console,omitempty"`
 }
 
 // LXCUnprivileged is PVE's "unprivileged" (1).
@@ -39,6 +135,19 @@ type LXCUnprivileged int
 // LXCExtra mirrors VM's extra: freeform PVE passthrough keys.
 type LXCExtra = map[string]string
 
+// LXCMount is one additional LXC mountpoint (mp0, mp1, ...).
+type LXCMount struct {
+	// Storage is the PVE storage id with rootdir content.
+	Storage string `yaml:"storage" json:"storage"`
+	// Size is the allocated volume size, e.g. "10GiB".
+	Size string `yaml:"size" json:"size"`
+	// MountPoint is the in-guest path, e.g. "/mnt/data". PVE's default for
+	// mp<i> is /mnt/mp<i>; set this to override.
+	MountPoint string `yaml:"mount-point,omitempty" json:"mount-point,omitempty"`
+	// Slot overrides the default mp<i>.
+	Slot string `yaml:"slot,omitempty" json:"slot,omitempty"`
+}
+
 // LXCSpec is the declarative LXC body.
 type LXCSpec struct {
 	// Node is the PVE node hosting this container.
@@ -46,31 +155,39 @@ type LXCSpec struct {
 	// VMID is the PVE id (cid) — pinned.
 	VMID int `yaml:"vmid" json:"vmid"`
 
-	// PveName is PVE's `name` (defaults to metadata.name).
-	PveName string `yaml:"pve-name,omitempty" json:"pve-name,omitempty"`
-	// PveDescription.
+	// Template is a pveconform CTTemplate metadata.name that bootstraps the
+	// container's rootfs. It is REQUIRED on create: PVE's /lxc create needs
+	// an `ostemplate` volume and the declarative schema expresses that as a
+	// reference to a CTTemplate manifest rather than a raw storage path. The
+	// planner resolves it to `ostemplate=<storage>:vztmpl/<filename>` and
+	// injects it into the create params.
+	Template string `yaml:"template" json:"template"`
+
+	// PveDescription is PVE's `description` (valid on create + update).
 	PveDescription string `yaml:"pve-description,omitempty" json:"pve-description,omitempty"`
 	// Tags are PVE user tags (pveconform tag is auto-appended).
 	Tags []string `yaml:"tags,omitempty" json:"tags,omitempty"`
 
 	// CPU.
 	CPU LXCCPU `yaml:"cpu" json:"cpu"`
-	// Memory (e.g. "2GiB") in PVE bytes.
+	// Memory (e.g. "2GiB"); PVE wire: MiB int.
 	Memory string `yaml:"memory" json:"memory"`
-	// Swap (PVE "swap", in PVE bytes; default 128MiB).
+	// Swap (PVE "swap"); default 16MiB if unset.
 	Swap string `yaml:"swap,omitempty" json:"swap,omitempty"`
-	// Rootfs.
+	// Root is the container's / volume.
 	Root LXCRoot `yaml:"root" json:"root"`
+	// MountPoints are additional LXC mp* volumes.
+	MountPoints []LXCMount `yaml:"mount-points,omitempty" json:"mount-points,omitempty"`
 	// Networks.
 	Networks []LXCNetwork `yaml:"networks" json:"networks"`
-	// OS sets PVE's "os" field (only valid on create) — defaults to "linux".
-	OS string `yaml:"os,omitempty" json:"os,omitempty"`
-	// Arch sets PVE's "arch" (only on create) — defaults to "amd64".
+	// DNS is PVE's container DNS + hostname.
+	DNS LXCDNS `yaml:"dns,omitempty" json:"dns,omitempty"`
+	// Arch sets PVE's "arch" (create) — defaults to "amd64".
 	Arch string `yaml:"arch,omitempty" json:"arch,omitempty"`
-	// Features: PVE's "features" key (optional, create-only).
-	Features string `yaml:"features,omitempty" json:"features,omitempty"`
+	// Options are PVE's common LXC options panel.
+	Options LXCOptions `yaml:"options,omitempty" json:"options,omitempty"`
 
-	// Extra freeform PVE passthrough.
+	// Extra freeform PVE passthrough (escape hatch).
 	Extra map[string]string `yaml:"extra,omitempty" json:"extra"`
 
 	// State is the desired power state: "started" (default) or "stopped".
@@ -83,6 +200,11 @@ type LXC struct {
 	Kind       Kind     `yaml:"kind" json:"kind"`
 	Metadata   Metadata `yaml:"metadata" json:"metadata"`
 	Spec       LXCSpec  `yaml:"spec" json:"spec"`
+
+	// ostemplateVolid is the PVE ostemplate wire value
+	// ("local:vztmpl/x.tar.zst"), populated by ResolveArtifactRefs before
+	// the planner runs.
+	ostemplateVolid string
 }
 
 // NewLXC returns an empty LXC.
@@ -96,6 +218,14 @@ func (l *LXC) Ref() Ref { return Ref{Kind: l.Kind, Name: l.Metadata.Name} }
 // Node implements Resource.
 func (l *LXC) Node() string { return l.Spec.Node }
 
+// Nodes implements Resource — an LXC is pinned to a single PVE node.
+func (l *LXC) Nodes() []string {
+	if l.Spec.Node == "" {
+		return nil
+	}
+	return []string{l.Spec.Node}
+}
+
 // ID implements Resource.
 func (l *LXC) ID() int { return l.Spec.VMID }
 
@@ -105,6 +235,16 @@ func (l *LXC) DesiredState() string {
 		return string(s)
 	}
 	return "started"
+}
+
+// Deps implements Resource. An LXC declares exactly one structured
+// dependency: spec.template → a CTTemplate manifest. This edge is what
+// makes "LXC cannot be created until the template has been downloaded".
+func (l *LXC) Deps() []Ref {
+	if l.Spec.Template == "" {
+		return nil
+	}
+	return []Ref{{Kind: KindCTTemplate, Name: l.Spec.Template}}
 }
 
 // Validate implements Resource.
@@ -124,8 +264,13 @@ func (l *LXC) Validate() error {
 	if _, err := MemoryMiB(l.Spec.Memory); err != nil {
 		return fmt.Errorf("%s: spec.memory: %w", l.Ref(), err)
 	}
+	if l.Spec.Swap != "" {
+		if _, err := MemoryMiB(l.Spec.Swap); err != nil {
+			return fmt.Errorf("%s: spec.swap: %w", l.Ref(), err)
+		}
+	}
 	if l.Spec.Root.Storage == "" {
-		return fmt.Errorf("%s: spec.root.storage must be set", l.Ref())
+		return fmt.Errorf("%s: spec.root.storage must be set (a PVE storage id with rootdir content)", l.Ref())
 	}
 	if l.Spec.Root.Size == "" {
 		return fmt.Errorf("%s: spec.root.size must be set (e.g. 32GiB)", l.Ref())
@@ -133,14 +278,81 @@ func (l *LXC) Validate() error {
 	if _, err := DiskBytes(l.Spec.Root.Size); err != nil {
 		return fmt.Errorf("%s: spec.root.size: %w", l.Ref(), err)
 	}
-	if len(l.Spec.Networks) > 0 {
-		if l.Spec.Networks[0].Bridge == "" {
-			return fmt.Errorf("%s: spec.networks[0].bridge must be set", l.Ref())
+	// template is required for creates; PVE's /lxc create needs an
+	// ostemplate volume. The planner injects the resolved wire value.
+	if l.Spec.Template == "" {
+		return fmt.Errorf("%s: spec.template must reference a CTTemplate manifest (PVE /lxc create requires an ostemplate)", l.Ref())
+	}
+	if !ValidName(l.Spec.Template) {
+		return fmt.Errorf("%s: spec.template %q is not a valid resource name", l.Ref(), l.Spec.Template)
+	}
+	// networks
+	seenNet := map[string]bool{}
+	for i := range l.Spec.Networks {
+		n := &l.Spec.Networks[i]
+		if n.Bridge == "" {
+			return fmt.Errorf("%s: spec.networks[%d].bridge must be set", l.Ref(), i)
 		}
+		if n.Tag < 0 || n.Tag > 4094 {
+			return fmt.Errorf("%s: spec.networks[%d].tag must be in [0, 4094]", l.Ref(), i)
+		}
+		if n.RateLimit < 0 {
+			return fmt.Errorf("%s: spec.networks[%d].rate-limit must be non-negative", l.Ref(), i)
+		}
+		slot := n.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("net%d", i)
+		}
+		if seenNet[slot] {
+			return fmt.Errorf("%s: duplicate net slot %q", l.Ref(), slot)
+		}
+		seenNet[slot] = true
+		if !lxcValidNetSlot(slot) {
+			return fmt.Errorf("%s: spec.networks[%d] slot %q invalid (use net0, net1, ...)", l.Ref(), i, slot)
+		}
+		n.Slot = slot
+	}
+	// mount points
+	seenMp := map[string]bool{}
+	for i := range l.Spec.MountPoints {
+		m := &l.Spec.MountPoints[i]
+		if m.Storage == "" {
+			return fmt.Errorf("%s: spec.mount-points[%d].storage must be set", l.Ref(), i)
+		}
+		if m.Size == "" {
+			return fmt.Errorf("%s: spec.mount-points[%d].size must be set", l.Ref(), i)
+		}
+		if _, err := DiskBytes(m.Size); err != nil {
+			return fmt.Errorf("%s: spec.mount-points[%d].size: %w", l.Ref(), i, err)
+		}
+		slot := m.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("mp%d", i)
+		}
+		if seenMp[slot] {
+			return fmt.Errorf("%s: duplicate mount point %q", l.Ref(), slot)
+		}
+		seenMp[slot] = true
+		m.Slot = slot
+	}
+	// arch
+	if l.Spec.Arch != "" && l.Spec.Arch != "amd64" && l.Spec.Arch != "i686" && l.Spec.Arch != "arm64" {
+		return fmt.Errorf("%s: spec.arch %q must be amd64|i686|arm64 (PVE 9.2)", l.Ref(), l.Spec.Arch)
+	}
+	// extra keys must not collide with PVE core keys we already handle.
+	structuredReserved := map[string]bool{
+		"vmid": true, "ctid": true, "name": true, "memory": true, "core_count": true,
+		"cores": true, "rootfs": true, "ostemplate": true, "ostype": true, "arch": true,
+		"hostname": true, "nameserver": true, "searchdomain": true, "unprivileged": true,
+		"onboot": true, "protection": true, "nesting": true, "keyctl": true, "fuse": true,
+		"start": true,
 	}
 	for k := range l.Spec.Extra {
-		if k == "vmid" || k == "name" || k == "memory" || k == "cores" || strings.HasPrefix(k, "net") {
-			return fmt.Errorf("%s: spec.extra key %q conflicts with a structured field", l.Ref(), k)
+		if strings.HasPrefix(k, "net") || strings.HasPrefix(k, "mp") {
+			return fmt.Errorf("%s: spec.extra key %q conflicts with a structured field; remove it", l.Ref(), k)
+		}
+		if structuredReserved[k] {
+			return fmt.Errorf("%s: spec.extra key %q conflicts with a structured field; remove it", l.Ref(), k)
 		}
 	}
 	if l.Spec.State != "" {
@@ -152,43 +364,106 @@ func (l *LXC) Validate() error {
 }
 
 // ToCreateParams returns PVE wire form-values for POST /nodes/{n}/lxc.
+//
+// PVE 9.2 /lxc create grammar (probe-verified on conformance-dev):
+//   - `name` and `os` are NOT valid create form-values (rejected with
+//     "property is not defined in schema" — PVE 9.x renamed the field
+//     surface; `hostname` is the valid create-time field; `ostype` is
+//     auto-inferred from `ostemplate`).
+//   - `dns`, `ttys`, `hwclock` are also rejected on create (they are PVE
+//     UI helpers that expand to `hostname` + `nameserver` + `searchdomain`);
+//     use the three valid form keys instead.
+//   - `ostemplate=<pool>:vztmpl/<filename>` is required; pveconform does
+//     NOT emit it here — the planner resolves LXC.spec.template against
+//     the CTTemplate manifest and injects the value (see plan.resolveDeps).
+//   - net<i> must carry `name=<iface>` first (probe-verified: PVE 9.x
+//     rejects bare-model LXC NICs with "value without key, but schema does
+//     not define a default key").
 func (l *LXC) ToCreateParams() (map[string]any, error) {
 	if err := l.Validate(); err != nil {
 		return nil, err
 	}
 	p := map[string]any{
 		"vmid":   l.Spec.VMID,
-		"name":   l.pveName(),
 		"cores":  l.Spec.CPU.Cores,
 		"memory": memMiB(l.Spec.Memory),
 		"tags":   strings.Join(l.allTags(), ","),
 		"start":  "0",
 	}
+	// ostemplate: REQUIRED on PVE 9.2 /lxc create. When the planner
+	// resolves the LXC's template ref, it sets OstemplateVolid to
+	// "<storage>:vztmpl/<filename>" and pveconform emits it here.
+	if l.ostemplateVolid != "" {
+		p["ostemplate"] = l.ostemplateVolid
+	}
+	// hostname: PVE's /lxc create `hostname` (NOT `name` on PVE 9.2).
+	// Defaults to metadata.name so PVE's display name matches git.
+	if dnsHost := strings.TrimSpace(l.Spec.DNS.HostName); dnsHost != "" {
+		p["hostname"] = dnsHost
+	} else {
+		p["hostname"] = l.Metadata.Name
+	}
+	if len(l.Spec.DNS.Nameservers) > 0 {
+		p["nameserver"] = strings.Join(l.Spec.DNS.Nameservers, ",")
+	}
+	if l.Spec.DNS.Domain != "" {
+		p["searchdomain"] = l.Spec.DNS.Domain
+	}
 	if l.Spec.PveDescription != "" {
 		p["description"] = l.Spec.PveDescription
 	}
-	// Rootfs: PVE's documented LXC create-time allocation form is
-	// "STORAGE_ID:SIZE_IN_GiB" (pct.conf(5)); a bare number after the
-	// storage id is read as GiB by PVE's storage plugins — the same unit as
-	// the QEMU `scsiN` create-time volume spec (empirically verified on PVE
-	// 9.2: local-lvm:8589934592 → "Volume too large (8.00 EiB)").
-	p["rootfs"] = fmt.Sprintf("%s:%s", l.Spec.Root.Storage, GiBString(diskBytes(l.Spec.Root.Size)))
-	if l.Spec.OS != "" {
-		p["os"] = l.Spec.OS
-	}
+	// Rootfs: PVE's LXC create-time allocation form is "STORAGE_ID:SIZE_
+	// IN_GiB" (pct.conf(5)); PVE rewrites to "<pool>:vm-<cid>-disk-0,size=
+	// <binary>" after allocation. (Probe-verified: the bare number is GiB.)
+	p["rootfs"] = lxcLVMAlloc(l.Spec.Root.Storage, l.Spec.Root.Size)
 	if l.Spec.Arch != "" {
 		p["arch"] = l.Spec.Arch
 	}
 	if l.Spec.Swap != "" {
-		if mi, err := MemoryMiB(l.Spec.Swap); err == nil {
-			p["swap"] = mi
-		}
+		p["swap"] = memMiB(l.Spec.Swap)
 	}
-	// Network: PVE uses "net0: veth[,hwaddr=...],bridge=...,tag=..." (see
-	// lxcNetString for the device-type/empty-MAC semantics).
+	// Additional mount points.
+	for i, m := range l.Spec.MountPoints {
+		slot := m.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("mp%d", i)
+		}
+		val := lxcLVMAlloc(m.Storage, m.Size)
+		if m.MountPoint != "" {
+			val += ",mp=" + m.MountPoint
+		}
+		p[slot] = val
+	}
+	// LXC netX: PVE 9.x requires name=<iface> at the head of the property
+	// list. See lxcNetString.
 	for i, n := range l.Spec.Networks {
-		spec := lxcNetString(n.Model, strings.ToLower(n.HWAddr), n.Bridge, n.Tag)
-		p[fmt.Sprintf("net%d", i)] = spec
+		slot := n.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("net%d", i)
+		}
+		p[slot] = lxcNetString(n)
+	}
+	// Container options.
+	if l.Spec.Options.Unprivileged {
+		p["unprivileged"] = "1"
+	}
+	if l.Spec.Options.Protection {
+		p["protection"] = "1"
+	}
+	if l.Spec.Options.Nesting {
+		p["nesting"] = "1"
+	}
+	if l.Spec.Options.KeyCtl {
+		p["keyctl"] = "1"
+	}
+	if l.Spec.Options.Fuse {
+		p["fuse"] = "1"
+	}
+	if l.Spec.Options.OnBoot {
+		p["onboot"] = "1"
+	}
+	if l.Spec.Options.Startup != "" {
+		p["startup"] = l.Spec.Options.Startup
 	}
 	for k, v := range l.Spec.Extra {
 		p[k] = v
@@ -196,85 +471,155 @@ func (l *LXC) ToCreateParams() (map[string]any, error) {
 	return p, nil
 }
 
-// lxcNetString builds PVE's LXC "netN" value: "<model>[=<hwaddr>][,bridge=..][,tag=N]".
-// A bare model name (no MAC pinned) is a valid PVE device type ("veth,bridge=x");
-// "veth=<empty>" would fail PVE's comma-separated property parser with
-// "missing key in comma-separated list property" (same class of error that
-// hit the VM virtio NIC path).
-func lxcNetString(model, hwAddr, bridge string, tag int) string {
-	m := model
-	if m == "" {
-		m = "veth"
-	}
-	spec := m
-	if hwAddr != "" {
-		spec += "=" + hwAddr
-	}
-	spec += ","
-	if bridge != "" {
-		spec += "bridge=" + bridge + ","
-	}
-	if tag > 0 {
-		spec += "tag=" + itoa(tag) + ","
-	}
-	return strings.TrimSuffix(spec, ",")
+// lxcLVMAlloc renders PVE's LXC rootfs/mp create-time allocation form
+// "<pool>:<GiB>" (same unit contract as the QEMU `scsiN` volume spec).
+func lxcLVMAlloc(pool, size string) string {
+	return fmt.Sprintf("%s:%s", pool, GiBString(diskBytes(size)))
 }
 
-// lxcNetMatches reports whether PVE's reported LXC net string satisfies the
-// owned fields of the desired LXCNetwork. PVE reports the full form
-// ("veth=52:54:00:aa:bb:cc,bridge=vmbr0,tag=1"). We compare:
+// lxcNetString builds PVE's LXC "netN" value. PVE 9.2 create requires
+// `name=<iface>` as the first option (bare model names are rejected:
+// "invalid format - value without key, but schema does not define a default
+// key"). PVE auto-fills `type=veth` and assigns a random hwaddr when they
+// are omitted.
 //
-//   - model (first token before '='; a pinned-MAC report carries it)
-//   - bridge (PVE-owned)
-//   - tag   (only when we pinned one)
-//   - MAC   (only when we pinned one; PVE assigns a random one otherwise)
+//   - iface   = <user-declared> || "net<i>" (default PVE wire name)
+//   - bridge  = REQUIRED on LXC networks (validated in Validate)
+//   - tag     = PVE 8.2+ VLAN tag on the LXC NIC (optional)
+//   - hwaddr  = pinned MAC (optional)
+//   - rate    = MBit/s rate limit (optional)
+//   - firewall= PVE LXC firewall on/off (optional)
+func lxcNetString(n LXCNetwork) string {
+	iface := strings.TrimSpace(n.Iface)
+	if iface == "" {
+		iface = n.Slot
+		if iface == "" {
+			iface = "net0"
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString("name=" + iface)
+	if t := strings.TrimSpace(n.Type); t != "" {
+		sb.WriteString(",type=" + t)
+	}
+	if n.Bridge != "" {
+		sb.WriteString(",bridge=" + n.Bridge)
+	}
+	if n.Tag > 0 {
+		fmt.Fprintf(&sb, ",tag=%d", n.Tag)
+	}
+	if m := strings.ToLower(strings.TrimSpace(n.HWAddr)); m != "" {
+		sb.WriteString(",hwaddr=" + m)
+	}
+	if n.RateLimit > 0 {
+		fmt.Fprintf(&sb, ",rate=%d", n.RateLimit)
+	}
+	if n.Firewall {
+		sb.WriteString(",firewall=1")
+	}
+	return sb.String()
+}
+
+// lxcNetFields is the parsed form of an LXC netX property string.
+type lxcNetFields struct {
+	iface    string
+	typ      string
+	bridge   string
+	tag      int
+	hwaddr   string
+	rate     int
+	firewall bool
+}
+
+// parseLXCNetFields parses an LXC netX property string. PVE's report form
+// (create-time is the same grammar) is "name=wired0,bridge=vmbr0,hwaddr=
+// 52:...,type=veth". PVE always normalizes type to veth unless a
+// non-veth type was requested.
+func parseLXCNetFields(s string) lxcNetFields {
+	out := lxcNetFields{}
+	for _, kv := range strings.Split(s, ",") {
+		k, v, found := strings.Cut(strings.TrimSpace(kv), "=")
+		if !found {
+			continue
+		}
+		switch k {
+		case "name":
+			out.iface = v
+		case "type":
+			out.typ = v
+		case "bridge":
+			out.bridge = v
+		case "tag":
+			out.tag, _ = strconv.Atoi(v)
+		case "hwaddr":
+			out.hwaddr = strings.ToLower(v)
+		case "rate":
+			out.rate, _ = strconv.Atoi(v)
+		case "firewall":
+			out.firewall = v == "1" || v == "true"
+		}
+	}
+	return out
+}
+
+// lxcNetMatches reports whether PVE's LXC netX report satisfies the owned
+// fields of the desired LXCNetwork. PVE auto-fills type=veth and assigns a
+// random hwaddr; we don't own those unless the user pinned them.
 //
-// This avoids false-drift for PVE-assigned MACs we did not request.
-func lxcNetMatches(cur, model, hwAddr, bridge string, tag int) bool {
-	cur = strings.TrimSpace(cur)
-	if cur == "" {
+// Ownership model:
+//   - iface (only when desired set it; PVE defaults to "net0" → own)
+//   - bridge (only when desired set it; validated as required)
+//   - tag / rate / firewall (only when desired set them non-zero)
+//   - hwaddr (only when desired pinned it — PVE auto-assigns otherwise)
+func lxcNetMatches(cur string, n LXCNetwork) bool {
+	got := parseLXCNetFields(cur)
+	// iface: if user did not declare one, pveconform defaulted to net<N>
+	// and PVE likely defaulted differently ("wired0" on PVE 9.2 web UI).
+	// We only compare when explicit.
+	if strings.TrimSpace(n.Iface) != "" && got.iface != strings.TrimSpace(n.Iface) {
 		return false
 	}
-	wantModel := model
-	if wantModel == "" {
-		wantModel = "veth"
-	}
-	head := cur
-	if i := strings.IndexByte(head, ','); i >= 0 {
-		head = head[:i]
-	}
-	gotModel, mac, hasMac := head, "", false
-	if eq := strings.IndexByte(head, '='); eq >= 0 {
-		gotModel = head[:eq]
-		mac = head[eq+1:]
-		hasMac = true
-	}
-	if gotModel != wantModel {
+	if n.Bridge != "" && got.bridge != n.Bridge {
 		return false
 	}
-	if bridge != "" && !lxcNetHasKV(cur, "bridge", bridge) {
+	if n.Tag > 0 && got.tag != n.Tag {
 		return false
 	}
-	if tag > 0 && !lxcNetHasKV(cur, "tag", itoa(tag)) {
+	if m := strings.ToLower(strings.TrimSpace(n.HWAddr)); m != "" && got.hwaddr != m {
 		return false
 	}
-	if hwAddr != "" && (!hasMac || !strings.EqualFold(mac, hwAddr)) {
+	if n.RateLimit > 0 && got.rate != n.RateLimit {
+		return false
+	}
+	if n.Firewall && !got.firewall {
 		return false
 	}
 	return true
 }
 
-// lxcNetHasKV reports whether the comma list contains "k=v".
-func lxcNetHasKV(list, k, v string) bool {
-	for _, kv := range strings.Split(list, ",") {
-		if strings.TrimPrefix(strings.TrimSpace(kv), k+"=") == v && strings.HasPrefix(strings.TrimSpace(kv), k+"=") {
-			return true
-		}
-	}
-	return false
+// lxcValidNetSlot reports whether s is a valid LXC net slot name.
+func lxcValidNetSlot(s string) bool {
+	return strings.HasPrefix(s, "net") && len(strings.TrimPrefix(s, "net")) > 0
 }
 
 // Drift implements Resource.
+//
+// LXC's owned-field set is narrower than VM's because PVE 9.2 auto-
+// synthesizes several values PVE owns (hwaddr, ostype, rootfs volume
+// name, netX type). The owned fields are:
+//
+//   - cores, memory, swap, arch (PVE's LXC /config)
+//   - hostname, nameserver, searchdomain (PVE's "name" was renamed; the
+//     wire key on /config is still "hostname")
+//   - rootfs pool + size
+//   - netX bridge / tag / rate / firewall / pinned hwaddr
+//   - unprivileged, onboot, protection, startup, nesting, keyctl, fuse
+//   - tags
+//
+// PVE's LXC /lxc/{cid}/config report uses "hostname", "nameserver",
+// "searchdomain" as field names (probe-verified on PVE 9.2, identical to
+// the create-side keys). This is different from PVE 8, where the report
+// used "name" — pveconform only targets PVE 9.x.
 func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	if current == nil {
 		return nil, false, false
@@ -283,37 +628,124 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	stop := false
 
 	// cores
-	if pveInt(current["cores"]) != l.Spec.CPU.Cores {
+	if got := pveInt(current["cores"]); got != l.Spec.CPU.Cores {
 		upd["cores"] = l.Spec.CPU.Cores
 		stop = true
 	}
-	// memory: PVE's LXC /config stores an integer MiB count (pct.conf: "in MB").
-	if want, err := MemoryMiB(l.Spec.Memory); err == nil && pveInt(current["memory"]) != int(want) {
-		upd["memory"] = want
-		stop = true
-	}
-	// tags: PVE stores as a JSON array; compare as a set.
-	if !tagsEqual(current["tags"], l.allTags()) {
-		upd["tags"] = strings.Join(l.allTags(), ",")
-	}
-	// rootfs: PVE's /config report is "<pool>:<volid>[,...],size=<binary>" —
-	// the container volume id is PVE-assigned (not owned). We own pool and
-	// size; pveDiskInfo compares on those, ignoring the volume name.
-	wantRoot := parseDiskInfo(fmt.Sprintf("%s:%s", l.Spec.Root.Storage, GiBString(diskBytes(l.Spec.Root.Size))))
-	if !diskMatches(parseDiskInfo(pveStr(current["rootfs"])), wantRoot) {
-		upd["rootfs"] = fmt.Sprintf("%s:%s", l.Spec.Root.Storage, GiBString(diskBytes(l.Spec.Root.Size)))
-		stop = true
-	}
-	// nics — compare owned fields (model, hwaddr, bridge, tag).
-	for i, n := range l.Spec.Networks {
-		hw := strings.ToLower(n.HWAddr)
-		slot := fmt.Sprintf("net%d", i)
-		if !lxcNetMatches(pveStr(current[slot]), n.Model, hw, n.Bridge, n.Tag) {
-			upd[slot] = lxcNetString(n.Model, hw, n.Bridge, n.Tag)
+	// memory: PVE's LXC /config integer MiB count (pct.conf: "in MB").
+	if want, err := MemoryMiB(l.Spec.Memory); err == nil {
+		if got := pveInt(current["memory"]); got != int(want) {
+			upd["memory"] = want
 			stop = true
 		}
 	}
-	_ = stop
+	// swap
+	if l.Spec.Swap != "" {
+		if want, err := MemoryMiB(l.Spec.Swap); err == nil {
+			if got := pveInt(current["swap"]); got != int(want) {
+				upd["swap"] = want
+				stop = true
+			}
+		}
+	}
+	// arch: PVE creates the container with arch=amd64 even when the user
+	// did not set it. Compare only when declared.
+	if l.Spec.Arch != "" && pveStr(current["arch"]) != l.Spec.Arch {
+		upd["arch"] = l.Spec.Arch
+		stop = true
+	}
+	// hostname: PVE's wire key is hostname on both create and /config
+	// (probe-verified PVE 9.2). When the user did not declare a hostname,
+	// pveconform sends metadata.name and PVE stores it verbatim, so the
+	// comparison is exact.
+	wantHost := strings.TrimSpace(l.Spec.DNS.HostName)
+	if wantHost == "" {
+		wantHost = l.Metadata.Name
+	}
+	if pveStr(current["hostname"]) != wantHost {
+		upd["hostname"] = wantHost
+	}
+	// nameserver (CSV on PVE /config)
+	if len(l.Spec.DNS.Nameservers) > 0 {
+		want := strings.Join(l.Spec.DNS.Nameservers, ",")
+		if pveStr(current["nameserver"]) != want {
+			upd["nameserver"] = want
+		}
+	}
+	// searchdomain
+	if l.Spec.DNS.Domain != "" {
+		if pveStr(current["searchdomain"]) != l.Spec.DNS.Domain {
+			upd["searchdomain"] = l.Spec.DNS.Domain
+		}
+	}
+	// description
+	if l.Spec.PveDescription != "" && pveStr(current["description"]) != l.Spec.PveDescription {
+		upd["description"] = l.Spec.PveDescription
+	}
+	// tags
+	if !tagsEqual(current["tags"], l.allTags()) {
+		upd["tags"] = strings.Join(l.allTags(), ",")
+	}
+	// rootfs pool+size
+	wantRoot := parseDiskInfo(lxcLVMAlloc(l.Spec.Root.Storage, l.Spec.Root.Size))
+	if !diskMatches(parseDiskInfo(pveStr(current["rootfs"])), wantRoot) {
+		upd["rootfs"] = lxcLVMAlloc(l.Spec.Root.Storage, l.Spec.Root.Size)
+		stop = true
+	}
+	// mount points pool+size
+	for i, m := range l.Spec.MountPoints {
+		slot := m.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("mp%d", i)
+		}
+		want := parseDiskInfo(lxcLVMAlloc(m.Storage, m.Size))
+		got := parseDiskInfo(pveStr(current[slot]))
+		// PVE's mountpoint report is "<pool>:vm-<cid>-disk-<n>[,...]"
+		// (no size) or "<pool>:<volid>,size=<binary>". Our pveDiskInfo
+		// parser handles both. If PVE's size is unreadable, we fall back
+		// to pool-only comparison; a size mismatch still drifts.
+		if !diskMatches(got, want) {
+			upd[slot] = lxcLVMAlloc(m.Storage, m.Size)
+			stop = true
+		}
+	}
+	// networks — compare owned fields (bridge, tag, rate, firewall,
+	// pinned hwaddr; iface only when declared).
+	for i, n := range l.Spec.Networks {
+		slot := n.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("net%d", i)
+		}
+		if !lxcNetMatches(pveStr(current[slot]), n) {
+			upd[slot] = lxcNetString(n)
+			stop = true
+		}
+	}
+	// options: PVE stores 0 as "absent"; comparing int-0==absent avoids
+	// false drift.
+	if o := &l.Spec.Options; o != nil {
+		if o.Unprivileged && pveInt(current["unprivileged"]) != 1 {
+			upd["unprivileged"] = "1"
+		}
+		if o.Protection && pveInt(current["protection"]) != 1 {
+			upd["protection"] = "1"
+		}
+		if o.Nesting && pveInt(current["nesting"]) != 1 {
+			upd["nesting"] = "1"
+		}
+		if o.KeyCtl && pveInt(current["keyctl"]) != 1 {
+			upd["keyctl"] = "1"
+		}
+		if o.Fuse && pveInt(current["fuse"]) != 1 {
+			upd["fuse"] = "1"
+		}
+		if o.OnBoot && pveInt(current["onboot"]) != 1 {
+			upd["onboot"] = "1"
+		}
+		if o.Startup != "" && pveStr(current["startup"]) != o.Startup {
+			upd["startup"] = o.Startup
+		}
+	}
 	if len(upd) == 0 {
 		return nil, false, false
 	}
@@ -321,13 +753,6 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 }
 
 // --- helpers ---
-
-func (l *LXC) pveName() string {
-	if l.Spec.PveName != "" {
-		return l.Spec.PveName
-	}
-	return l.Metadata.Name
-}
 
 func (l *LXC) allTags() []string {
 	out := make([]string, 0, len(l.Spec.Tags)+1)
@@ -345,23 +770,5 @@ func (l *LXC) allTags() []string {
 }
 
 func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
+	return strconv.Itoa(i)
 }

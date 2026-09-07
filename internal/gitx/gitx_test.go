@@ -45,12 +45,25 @@ spec:
   memory: 1GiB
   cpu:
     cores: 1
+  template: test-ctt
   root:
     storage: local
     size: 8GiB
   networks:
-    - model: veth
-      bridge: vmbr0
+    - bridge: vmbr0
+`
+
+// cttManifest is a valid pveconform CTTemplate (vztmpl artifact) manifest —
+// a downloadable template archive with no PVE numeric id.
+const cttManifest = `apiVersion: proxops/v1alpha1
+kind: CTTemplate
+metadata:
+  name: test-ctt
+spec:
+  nodes: [pve01]
+  storage: local
+  filename: debian-13.tar.zst
+  url: https://example.com/debian-13.tar.zst
 `
 
 // buildRepo creates a git repo at dir containing the given files, commits, and
@@ -156,10 +169,17 @@ func TestFetchPicksUpCommit(t *testing.T) {
 		t.Fatal("no-op fetch moved rev")
 	}
 
-	// Add a new commit on the remote.
+	// Add a new commit on the remote (CTTemplate + LXC; LXC references CTT,
+	// so both must land in the same tree for BuildIndex to succeed).
 	rep, _ := git.PlainOpen(remote)
 	wt, _ := rep.Worktree()
+	if err := os.WriteFile(filepath.Join(remote, "ctt.yaml"), []byte(cttManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(remote, "lxc.yaml"), []byte(lxcManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("ctt.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := wt.Add("lxc.yaml"); err != nil {
@@ -208,11 +228,13 @@ func TestLocalMode(t *testing.T) {
 	// we commit the change here to move HEAD).
 	rep, _ := git.PlainOpen(remote)
 	wt, _ := rep.Worktree()
-	if err := os.WriteFile(filepath.Join(remote, "lxc.yaml"), []byte(lxcManifest), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := wt.Add("lxc.yaml"); err != nil {
-		t.Fatal(err)
+	for f, c := range map[string]string{"ctt.yaml": cttManifest, "lxc.yaml": lxcManifest} {
+		if err := os.WriteFile(filepath.Join(remote, f), []byte(c), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := wt.Add(f); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := wt.Commit("add ct", &git.CommitOptions{
 		Author: &object.Signature{Name: "t", Email: "t@example.com"},

@@ -54,6 +54,21 @@ type Action struct {
 	LivePower string
 	// DesiredPower is the manifest power state ("started"/"stopped").
 	DesiredPower string
+	// Level is the topological create-level of this action's resource:
+	// level 0 = resource has no pveconform dependencies; level n = depends
+	// on resources at level < n. The planner uses this to order creates
+	// so prerequisites are planned before dependants; prunes are ordered
+	// by REVERSE level so dependants delete first (ISOs / templates must
+	// outlive the VMs / LXC that reference them).
+	Level int
+	// Deps are this action's prerequisite refs (structured + annotation
+	// edges). The executor uses them to defer this action when a
+	// prerequisite failed earlier in the same cycle (a dependant is not
+	// attempted before its prerequisite is ready).
+	Deps []schema.Ref
+	// Ref is the pveconform manifest Ref this action targets (nil for
+	// prunes of PVE-side objects not in git).
+	Ref schema.Ref
 }
 
 // Plan is the ordered result of one planning pass.
@@ -82,6 +97,16 @@ type Budget struct {
 // DefaultBudget is 3 (plan §10).
 func DefaultBudget() Budget { return Budget{Prune: 3} }
 
+// LevelsFunc returns the topological create-level for a Ref. 0 when the
+// resource has no dependencies. The planner uses this to sort creates
+// (level ascending) and prunes (level descending).
+type LevelsFunc func(ref schema.Ref) int
+
+// EdgesFunc returns the dependency refs (prerequisites) of a given Ref. The
+// planner uses this to populate Action.Deps so the executor can defer a
+// dependant when its prerequisite failed earlier in the same cycle.
+type EdgesFunc func(ref schema.Ref) []schema.Ref
+
 // PlanOptions carries planner inputs.
 //
 // The plan is PURE: it always reports the full desired-vs-actual delta
@@ -91,6 +116,17 @@ func DefaultBudget() Budget { return Budget{Prune: 3} }
 // perform, including would-be deletes. (plan §2 / §10)
 type PlanOptions struct {
 	Budget Budget
+	// Levels, when non-nil, orders creates by dependency level:
+	// prerequisites (level 0, e.g. an ISO) are planned before dependent
+	// resources (level 1, e.g. a VM that mounts that ISO). Prunes use
+	// the reverse: a resource that depends on another is pruned first so
+	// the dependency outlives the dependent. When Levels is nil the
+	// planner falls back to the historical deterministic sort.
+	Levels LevelsFunc
+	// Edges, when non-nil, populates Action.Deps for VM/LXC creates so that
+	// the executor can defer a dependant whose prerequisite failed in-cycle.
+	// Returns nil → no deferral (all actions attempted in plan order).
+	Edges EdgesFunc
 }
 
 // Plan walks desired vs. live and emits the ordered action list.
@@ -108,45 +144,54 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		Skipped:  make([]Action, 0, 4),
 		Deferred: make([]Action, 0, 4),
 	}
+	levels := opts.Levels
+	if levels == nil {
+		levels = func(_ schema.Ref) int { return 0 }
+	}
+	edges := opts.Edges
+	if edges == nil {
+		edges = func(_ schema.Ref) []schema.Ref { return nil }
+	}
+	depsFor := func(ref schema.Ref) []schema.Ref { return edges(ref) }
 
 	// Pass A: desired objects → creates/updates/power.
 	for _, r := range desired {
-		if iso, ok := r.(*schema.ISO); ok {
-			planISO(p, iso, live)
+		ref := r.Ref()
+		// Artifacts (ISO, CTTemplate) are per-node per-storage storage
+		// entries and do not use the standard (node, kind, id) live shape.
+		if schema.ArtifactKind(ref.Kind) {
+			planArtifact(p, r, live, levels)
 			continue
 		}
-		kt := r.Ref().Kind
+		kt := ref.Kind
 		key := liveKey(r.Node(), kt, r.ID())
 		cfg, present := live.Configs[key]
 
 		if !present {
 			params, err := r.ToCreateParams()
 			if err != nil {
-				return nil, fmt.Errorf("%s: create params: %w", r.Ref(), err)
+				return nil, fmt.Errorf("%s: create params: %w", ref, err)
 			}
 			p.Actions = append(p.Actions, Action{
-				Tier: 0, Kind: kt, Name: r.Ref().Name, Node: r.Node(), ID: r.ID(),
-				What: Create, Params: params,
-				Reason:    r.Ref().String() + ": not on PVE; will " + createVerb(kt),
+				Tier: 0, Kind: kt, Name: ref.Name, Node: r.Node(), ID: r.ID(),
+				What: Create, Params: params, Level: levels(ref), Ref: ref,
+				Deps:      depsFor(ref),
+				Reason:    ref.String() + ": not on PVE; will " + createVerb(kt),
 				LivePower: "", DesiredPower: r.DesiredState(),
 			})
 			continue
 		}
 
 		updParams, stopFirst, changed := r.Drift(cfg)
-		if changed && kt == schema.KindCTTemplate && live.Power[key] == "running" {
-			// PVE requires the CT to be stopped before it can be marked a
-			// template; stop-first, no restore (CTT DesiredState is always "").
-			stopFirst = true
-		}
 		if changed {
-			reason := r.Ref().String() + ": config drift"
+			reason := ref.String() + ": config drift"
 			if stopFirst {
 				reason += " (stop-required)"
 			}
 			p.Actions = append(p.Actions, Action{
-				Tier: 0, Kind: kt, Name: r.Ref().Name, Node: r.Node(), ID: r.ID(),
+				Tier: 0, Kind: kt, Name: ref.Name, Node: r.Node(), ID: r.ID(),
 				What: Update, Params: updParams, StopFirst: stopFirst,
+				Level: levels(ref), Ref: ref,
 				Reason:    reason,
 				LivePower: live.Power[key], DesiredPower: r.DesiredState(),
 			})
@@ -160,15 +205,22 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 				what = Stop
 			}
 			p.Actions = append(p.Actions, Action{
-				Tier: 0, Kind: kt, Name: r.Ref().Name, Node: r.Node(), ID: r.ID(),
-				What:      what,
-				Reason:    fmt.Sprintf("%s: power %q → %q", r.Ref(), live.Power[key], r.DesiredState()),
+				Tier: 0, Kind: kt, Name: ref.Name, Node: r.Node(), ID: r.ID(),
+				What:  what,
+				Level: levels(ref), Ref: ref,
+				Reason:    fmt.Sprintf("%s: power %q → %q", ref, live.Power[key], r.DesiredState()),
 				LivePower: live.Power[key], DesiredPower: r.DesiredState(),
 			})
 		}
 	}
 
 	// Pass B: prunes (PVE-present, not in desired, pveconform-tagged).
+	//
+	// Artifacts (ISO, CTTemplate) are NEVER pruned in the MVP — PV has no
+	// ownership tag on storage content; deleting a vztmpl / iso can silently
+	// break other tooling that references it. The operator removes them by
+	// hand or via a future explicit artifact-delete resource. This is the
+	// "conservative" artifact deletion guarantee.
 	pruneCandidates := make([]Action, 0, 4)
 	desiredByKind := map[schema.Kind]int{}
 	for _, r := range desired {
@@ -179,22 +231,13 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 	desiredSet := map[string]bool{}
 	for _, r := range desired {
 		kind := r.Ref().Kind
-		if kind == schema.KindISO {
-			// ISO identity is (node, storage, filename) — not in the PVE listing,
-			// so no live key needed for membership.
-			if iso, ok := r.(*schema.ISO); ok {
-				desiredSet[isoKey(iso.Spec.Node, iso.Spec.Storage, iso.Spec.Filename)] = true
-			}
+		if schema.ArtifactKind(kind) {
+			// Artifacts are per-(node, storage, filename); not part of PVE
+			// cluster/resources listing, so no PVE-side membership test.
 			continue
 		}
 		// identity by PVE id + node (the authoritative mapping PVE knows).
-		// CTTs list with PVE type "lxc", so we also register their lxc-style
-		// live key: an LXC at (node, cid) that is tracked as CTT is not an
-		// orphan.
 		desiredSet[liveKey(r.Node(), kind, r.ID())] = true
-		if kind == schema.KindCTTemplate {
-			desiredSet[liveKey(r.Node(), schema.KindLXC, r.ID())] = true
-		}
 		// also accept identity by ref (kind+name)
 		desiredSet[r.Ref().String()] = true
 	}
@@ -222,17 +265,9 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 			// Safety: never prune on a nil config.
 			continue
 		}
-		// membership check: PVE id+node OR ref matches desired. We add CTT's
-		// liveKey to desiredSet too, so an object that is tracked as CTT in
-		// git (cid N) is not pruned just because PVE lists it as lxc N.
+		// membership check: PVE id+node OR ref matches desired.
 		if desiredSet[key] || desiredSet[kindRef(kind, cfg)] {
 			continue // still in git → not a prune candidate
-		}
-		// Also check CTT membership: if this PVE lxc is actually the desired
-		// CTT (its template-flag matches a desired CTT at the same cid), it's
-		// not a prune candidate.
-		if isCTTOfDesired(res, desired) {
-			continue
 		}
 		if !HasTag(cfg, schema.PveOwnershipTag) {
 			name, _ := cfg["name"].(string)
@@ -246,10 +281,19 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		nameStr, _ := cfg["name"].(string)
 		pruneCandidates = append(pruneCandidates, Action{
 			Tier: 9, Kind: kind, Name: nameStr, Node: res.Node, ID: res.Vmid,
-			What: Delete, Prune: true,
+			What: Delete, Prune: true, Level: 0,
 			Reason:    "present on PVE (pveconform-tagged) but absent in git",
 			LivePower: live.Power[keyFor(res.Node, kind, res.Vmid)],
 		})
+	}
+
+	// Reverse-topological prune order: a live CTT/ISO is never pruned in MVP
+	// (conservative), so prunes are all VM/LXC; the order is:
+	// dependent first (higher level), prerequisite later (lower level). With
+	// no dependency info (legacy planner, no Levels func), level is 0 and
+	// sort is stable-deterministic.
+	for i := range pruneCandidates {
+		pruneCandidates[i].Level = 0 // prunes are tier-9 anyway
 	}
 
 	// Anomaly guard (plan §10): when the desired set for a kind is EMPTY and
@@ -310,30 +354,40 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 	// Append prunes LAST.
 	p.Actions = append(p.Actions, pruneCandidates...)
 
-	// Deterministic order within tier: node, then id ascending.
+	// Deterministic, dependency-aware ordering:
+	//   1. Tier (0 = creates/updates/power, 9 = prunes).
+	//   2. Within tier 0: topological level ascending (prerequisites
+	//      first), then What (Create < Update < power), Node, ID, Name.
+	//   3. Within tier 9: prunes are all VM/LXC — no dependencies in
+	//      the artifact layer; ordering is stable-deterministic.
+	whatRank := map[ActionKind]int{Create: 0, Update: 1, StatusOnly: 2, Start: 3, Stop: 4, Delete: 9}
 	sort.SliceStable(p.Actions, func(i, j int) bool {
 		a, b := p.Actions[i], p.Actions[j]
 		if a.Tier != b.Tier {
 			return a.Tier < b.Tier
 		}
+		if a.Tier == 0 && a.Level != b.Level {
+			return a.Level < b.Level
+		}
 		if a.What != b.What {
-			// creates/updates before power, power before nothing else.
-			order := map[ActionKind]int{Create: 0, Update: 1, Start: 2, Stop: 3, Delete: 9}
-			oi, ob := order[a.What], order[b.What]
-			return oi < ob
+			return whatRank[a.What] < whatRank[b.What]
 		}
 		if a.Node != b.Node {
 			return a.Node < b.Node
 		}
-		return a.ID < b.ID
+		if a.ID != b.ID {
+			return a.ID < b.ID
+		}
+		return a.Name < b.Name
 	})
 	return p, nil
 }
 
 // LoadLive reads the cluster listing, then per-object config (VM + LXC; CTT
-// is LXC-flavored so it appears as LXC here), then power; and finally, for
-// every desired ISO, probes the PVE storage backend's content listing to emit
-// {"present": bool} into Configs[isoKey].
+// is now a storage artifact and not a PVE listing entry), then power; and
+// finally — for every desired ARTIFACT (ISO and CTTemplate), probes the PVE
+// storage backend's content listing to emit {"present": bool} at the
+// artifactKey(node, storage, filename, kind) for each declared node.
 func LoadLive(ctx context.Context, c *pveclient.Client, desired []schema.Resource) (*LiveInventory, error) {
 	listing, err := c.ClusterResources(ctx)
 	if err != nil {
@@ -373,38 +427,68 @@ func LoadLive(ctx context.Context, c *pveclient.Client, desired []schema.Resourc
 				continue
 			}
 			inv.Configs[keyFor(res.Node, kind, res.Vmid)] = cfg
-			// PVE lists CTTs with type "lxc"; a desired CTT at this (node, cid)
-			// must see the object as PRESENT even when the template flag is
-			// gone — the flag is a drift concern, not an existence one.
-			inv.Configs[keyFor(res.Node, schema.KindCTTemplate, res.Vmid)] = cfg
 			if st, sErr := c.LXC().Status(ctx, res.Node, res.Vmid); sErr == nil {
 				inv.Power[keyFor(res.Node, kind, res.Vmid)] = normalizePower(st.Status)
-				inv.Power[keyFor(res.Node, schema.KindCTTemplate, res.Vmid)] = normalizePower(st.Status)
 			}
 		}
 	}
 
-	// For each desired ISO, probe the storage backend's content listing and
-	// record {"present": bool} at isoKey(node, storage, filename).
+	// For each desired ARTIFACT (ISO and CTTemplate), probe every
+	// (node, storage, content) pair it wants present and record
+	// {"present": bool} at the artifact-key for that node.
 	for _, r := range desired {
-		iso, okISO := r.(*schema.ISO)
-		if !okISO {
+		if !schema.ArtifactKind(r.Ref().Kind) {
 			continue
 		}
-		key := isoKey(iso.Spec.Node, iso.Spec.Storage, iso.Spec.Filename)
-		if _, present := inv.Configs[key]; present {
-			// already probed — no duplicates.
+		kind := r.Ref().Kind
+		content, storage, filename := artifactStorageFields(r, kind)
+		if content == "" {
+			// malformed (or legacy spec not yet validated) — planner will
+			// surface via resource.Validate in parse; skip here.
 			continue
 		}
-		has, err := c.Storage().HasISO(ctx, iso.Spec.Node, iso.Spec.Storage, iso.Spec.Filename)
-		if err != nil {
-			// Fail-closed: do not put a nil entry. planISO will skip.
-			inv.Power[key] = "read-error: " + err.Error()
-			continue
+		for _, node := range r.Nodes() {
+			key := artifactKey(node, storage, filename, kind)
+			if _, present := inv.Configs[key]; present {
+				// dedup
+				continue
+			}
+			has, err := c.Storage().HasContent(ctx, node, storage, content, filename)
+			if err != nil {
+				// Fail-closed: unreadable inventory. Plan no download this
+				// cycle; planArtifact will skip-and-report.
+				inv.Power[key] = "read-error: " + err.Error()
+				continue
+			}
+			inv.Configs[key] = map[string]any{"present": has}
 		}
-		inv.Configs[key] = map[string]any{"present": has}
 	}
 	return inv, nil
+}
+
+// artifactStorageFields returns (content, storage, filename) for an artifact
+// resource. content is "iso" for ISO and "vztmpl" for CTTemplate.
+// storage / filename are taken from the spec.
+func artifactStorageFields(r schema.Resource, kind schema.Kind) (content, storage, filename string) {
+	switch v := r.(type) {
+	case *schema.ISO:
+		content = "iso"
+		storage = v.Spec.Storage
+		filename = v.Spec.Filename
+	case *schema.CTTemplate:
+		content = "vztmpl"
+		storage = v.Spec.Storage
+		filename = v.Spec.Filename
+	}
+	_ = kind
+	return
+}
+
+// artifactKey builds the LiveInventory key for an (artifact, node, storage,
+// filename) tuple. Used by LoadLive to cache presence; consumed by
+// planArtifact.
+func artifactKey(node, storage, filename string, kind schema.Kind) string {
+	return node + "|" + string(kind) + "|" + storage + ":" + filename
 }
 
 // keyFor builds the LiveInventory key.
@@ -414,32 +498,11 @@ func keyFor(node string, kind schema.Kind, id int) string {
 
 func liveKey(node string, kind schema.Kind, id int) string { return keyFor(node, kind, id) }
 
-// isoKey builds the LiveInventory key for an ISO: node|ISO|storage:filename.
-// ISOs have no numeric PVE id, so identity is (node, storage, filename).
-func isoKey(node, storage, filename string) string {
-	return node + "|" + string(schema.KindISO) + "|" + storage + ":" + filename
-}
-
-// isCTTOfDesired reports whether a PVE-listed LXC object (cid) is tracked as
-// a CTTemplate in the desired index at the same (node, cid). PVE lists CTTs
-// with type "lxc", so the prune path must not treat desired CTTs as orphans.
-func isCTTOfDesired(res pveclient.ClusterResource, desired []schema.Resource) bool {
-	for _, r := range desired {
-		if r.Ref().Kind != schema.KindCTTemplate {
-			continue
-		}
-		if r.Node() == res.Node && r.ID() == res.Vmid {
-			return true
-		}
-	}
-	return false
-}
-
 // createVerb is a human noun-verb used in the "not on PVE; will ..." reason.
 func createVerb(k schema.Kind) string {
 	switch k {
 	case schema.KindCTTemplate:
-		return "clone + mark template"
+		return "download ct-template (vztmpl)"
 	case schema.KindISO:
 		return "download"
 	default:
@@ -447,46 +510,57 @@ func createVerb(k schema.Kind) string {
 	}
 }
 
-// planISO plans one ISO. Presence is resolved from the live
-// {"present": bool} map that LoadLive built via the PVE storage content
-// listing. Absent → a download is scheduled; present → no action. ISOs are
-// never pruned in MVP (they carry no ownership tag).
-func planISO(p *Plan, i *schema.ISO, live *LiveInventory) {
-	key := isoKey(i.Spec.Node, i.Spec.Storage, i.Spec.Filename)
-	cur, present := live.Configs[key]
-	if !present || cur == nil {
-		// Fail-closed: without a live listing the agent cannot verify the
-		// ISO state. Skip (never blindly download on a broken read); the
-		// next cycle retries after a successful read.
-		p.Skipped = append(p.Skipped, Action{
-			Kind:   i.Kind,
-			Name:   i.Ref().Name,
-			Node:   i.Spec.Node,
-			What:   StatusOnly,
-			Reason: "ISO live inventory unreadable this cycle; skipping download of " + i.Spec.Filename,
-		})
-		return
-	}
-	if _, _, changed := i.Drift(cur); !changed {
-		return
-	}
-	params, err := i.ToCreateParams()
+// planArtifact plans one artifact (ISO or CTTemplate) at every node it is
+// declared to exist on. For each (node, storage, filename) it is missing,
+// emit one CREATE with the artifact's ToCreateParams.
+//
+// Artifacts are never pruned: deleting an ISO / vztmpl can break other
+// tooling (LXC clones, other VMs that reference it); this is the
+// conservative artifact-deletion guarantee.
+// planArtifact plans one artifact (ISO or CTTemplate) at every node it is
+// declared to exist on. Artifacts are LEAF nodes in the dep graph: they never
+// depend on each other or on VM/LXC, so no `Deps` are populated.
+func planArtifact(p *Plan, r schema.Resource, live *LiveInventory, levels LevelsFunc) {
+	kind := r.Ref().Kind
+	_, storage, filename := artifactStorageFields(r, kind)
+	lvl := levels(r.Ref())
+	params, err := r.ToCreateParams()
 	if err != nil {
 		p.Skipped = append(p.Skipped, Action{
-			Kind:   i.Kind,
-			Name:   i.Ref().Name,
-			Node:   i.Spec.Node,
-			What:   StatusOnly,
-			Reason: "iso download params: " + err.Error(),
+			Kind: kind, Name: r.Ref().Name, Node: r.Node(),
+			What: StatusOnly, Level: lvl,
+			Reason: fmt.Sprintf("%s: create params: %v", r.Ref(), err),
 		})
 		return
 	}
-	p.Actions = append(p.Actions, Action{
-		Tier: 0, Kind: i.Kind, Name: i.Ref().Name, Node: i.Spec.Node, ID: i.ID(),
-		What:   Create,
-		Params: params,
-		Reason: "ISO " + i.Spec.Filename + " not present on storage " + i.Spec.Storage + "; will download",
-	})
+	for _, node := range r.Nodes() {
+		key := artifactKey(node, storage, filename, kind)
+		cur, present := live.Configs[key]
+		if !present || cur == nil {
+			// Fail-closed: without a live listing the agent cannot verify
+			// the artifact state. Skip (never blindly download on a broken
+			// read); the next cycle retries after a successful read.
+			p.Skipped = append(p.Skipped, Action{
+				Kind: kind,
+				Name: r.Ref().Name,
+				Node: node,
+				What: StatusOnly, Level: lvl,
+				Reason: fmt.Sprintf("%s live inventory unreadable this cycle; skipping download of %s/%s",
+					kind, storage, filename),
+			})
+			continue
+		}
+		if _, _, changed := r.Drift(cur); !changed {
+			continue
+		}
+		p.Actions = append(p.Actions, Action{
+			Tier: 0, Kind: kind, Name: r.Ref().Name, Node: node, ID: 0,
+			Level: lvl, Ref: r.Ref(),
+			What: Create, Params: params,
+			Reason: fmt.Sprintf("%s %s not present on storage %s on %s; will download",
+				kind, filename, storage, node),
+		})
+	}
 }
 
 // normalizeKind maps PVE's /cluster/resources type field to schema.Kind.

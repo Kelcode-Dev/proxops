@@ -7,7 +7,8 @@ import (
 	"strings"
 )
 
-// Storage bundles the /nodes/{n}/storage endpoints used for ISO management.
+// Storage bundles the /nodes/{n}/storage endpoints used for ISO and
+// CTTemplate (vztmpl) artifact management.
 type Storage struct {
 	c *Client
 }
@@ -15,55 +16,87 @@ type Storage struct {
 // Storage returns a Storage handle.
 func (c *Client) Storage() *Storage { return &Storage{c: c} }
 
-// ISOContentEntry is one entry of GET /nodes/{n}/storage/{s}/content/iso.
-type ISOContentEntry struct {
-	Volid string `json:"volid"` // "local:iso/name.iso"
-	// PVE's iso listing does not guarantee a "filename" field; the filename
-	// is the volid suffix after ":iso/".
-	filename string // populated by HasISO helpers
+// ContentEntry is one entry of GET /nodes/{n}/storage/{s}/content. PVE's
+// "bare" content listing reports every volume across all content types
+// supported by the storage — each entry has `content` set to one of
+// "iso", "vztmpl", "backup", "rootdir", "images", ... depending on the
+// pool. This is required on PVE 9.2 because
+// `GET /storage/{s}/content/iso` and `/content/vztmpl` 500
+// "unable to parse directory volume name" even when the listing contains
+// entries of that type — the type segment is (mis)parsed as a volid.
+type ContentEntry struct {
+	Volid   string `json:"volid"`   // "local:iso/name.iso"
+	Content string `json:"content"` // "iso" | "vztmpl" | "backup" | ...
+	Format  string `json:"format"`  // "iso" | "tzst" | "dir" | ...
+	Size    int64  `json:"size"`
+	CTime   int64  `json:"ctime"`
 }
 
-// HasISO reports whether a file with the given name exists on the storage
-// backend's ISO pool.
+// HasISO is a backward-compat convenience that uses the bare content listing
+// (filter by content="iso"). On PVE 9.2 dir storage this is the only way to
+// read the ISO pool (see ContentEntry doc).
 func (s *Storage) HasISO(ctx context.Context, node, storage, filename string) (bool, error) {
-	entries, err := s.isoContent(ctx, node, storage)
+	return s.HasContent(ctx, node, storage, "iso", filename)
+}
+
+// HasContent reports whether a file with the given name + PVE content type
+// (e.g. "iso" or "vztmpl") exists on the storage backend.
+func (s *Storage) HasContent(ctx context.Context, node, storage, content, filename string) (bool, error) {
+	entries, err := s.Content(ctx, node, storage)
 	if err != nil {
 		return false, err
 	}
 	for _, e := range entries {
-		if isoVolidFilename(e.Volid) == filename {
+		if e.Content != content {
+			continue
+		}
+		if volidFilename(e.Volid, content) == filename {
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
-// isoContent lists ISOs on a node storage.
-func (s *Storage) isoContent(ctx context.Context, node, storage string) ([]ISOContentEntry, error) {
-	var out []ISOContentEntry
-	path := "nodes/" + node + "/storage/" + storage + "/content/iso"
+// Content lists all volume entries on a node storage (across every
+// content type the storage supports). Callers that want only ISOs can
+// filter on entry.Content == "iso"; callers that want only LXC templates
+// filter on entry.Content == "vztmpl".
+func (s *Storage) Content(ctx context.Context, node, storage string) ([]ContentEntry, error) {
+	var out []ContentEntry
+	path := "nodes/" + node + "/storage/" + storage + "/content"
 	if _, err := s.c.Do(ctx, http.MethodGet, node, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// Download issues an ISO download to the storage backend. Returns the PVE task
-// UPID (downloads are asynchronous).
-func (s *Storage) Download(ctx context.Context, node, storage, downloadURL, filename string) (string, error) {
+// Download issues an ISO or CTTemplate download to the storage backend.
+// The `content` parameter tells PVE which pool the file belongs to:
+//   - "iso":    PVE downloads to `<storage>:iso/<filename>`
+//   - "vztmpl": PVE downloads to `<storage>:vztmpl/<filename>`
+//
+// PVE's download task returns a UPID.
+func (s *Storage) Download(ctx context.Context, node, storage, downloadURL, filename, content string) (string, error) {
 	p := url.Values{
 		"url":      {downloadURL},
 		"filename": {filename},
+	}
+	if content != "" {
+		p.Set("content", content)
 	}
 	path := "nodes/" + node + "/storage/" + storage + "/download"
 	return s.c.Do(ctx, http.MethodPost, node, path, p, nil)
 }
 
-// isoVolidFilename extracts the filename from a PVE iso volid.
-// volid form: "<storage>:iso/<filename>" or "<storage>:/iso/<filename>"
-func isoVolidFilename(volid string) string {
-	if i := strings.Index(volid, ":iso/"); i >= 0 {
-		return volid[i+len(":iso/"):]
+// volidFilename extracts the filename from a PVE content volid.
+// Forms: "<storage>:iso/<filename>", "<storage>:vztmpl/<filename>",
+// "<storage>:backup/<path>", etc.
+func volidFilename(volid, content string) string {
+	if content != "" {
+		probe := ":" + content + "/"
+		if i := strings.Index(volid, probe); i >= 0 {
+			return volid[i+len(probe):]
+		}
 	}
 	// fall back to last path component
 	if j := strings.LastIndex(volid, "/"); j >= 0 && j < len(volid)-1 {
@@ -72,4 +105,6 @@ func isoVolidFilename(volid string) string {
 	return volid
 }
 
-func lastSlash(s string) int { return strings.LastIndex(s, "/") }
+// isoVolidFilename is retained for callers that pre-date HasContent. It is
+// now just a thin wrapper around volidFilename.
+func isoVolidFilename(volid string) string { return volidFilename(volid, "iso") }

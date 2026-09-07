@@ -70,13 +70,67 @@ type Result struct {
 
 // Run executes every action in the plan and returns one result per action.
 // It also records deferred prunes into the status store (as Skipped).
+//
+// Dependency deferral: the plan is ordered so prerequisites (lower levels)
+// come before dependants (higher levels). While executing, if a prerequisite
+// ref FAILS, every later action that carries that ref in its Deps is deferred
+// for this cycle (recorded as Skipped, not attempted). The next cycle
+// re-derives everything from live state, so deferral is safe and self-
+// correcting — no persistent state.
 func (e *Executor) Run(ctx context.Context, p *plan.Plan) []Result {
 	results := make([]Result, 0, len(p.Actions))
+	failed := map[schema.Ref]bool{}
 	for _, a := range p.Actions {
-		results = append(results, e.execute(ctx, a))
+		// Defer dependants whose prerequisite failed earlier this cycle.
+		if dep := failedDep(a.Deps, failed); dep != "" {
+			e.deferByDependency(a, dep)
+			results = append(results, Result{Action: a, OK: false,
+				Err: fmt.Errorf("deferred: prerequisite %s failed this cycle", dep)})
+			continue
+		}
+		res := e.execute(ctx, a)
+		results = append(results, res)
+		if !res.OK && a.Ref.Kind != "" && a.Ref.Name != "" {
+			failed[a.Ref] = true
+		}
 	}
 	e.recordDeferred(p)
 	return results
+}
+
+// failedDep returns the string form of the first failed dependency of a's
+// Deps, or "" when none of a's prerequisites are in failed.
+func failedDep(deps []schema.Ref, failed map[schema.Ref]bool) string {
+	for _, d := range deps {
+		if failed[d] {
+			return d.String()
+		}
+	}
+	return ""
+}
+
+// deferByDependency records a would-be action as Skipped because one of its
+// prerequisites failed earlier in the same cycle.
+func (e *Executor) deferByDependency(a plan.Action, dep string) {
+	if e.store != nil {
+		e.store.SetObject(&statusx.Object{
+			Kind:        a.Kind,
+			Name:        a.Name,
+			Node:        a.Node,
+			ID:          a.ID,
+			State:       statusx.Skipped,
+			LastAction:  string(a.What),
+			LastError:   "deferred: prerequisite " + dep + " failed this cycle",
+			PruneReason: a.Reason,
+		})
+	}
+	e.log.Warn("pveconform.action.deferred",
+		slog.String("kind", string(a.Kind)),
+		slog.String("name", a.Name),
+		slog.String("node", a.Node),
+		slog.String("what", string(a.What)),
+		slog.String("blocked_by", dep),
+	)
 }
 
 // execute applies one action and records status + metrics.
@@ -202,72 +256,29 @@ func (e *Executor) update(ctx context.Context, a plan.Action) (didStop bool, err
 
 // --- PVE ops (return UPID; "" when PVE acted synchronously) ---
 
-// create issues a PVE create for the action kind. CTT (clone template) and
-// ISO (storage download) take non-numeric PVE paths, so they are branched off
-// from the standard VM/LXC create.
+// create issues a PVE create for the action kind. ISO and CTTemplate are
+// storage-artifact downloads; CTT no longer clones a source CT.
+//
+// Both go through PVE POST /nodes/{n}/storage/{s}/download with the
+// `content` form parameter set to "iso" or "vztmpl" respectively.
 func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 	switch a.Kind {
-	case schema.KindISO:
+	case schema.KindISO, schema.KindCTTemplate:
 		p, _ := a.Params["storage"].(string)
 		u, _ := a.Params["url"].(string)
 		f, _ := a.Params["filename"].(string)
+		ct, _ := a.Params["content"].(string)
 		if p == "" || u == "" || f == "" {
-			return "", fmt.Errorf("ISO: storage/url/filename missing from params")
+			return "", fmt.Errorf("%s: storage/url/filename missing from params", a.Kind)
 		}
-		return e.client.Storage().Download(ctx, a.Node, p, u, f)
-	case schema.KindCTTemplate:
-		// PVE accepts only newid/full (+ storage) on /clone. We therefore do
-		// a three-step CTT create: clone → (optional description/tags update)
-		// → mark-as-template. The plan carries the source cid in "source".
-		var src int
-		switch t := a.Params["source"].(type) {
-		case int:
-			src = t
-		case int64:
-			src = int(t)
-		}
-		dst := a.ID
-		if src <= 0 || dst <= 0 {
-			return "", fmt.Errorf("CTT %s: source/newid missing or invalid", a.Name)
-		}
-		cv := url.Values{}
-		if f, ok := a.Params["full"].(string); ok && f == "1" {
-			cv.Set("full", "1")
-		}
-		up, err := e.client.LXC().Clone(ctx, a.Node, src, dst, cv)
-		if err != nil {
-			return up, err
-		}
-		if err := e.waitTask(ctx, a.Node, up); err != nil {
-			return up, err
-		}
-		// PVE /clone rejects extra form keys; apply description/tags after.
-		if d, ok := a.Params["description"].(string); ok && d != "" {
-			uv := url.Values{"description": {d}}
-			dup, uerr := e.client.LXC().Update(ctx, a.Node, dst, uv)
-			if uerr != nil {
-				return dup, uerr
-			}
-			if werr := e.waitTask(ctx, a.Node, dup); werr != nil {
-				return dup, werr
+		if ct == "" {
+			if a.Kind == schema.KindISO {
+				ct = "iso"
+			} else {
+				ct = "vztmpl"
 			}
 		}
-		if tg, ok := a.Params["tags"].(string); ok && tg != "" {
-			uv := url.Values{"tags": {tg}}
-			dup, uerr := e.client.LXC().Update(ctx, a.Node, dst, uv)
-			if uerr != nil {
-				return dup, uerr
-			}
-			if werr := e.waitTask(ctx, a.Node, dup); werr != nil {
-				return dup, werr
-			}
-		}
-		// Mark as template.
-		tup, terr := e.client.LXC().CTTemplate(ctx, a.Node, dst)
-		if terr != nil {
-			return "", terr
-		}
-		return tup, nil
+		return e.client.Storage().Download(ctx, a.Node, p, u, f, ct)
 	default:
 		v := toValues(a.Params)
 		start := a.DesiredPower == "started"
@@ -278,11 +289,12 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 	}
 }
 
-// updateConfig issues a PVE config update. CTT "update" is just the
-// mark-as-template op (the cid exists but is not templated).
+// updateConfig issues a PVE config update. Artifacts (ISO / CTTemplate)
+// never receive config updates — they have no PVE object id; their only
+// PVE-side mutation is the POST /storage/download they trigger on Create.
 func (e *Executor) updateConfig(ctx context.Context, a plan.Action) (string, error) {
-	if a.Kind == schema.KindCTTemplate {
-		return e.client.LXC().MarkTemplate(ctx, a.Node, a.ID)
+	if schema.ArtifactKind(a.Kind) {
+		return "", fmt.Errorf("%s: PVE storage artifacts do not take config updates", a.Kind)
 	}
 	v := toValues(a.Params)
 	if a.Kind == schema.KindVM {

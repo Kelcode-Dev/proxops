@@ -95,10 +95,13 @@ func TestTalosSampleToCreateParams(t *testing.T) {
 	}
 	// nicString: with an unpinned (empty) MAC, PVE expects "virtio,bridge=..."
 	// — NOT "virtio=,bridge=..." (empty key after '=' trips PVE's
-	// "missing key in comma-separated list property" guard).
+	// "missing key in comma-separated list property" guard). PVE 9.2 omits
+	// `firewall=0` from NIC reports when it is not enabled, so pveconform
+	// likewise leaves that token off the wire until the user sets
+	// spec.networks[].firewall (drift-safe: both sides see it as absent).
 	net0, _ := p["net0"].(string)
-	if net0 != "virtio,bridge=vmbr2,firewall=0" {
-		t.Errorf("net0 = %q, want virtio,bridge=vmbr2,firewall=0 (no MAC → bare model name)", net0)
+	if net0 != "virtio,bridge=vmbr2" {
+		t.Errorf("net0 = %q, want virtio,bridge=vmbr2 (no MAC → bare model name)", net0)
 	}
 	if strings.Contains(net0, "virtio=") {
 		t.Errorf("net0 = %q: empty-MAC NIC must not emit 'virtio=' (missing key in comma-separated property)", net0)
@@ -150,8 +153,8 @@ func TestTalosSampleCreateExactValues(t *testing.T) {
 	if got := p["scsi0.iothread"]; got != nil {
 		t.Errorf("scsi0.iothread = %T %v, want absent (iothread belongs inline in the drive string; PVE rejects the sibling key)", got, got)
 	}
-	if got, want := p["net0"].(string), "virtio,bridge=vmbr2,firewall=0"; got != want {
-		t.Errorf("net0 = %q, want %q (virtio NIC + bridge, no =<empty-MAC>)", got, want)
+	if got, want := p["net0"].(string), "virtio,bridge=vmbr2"; got != want {
+		t.Errorf("net0 = %q, want %q (virtio NIC + bridge; no firewall token when unset)", got, want)
 	}
 	if got, want := p["memory"], int64(1024); got != want {
 		t.Errorf("memory = %T %v, want int64(1024) — GiB normalized to PVE MiB int", got, got)
