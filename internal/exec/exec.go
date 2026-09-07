@@ -71,42 +71,50 @@ type Result struct {
 // Run executes every action in the plan and returns one result per action.
 // It also records deferred prunes into the status store (as Skipped).
 //
-// Dependency deferral: the plan is ordered so prerequisites (lower levels)
-// come before dependants (higher levels). While executing, if a prerequisite
-// ref FAILS, every later action that carries that ref in its Deps is deferred
-// for this cycle (recorded as Skipped, not attempted). The next cycle
-// re-derives everything from live state, so deferral is safe and self-
-// correcting — no persistent state.
+// Dependency deferral: the plan is ordered so prerequisites (lower
+// Level) come before dependants (higher Level). While executing, if
+// a prerequisite on the SAME node fails earlier this cycle, every later
+// action that has that prereq in its Deps AND on that node is
+// deferred for this cycle (recorded as Skipped, not attempted).
+// The next cycle re-derives everything from live state, so deferral
+// is safe and self-correcting — no persistent state.
 func (e *Executor) Run(ctx context.Context, p *plan.Plan) []Result {
 	results := make([]Result, 0, len(p.Actions))
-	failed := map[schema.Ref]bool{}
+	failed := map[key]bool{}
 	for _, a := range p.Actions {
-		// Defer dependants whose prerequisite failed earlier this cycle.
-		if dep := failedDep(a.Deps, failed); dep != "" {
-			e.deferByDependency(a, dep)
-			results = append(results, Result{Action: a, OK: false,
-				Err: fmt.Errorf("deferred: prerequisite %s failed this cycle", dep)})
+		deferred := false
+		for _, dep := range a.Deps {
+			if dep.Kind == "" || dep.Name == "" {
+				continue
+			}
+			if failed[key{kind: dep.Kind, name: dep.Name, node: a.Node}] {
+				e.deferByDependency(a, fmt.Sprintf("%s on node %s", dep, a.Node))
+				results = append(results, Result{Action: a, OK: false,
+					Err: fmt.Errorf("deferred: prerequisite %s on node %s failed earlier this cycle", dep, a.Node)})
+				deferred = true
+				break
+			}
+		}
+		if deferred {
 			continue
 		}
 		res := e.execute(ctx, a)
 		results = append(results, res)
 		if !res.OK && a.Ref.Kind != "" && a.Ref.Name != "" {
-			failed[a.Ref] = true
+			failed[key{kind: a.Ref.Kind, name: a.Ref.Name, node: a.Node}] = true
 		}
 	}
 	e.recordDeferred(p)
 	return results
 }
 
-// failedDep returns the string form of the first failed dependency of a's
-// Deps, or "" when none of a's prerequisites are in failed.
-func failedDep(deps []schema.Ref, failed map[schema.Ref]bool) string {
-	for _, d := range deps {
-		if failed[d] {
-			return d.String()
-		}
-	}
-	return ""
+// key identifies a failed prerequisite per (Ref, Node). A multi-node
+// artifact plans one Create per node; only the (Ref, Node) tuple that
+// actually failed defers dependants that are on that node.
+type key struct {
+	kind schema.Kind
+	name string
+	node string
 }
 
 // deferByDependency records a would-be action as Skipped because one of its
