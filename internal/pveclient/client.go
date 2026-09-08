@@ -199,7 +199,10 @@ func (c *Client) Do(ctx context.Context, method, node, path string, params url.V
 	if params == nil {
 		params = url.Values{}
 	}
-	isWrite := method == http.MethodPost || method == http.MethodDelete
+	// PVE treats POST/PUT/DELETE as writes. PUT matters: PVE 9.x LXC
+	// config-set is PUT (POST /lxc/{id}/config is 501). Counting it keeps
+	// the write circuit breaker and failure accounting honest across kinds.
+	isWrite := method == http.MethodPost || method == http.MethodPut || method == http.MethodDelete
 	if isWrite && !c.breaker.allows() {
 		return "", fmt.Errorf("%w: %s %s on %s", ErrReadOnly, method, path, node)
 	}

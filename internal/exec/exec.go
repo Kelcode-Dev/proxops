@@ -267,7 +267,7 @@ func (e *Executor) update(ctx context.Context, a plan.Action) (didStop bool, err
 // create issues a PVE create for the action kind. ISO and CTTemplate are
 // storage-artifact downloads; CTT no longer clones a source CT.
 //
-// Both go through PVE POST /nodes/{n}/storage/{s}/download with the
+// Both go through PVE POST /nodes/{n}/storage/{s}/download-url with the
 // `content` form parameter set to "iso" or "vztmpl" respectively.
 func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 	switch a.Kind {
@@ -299,7 +299,7 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 
 // updateConfig issues a PVE config update. Artifacts (ISO / CTTemplate)
 // never receive config updates — they have no PVE object id; their only
-// PVE-side mutation is the POST /storage/download they trigger on Create.
+// PVE-side mutation is the POST /storage/download-url they trigger on Create.
 func (e *Executor) updateConfig(ctx context.Context, a plan.Action) (string, error) {
 	if schema.ArtifactKind(a.Kind) {
 		return "", fmt.Errorf("%s: PVE storage artifacts do not take config updates", a.Kind)

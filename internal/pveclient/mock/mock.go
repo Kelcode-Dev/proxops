@@ -505,7 +505,10 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 			writeOK(w, out)
 			return
 		}
-		if r.Method == http.MethodPost {
+		// PVE 9.x verbs: POST /qemu/{id}/config (VM) and PUT /lxc/{id}/config
+		// (LXC). The mock store is kind-agnostic here, so accept both — this
+		// mirrors PVE and keeps e2e LXC-update tests exercising the real verb.
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
 			_ = r.ParseForm()
 			s.mu.Lock()
 			rec := s.objs[node][id]

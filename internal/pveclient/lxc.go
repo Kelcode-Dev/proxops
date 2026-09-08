@@ -54,8 +54,15 @@ func (l *LXC) Get(ctx context.Context, node string, cid int) (LXCConfig, error) 
 }
 
 // Update performs a config change on a container.
+//
+// PVE verb: **PUT**, not POST. Probed on the conformance-dev PVE 9.2.2
+// cluster 2026-09-08: `POST /nodes/{n}/lxc/{id}/config` returns
+// `501 Method ... not implemented` while `PUT .../config` returns
+// 200 (task UPID or null when nothing changed). LXC *power* ops
+// (start/stop/reboot/shutdown) remain POST; only config-set moved to PUT
+// in PVE 9.x.
 func (l *LXC) Update(ctx context.Context, node string, cid int, params url.Values) (string, error) {
-	return l.c.Do(ctx, http.MethodPost, node, lxcBase(node, cid)+"/config", params, nil)
+	return l.c.Do(ctx, http.MethodPut, node, lxcBase(node, cid)+"/config", params, nil)
 }
 
 // Start boots a stopped container.
