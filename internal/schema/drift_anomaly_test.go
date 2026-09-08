@@ -42,18 +42,18 @@ func makeVM(t *testing.T, disksBlock, networksBlock string) *schema.VM {
 func TestVMDriftAnomalyLiveOnlyDisk(t *testing.T) {
 	vm := makeVM(t, vmStdDisks, vmStdNics)
 	live := map[string]any{
-		"memory":   "1024",
-		"cpu":      "host",
-		"cores":    "1",
-		"scsi0":    "local-lvm:vm-100-disk-0,size=4G",
-		"scsi1":    "local-lvm:vm-100-disk-1,size=2G", // live-only
-		"net0":     "virtio=52:54:00:AA:BB:01,bridge=vmbr0",
-		"tags":     "pveconform",
-		"smbios1":  "uuid=00000000-0000-0000-0000-000000000000",
-		"vmgenid":  "00000000-0000-0000-0000-000000000000",
-		"ide2":     "none,media=cdrom",
-		"onboot":   "1",
-		"agent":    "1",
+		"memory":  "1024",
+		"cpu":     "host",
+		"cores":   "1",
+		"scsi0":   "local-lvm:vm-100-disk-0,size=4G",
+		"scsi1":   "local-lvm:vm-100-disk-1,size=2G", // live-only
+		"net0":    "virtio=52:54:00:AA:BB:01,bridge=vmbr0",
+		"tags":    "pveconform",
+		"smbios1": "uuid=00000000-0000-0000-0000-000000000000",
+		"vmgenid": "00000000-0000-0000-0000-000000000000",
+		"ide2":    "none,media=cdrom",
+		"onboot":  "1",
+		"agent":   "1",
 	}
 
 	anoms := vm.DriftAnomalies(live)

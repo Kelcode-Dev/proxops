@@ -87,9 +87,9 @@ used to validate `spec.node` in manifests; it is not a set of hosts to dial.
   `GET /nodes/{n}/storage/{s}/content` (artifact listing).
 - Write: `POST /qemu|lxc` (create), `POST .../config` (update),
   `POST .../status/{start|stop|shutdown|reboot}` (power),
-  `DELETE /qemu|lxc/{id}` (PVE 9.x delete), `POST .../resize` (VM),
-  `POST /nodes/{n}/storage/{s}/download` (ISO **and** CTTemplate vztmpl —
-  routed by the `content` form parameter).
+  `DELETE /qemu|lxc/{id}` (PVE 9.x delete), `POST .../resize` is **501 / not-implemented** on PVE 9.2 — pveconform does not call it; disk pool/size drift is instead surfaced as a non-destructive anomaly (data-loss guard).
+  `POST /nodes/{n}/storage/{s}/download-url` (ISO **and** CTTemplate vztmpl —
+  routed by the `content` form parameter). The PVE 8-era `POST /nodes/{n}/storage/{s}/download` path returns 501 "Method not implemented" on PVE 9.2 dir storage. Filename extension is validated at parse time against PVE 9.2 contract: `vztmpl` accepts `.tar | .tar.zst | .tar.xz | .tar.gz`, `iso` accepts `.iso | .img` (see `schema/artifact_ext.go`).
 
 > **PVE 9.2 storage quirk.** `GET /nodes/{n}/storage/{s}/content/iso` and
 > `…/content/vztmpl` return `500 "unable to parse directory volume name"`

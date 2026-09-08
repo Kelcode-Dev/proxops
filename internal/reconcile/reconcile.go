@@ -227,6 +227,44 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 	// /status (state=anomalous), /metrics (pveconform_anomalies_total{
 	// type="live_only_slot"}), and this log — the operator removes them
 	// manually if that is the intended move.
+	// Record EVERY desired object in /status so the operator sees the full
+	// fleet, not just what's churning. Objects with a planned write are
+	// "drift"; with a prune are "orphan"; with an anomaly are "anomalous"
+	// (set above); everything else that is present+converged or absent+not-
+	// planned is "converged" (the steady state). The next apply/execute pass
+	// refines these to their true end-state; this gives /status a complete
+	// object list every cycle.
+	kindNodeID := map[string]bool{}
+	for _, a := range pl.Actions {
+		kindNodeID[string(a.Kind)+"/"+a.Name] = true
+	}
+	// desired set
+	byName := map[schema.Kind]map[string]schema.Resource{}
+	for _, d := range idx.List() {
+		ref := d.Ref()
+		if byName[ref.Kind] == nil {
+			byName[ref.Kind] = map[string]schema.Resource{}
+		}
+		byName[ref.Kind][ref.Name] = d
+	}
+	for kind, names := range byName {
+		for name, d := range names {
+			key := string(kind) + "/" + name
+			if !kindNodeID[key] {
+				// No planned write -> already converged (or will confirm soon).
+				r.Store.SetObject(&statusx.Object{
+					Kind: d.Ref().Kind, Name: name, Node: d.Node(), ID: d.ID(),
+					State: statusx.Converged,
+				})
+			} else {
+				r.Store.SetObject(&statusx.Object{
+					Kind: d.Ref().Kind, Name: name, Node: d.Node(), ID: d.ID(),
+					State: statusx.Drift,
+				})
+			}
+		}
+	}
+
 	for _, an := range pl.Anomalies {
 		res.Anomalies++
 		res.AnomaliesList = append(res.AnomaliesList, an.Reason)
@@ -243,16 +281,6 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 			slog.String("node", an.Node),
 			slog.Int("id", an.ID),
 			slog.String("reason", an.Reason))
-	}
-
-	// Record desired-state objects so /status shows intended-but-yet-created.
-	for _, a := range pl.Actions {
-		if a.What == plan.Create || a.What == plan.Update {
-			r.Store.SetObject(&statusx.Object{
-				Kind: a.Kind, Name: a.Name, Node: a.Node, ID: a.ID,
-				State: statusx.Drift, LastAction: string(a.What),
-			})
-		}
 	}
 
 	// (5) execute or dry-run.

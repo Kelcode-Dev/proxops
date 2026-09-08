@@ -104,7 +104,7 @@ Behaviour:
 | `model` | yes (default `virtio`) | `netX` | `virtio`, `e1000`, `rtl8139`, `vmxnet3`… |
 | `bridge` | yes | `,bridge=BRIDGE` | PVE bridge (e.g. `vmbr0`). |
 | `mac` | no | `model=MAC,…` | Pinned MAC; empty → PVE assigns one (not reported as drift). |
-| `vlan` | no | `,vlan=NN` | 802.1Q tag (1–4094). |
+| `vlan` | no | `,tag=NN` | 802.1Q tag (1–4094). PVE wire key is `tag` (probed PVE 9.2: `vlan` is rejected with “property is not defined in schema”). |
 | `rate-limit` | no | `,rate=NN` | PVE MBit/s rate limit. |
 | `firewall` | no | `,firewall=1` | PVE per-NIC firewall. |
 | `slot` | no | `netN` | NIC slot (default: order). |
@@ -250,7 +250,7 @@ by a separate, more accurate kind if a real use case appears.
 | `spec.checksum` | no | (advisory) | `algorithm` + `value`; PVE 9.2's download API has no `verify` param, so this is carried for review/future use. |
 
 Reconcile semantics:
-- **Absent on a node** → `POST /nodes/{n}/storage/{s}/download` with
+- **Absent on a node** → `POST /nodes/{n}/storage/{s}/download-url` with
   `content=vztmpl`. One download **per declared node**.
 - **Present** → zero actions.
 - **Multi-node** — each `spec.nodes` entry is planned independently.

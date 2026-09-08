@@ -653,8 +653,8 @@ func (l *LXC) lxcDiskSlotDrift(slot, wantWire, curWire string) (map[string]any, 
 			desiredSize = fmt.Sprintf("%d bytes", want.sizeBytes)
 		}
 		anoms = append(anoms, fmt.Sprintf(
-			"%s: LXC %s storage/size drift (live=%q; desired pool=%s size=%s); pveconform will NOT auto-resize or re-pool a live LXC volume (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE, then update the manifest",
-			l.Ref(), slot, curWire, desiredPool, desiredSize))
+			"%s storage/size drift (live=%q; desired pool=%s size=%s); pveconform will NOT auto-resize or re-pool a live LXC volume (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE, then update the manifest",
+			slot, curWire, desiredPool, desiredSize))
 	}
 	return upd, len(upd) > 0, anoms
 }

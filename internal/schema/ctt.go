@@ -114,7 +114,7 @@ func (c *CTTemplate) Validate() error {
 	}
 	if !cttNameRe.MatchString(c.Spec.Filename) {
 		return fmt.Errorf("%s: spec.filename %q invalid (no path separators)", c.Ref(), c.Spec.Filename)
-	}	// PVE 9.2 dir-storage vztmpl pool only accepts .tar | .tar.zst |
+	} // PVE 9.2 dir-storage vztmpl pool only accepts .tar | .tar.zst |
 	// .tar.xz | .tar.gz (probed on conformance-dev 2026-09-08); other
 	// extensions are 400 "wrong file extension" at download time. Fail
 	// closed at parse.

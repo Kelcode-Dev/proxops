@@ -1218,8 +1218,8 @@ func (v *VM) diskSlotDrift(current map[string]any) (map[string]any, bool, []stri
 		sizeChanged := want.sizeSet && (cur.sizeSet && cur.sizeBytes != want.sizeBytes)
 		if poolChanged || sizeChanged {
 			anoms = append(anoms, fmt.Sprintf(
-				"%s: disk %s storage/size drift (live=%q; desired pool=%s size=%s); pveconform will NOT auto-resize or re-pool a live data disk (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE (qm set/qmresize) or via a new disk, then update the manifest",
-				v.Ref(), slot, curRaw, want.pool, d.Size))
+				"disk %s storage/size drift (live=%q; desired pool=%s size=%s); pveconform will NOT auto-resize or re-pool a live data disk (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE (qm set/qmresize) or via a new disk, then update the manifest",
+				slot, curRaw, want.pool, d.Size))
 			continue
 		}
 		if cur.iothread != want.iothread {

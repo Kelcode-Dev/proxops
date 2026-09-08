@@ -113,7 +113,7 @@ The bare listing returns every pool on that storage with a `content` field per
 entry; pveconform's `Storage.HasContent(ctx, node, storage, contentType,
 filename)` filters on it. This is why ISO / CTTemplate presence detection does
 **not** use `…/content/iso` or `…/content/vztmpl`. Downloads still go through
-`POST /nodes/{n}/storage/{s}/download` with the `content=iso|vztmpl` form
+`POST /nodes/{n}/storage/{s}/download-url` with the `content=iso|vztmpl` form
 parameter. pveconform treats a listing read failure as **fail-closed**: it
 skips the download for that node this cycle (a `Skipped` record) rather than
 blindly re-downloading, and retries next cycle.
@@ -223,7 +223,7 @@ mode (`run`) the loop tolerates cycle aborts and keeps ticking; check the
 
 Because `Drift` compares desired vs live by PVE-wire fields (memory in MiB,
 disk size in PVE binary-suffix units, NIC model+bridge (auto Mac ignored),
-scsihw + iothread + pool + size for disks), you
+scsihw + iothread + pool + size for disks; **disk pool/size/storage drift on a live PVE volume is NOT auto-applied** (PVE 9.2 /config re-creates the volume → data loss); pveconform surfaces such drift as a non-destructive `anomalous` object state on /status + `pveconform_anomalies_total{type="live_only_slot"}` on /metrics; resize deliberately on PVE then update the manifest), you
 should **never** have to `pveconform apply` twice in a row: the second cycle
 produces a zero-action plan for a converged cluster. Any non-empty plan is
 drift, not state-machine confusion.
