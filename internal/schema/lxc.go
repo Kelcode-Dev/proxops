@@ -205,6 +205,10 @@ type LXC struct {
 	// ("local:vztmpl/x.tar.zst"), populated by ResolveArtifactRefs before
 	// the planner runs.
 	ostemplateVolid string
+
+	// lxcDiskAnoms accumulates rootfs/mp pool/size drift anomalies during
+	// Drift() that we refuse to auto-apply (data-loss guard).
+	lxcDiskAnoms []string
 }
 
 // NewLXC returns an empty LXC.
@@ -621,6 +625,40 @@ func lxcValidNetSlot(s string) bool {
 // the create-side keys). This is different from PVE 8, where the report
 // used "name" — pveconform only targets PVE 9.x.
 
+// lxcDiskSlotDrift classifies one LXC storage slot (rootfs or mpN) against
+// the desired pool/size, applying the same data-loss guard as VM disks:
+//   - no live volume at the slot      -> safe create write
+//   - live volume, different pool/size -> NON-destructive anomaly: PVE
+//     /config re-creates the LVM volume on a pool/size write (the old
+//     volume and its data are deleted). pveconform refuses to do that.
+func (l *LXC) lxcDiskSlotDrift(slot, wantWire, curWire string) (map[string]any, bool, []string) {
+	upd := map[string]any{}
+	anoms := make([]string, 0, 1)
+	cur := parseDiskInfo(curWire)
+	want := parseDiskInfo(wantWire)
+	if cur.volumeName == "" {
+		// PVE has not allocated a volume at this slot; create-form is safe.
+		if !diskMatches(cur, want) {
+			upd[slot] = wantWire
+		}
+		return upd, len(upd) > 0, anoms
+	}
+	poolChanged := cur.pool != want.pool
+	sizeChanged := want.sizeSet && (cur.sizeSet && cur.sizeBytes != want.sizeBytes)
+	if poolChanged || sizeChanged {
+		// Surface the desired pool+size for the operator, not the live wire.
+		desiredPool := want.pool
+		desiredSize := ""
+		if want.sizeSet {
+			desiredSize = fmt.Sprintf("%d bytes", want.sizeBytes)
+		}
+		anoms = append(anoms, fmt.Sprintf(
+			"%s: LXC %s storage/size drift (live=%q; desired pool=%s size=%s); pveconform will NOT auto-resize or re-pool a live LXC volume (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE, then update the manifest",
+			l.Ref(), slot, curWire, desiredPool, desiredSize))
+	}
+	return upd, len(upd) > 0, anoms
+}
+
 // DriftAnomalies surfaces live-only LXC mount-point slots (mp*) that the
 // manifest does not declare. Same semantics as VM.DriftAnomalies for disks:
 // pveconform will not automatically delete a live-only mount point (PVE's
@@ -648,6 +686,7 @@ func (l *LXC) DriftAnomalies(current map[string]any) []string {
 			out = append(out, fmt.Sprintf("live-only LXC mountpoint slot %s=%s is not in spec.mount-points; pveconform will not automatically remove it", k, pveStr(raw)))
 		}
 	}
+	out = append(out, l.lxcDiskAnoms...)
 	return out
 }
 
@@ -737,28 +776,36 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	if !tagsEqual(current["tags"], l.allTags()) {
 		upd["tags"] = strings.Join(l.allTags(), ",")
 	}
-	// rootfs pool+size
-	wantRoot := parseDiskInfo(lxcLVMAlloc(l.Spec.Root.Storage, l.Spec.Root.Size))
-	if !diskMatches(parseDiskInfo(pveStr(current["rootfs"])), wantRoot) {
-		upd["rootfs"] = lxcLVMAlloc(l.Spec.Root.Storage, l.Spec.Root.Size)
+	// rootfs + mount points: data-loss guard (PVE 9.2, probed 2026-09-08).
+	// Changing a live LXC rootfs/mp pool or size via /config re-creates the
+	// LVM volume (the old one is deleted → data loss). A pool/size drift on a
+	// LIVE volume is therefore reported as a NON-destructive anomaly; pveconform
+	// never auto-resizes a data-bearing LXC rootfs/mountpoint. Adding a brand-
+	// new volume (no live one at the slot) is safe and is applied.
+	// Re-derive anomalies on every Drift call (Drift may run more than once
+	// per cycle; lxcDiskAnoms must not accumulate duplicates).
+	l.lxcDiskAnoms = nil
+	rootUpd, rootStop, rootAnoms := l.lxcDiskSlotDrift("rootfs", lxcLVMAlloc(l.Spec.Root.Storage, l.Spec.Root.Size), pveStr(current["rootfs"]))
+	if v, ok := rootUpd["rootfs"]; ok {
+		upd["rootfs"] = v
+	}
+	if rootStop {
 		stop = true
 	}
-	// mount points pool+size
+	l.lxcDiskAnoms = append(l.lxcDiskAnoms, rootAnoms...)
 	for i, m := range l.Spec.MountPoints {
 		slot := m.Slot
 		if slot == "" {
 			slot = fmt.Sprintf("mp%d", i)
 		}
-		want := parseDiskInfo(lxcLVMAlloc(m.Storage, m.Size))
-		got := parseDiskInfo(pveStr(current[slot]))
-		// PVE's mountpoint report is "<pool>:vm-<cid>-disk-<n>[,...]"
-		// (no size) or "<pool>:<volid>,size=<binary>". Our pveDiskInfo
-		// parser handles both. If PVE's size is unreadable, we fall back
-		// to pool-only comparison; a size mismatch still drifts.
-		if !diskMatches(got, want) {
-			upd[slot] = lxcLVMAlloc(m.Storage, m.Size)
+		du, ds, da := l.lxcDiskSlotDrift(slot, lxcLVMAlloc(m.Storage, m.Size), pveStr(current[slot]))
+		if v, ok := du[slot]; ok {
+			upd[slot] = v
+		}
+		if ds {
 			stop = true
 		}
+		l.lxcDiskAnoms = append(l.lxcDiskAnoms, da...)
 	}
 	// networks — compare owned fields (bridge, tag, rate, firewall,
 	// pinned hwaddr; iface only when declared).

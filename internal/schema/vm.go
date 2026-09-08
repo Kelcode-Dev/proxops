@@ -666,6 +666,12 @@ func (v *VM) DriftAnomalies(current map[string]any) []string {
 			}
 		}
 	}
+	// Disk pool/size drift on live data volumes is non-destructive too:
+	// pveconform will not auto-resize/re-pool. Surface alongside
+	// live-only-slot anomalies.
+	if _, _, danoms := v.diskSlotDrift(current); danoms != nil {
+		out = append(out, danoms...)
+	}
 	// Sort for determinism.
 	for i := 0; i < len(out); i++ {
 		for j := i + 1; j < len(out); j++ {
@@ -809,23 +815,30 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 		upd["scsihw"] = wantHW
 		stop = true
 	}
-	// disks. PVE's /config report is "<pool>:vm-<vmid>-disk-<n>[,iothread=1],size=<binary>"
-	// (PVE-assigned volume name, binary-suffix size, iothread inline in the
-	// drive property string). We own pool, size, and iothread; compare in
-	// pveDiskInfo.
-	for i, d := range v.Spec.Disks {
-		slot := d.Slot
-		if slot == "" {
-			slot = fmt.Sprintf("scsi%d", i)
-		}
-		cur := parseDiskInfo(pveStr(current[slot]))
-		want := parseDiskInfo(driveVolumeString(d))
-		if !diskMatches(cur, want) {
-			// Re-emit the full owned drive string; PVE keeps the volume name
-			// it allocated and only reinterprets the new pool/size/options.
-			upd[slot] = driveVolumeString(d)
-			stop = true
-		}
+	// disks. PVE's /config report is "<pool>:vm-<vmid>-disk-<n>[,iothread=1],
+	// size=<binary>" (PVE-assigned volume name, binary-suffix size).
+	//
+	// SAFETY (data-loss guard, PVE 9.2 probed 2026-09-08): PVE's
+	// /qemu/{id}/config accepts a drive slot in two forms. The CREATE form
+	// ("scsi0=local-lvm:8") allocates a fresh volume; on an EXISTING data
+	// disk, sending the create form RECREATES the volume (the old one is
+	// deleted → data loss). The only safe in-place rewrite of an existing
+	// slot is the LIVE form ("scsi0=local-lvm:vm-9100-disk-0,size=8G"), which
+	// preserves PVE's volume id. This class therefore:
+	//   - NEW slot (no live volume)          -> safe CREATE-form write
+	//   - pool/size/storage CHANGED on a live slot -> NON-destructive anomaly
+	//     (pveconform will NOT auto-resize/re-pool a data-bearing disk; the
+	//     operator must do it deliberately, e.g. `qm set` + `qmresize`)
+	//   - iothread toggled, pool+size same   -> safe LIVE-form write (volume
+	//     id preserved)
+	// Disk slots (see diskSlotDrift / SAFETY note): apply only the
+	// non-destructive updates; pool/size drift is NOT written here.
+	du, dstop, _ := v.diskSlotDrift(current)
+	for k, val := range du {
+		upd[k] = val
+	}
+	if dstop {
+		stop = true
 	}
 	// nics.
 	for i, n := range v.Spec.NICs {
@@ -1109,10 +1122,13 @@ func diskBytes(human string) int64 {
 //
 // Fields we own and compare: pool (volume id), size (bytes), iothread.
 type pveDiskInfo struct {
-	pool      string
-	sizeBytes int64
-	sizeSet   bool
-	iothread  bool
+	pool       string
+	volumeName string
+	sizeBytes  int64
+	sizeToken  string // PVE's raw size spelling ("8G", "0.5", "8589934592"),
+	//                      preserved for safe in-place rewrites
+	sizeSet  bool
+	iothread bool
 }
 
 // pveDiskInfo parses a PVE QEMU drive property string into (pool, size,
@@ -1142,7 +1158,7 @@ func parseDiskInfo(s string) pveDiskInfo {
 				switch k {
 				case "size":
 					if b, ok := pveDiskSizeBytes(v); ok {
-						out.sizeBytes, out.sizeSet = b, true
+						out.sizeBytes, out.sizeSet, out.sizeToken = b, true, v
 					}
 				case "iothread":
 					out.iothread = v == "1" || v == "on" || v == "true"
@@ -1155,14 +1171,72 @@ func parseDiskInfo(s string) pveDiskInfo {
 				if f, err := strconv.ParseFloat(t, 64); err == nil && f > 0 {
 					out.sizeBytes = int64(f * float64(int64(1)<<30))
 					out.sizeSet = true
+					out.sizeToken = t
 					continue
 				}
-				// Treat as the PVE-assigned volume name → not owned.
+				// Treat as the PVE-assigned volume name → not owned. Captured
+				// so a safe in-place iothread toggle can preserve the live
+				// volume id (PVE 9.2 rejects the size/pool create-form on an
+				// existing data disk and recreates the volume → data loss).
+				out.volumeName = t
 				continue
 			}
 		}
 	}
 	return out
+}
+
+// diskSlotDrift classifies every spec disk against PVE's live report and
+// returns ONLY the safe updates: (a) new slots that PVE has not allocated yet
+// (safe to create) and (b) iothread toggles on an existing volume (safe
+// in-place rewrite that preserves PVE's live volume id). Disk pool/size
+// storage changes on a live data volume are returned as anomalies instead
+// of updates, because PVE 9.2 /config RE-CREATES the volume on a pool/size
+// write (data loss). Returns (updates, stopRequired, anomalies).
+func (v *VM) diskSlotDrift(current map[string]any) (map[string]any, bool, []string) {
+	upd := map[string]any{}
+	stop := false
+	anoms := make([]string, 0, 2)
+	for i, d := range v.Spec.Disks {
+		slot := d.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("scsi%d", i)
+		}
+		curRaw := pveStr(current[slot])
+		cur := parseDiskInfo(curRaw)
+		want := parseDiskInfo(driveVolumeString(d))
+		if cur.volumeName == "" {
+			// No live volume at this slot: PVE has not allocated it, so a
+			// create-form write is safe.
+			if !diskMatches(cur, want) {
+				upd[slot] = driveVolumeString(d)
+				stop = true
+			}
+			continue
+		}
+		poolChanged := cur.pool != want.pool
+		sizeChanged := want.sizeSet && (cur.sizeSet && cur.sizeBytes != want.sizeBytes)
+		if poolChanged || sizeChanged {
+			anoms = append(anoms, fmt.Sprintf(
+				"%s: disk %s storage/size drift (live=%q; desired pool=%s size=%s); pveconform will NOT auto-resize or re-pool a live data disk (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE (qm set/qmresize) or via a new disk, then update the manifest",
+				v.Ref(), slot, curRaw, want.pool, d.Size))
+			continue
+		}
+		if cur.iothread != want.iothread {
+			// Preserve PVE's live volume id + exact size spelling so PVE
+			// treats this as an in-place option toggle, not a recreation.
+			keep := cur.pool + ":" + cur.volumeName
+			if cur.sizeSet {
+				keep += ",size=" + cur.sizeToken
+			}
+			if want.iothread {
+				keep += ",iothread=1"
+			}
+			upd[slot] = keep
+			stop = true
+		}
+	}
+	return upd, stop, anoms
 }
 
 // diskMatches reports whether two PVE drive property strings agree on the

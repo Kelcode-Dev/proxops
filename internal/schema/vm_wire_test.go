@@ -1,6 +1,7 @@
 package schema_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
@@ -136,29 +137,51 @@ func TestVMFractionalDiskGiBCreate(t *testing.T) {
 	}
 }
 
-// TestVMDiskSizeDriftDetection — a PVE-reported disk that is NOT the desired
-// size must surface as drift (guards the pveDiskInfo comparison against the
-// old "pool-only" degenerate match).
+// TestVMDiskSizeDriftDetection — a PVE-reported data disk NOT at the desired
+// size must NOT auto-write (PVE 9.2 /config pool/size writes recreate the
+// volume → data loss; probed 2026-09-08). It must instead surface as a
+// non-destructive anomaly. An iothread-only mismatch remains a SAFE in-place
+// write that preserves PVE's live volume id.
 func TestVMDiskSizeDriftDetection(t *testing.T) {
 	v := mustParseUserVM(t) // desired 8GiB, iothread
 	bigger := map[string]any{
 		"memory": 1024,
-		"scsi0":  "local-lvm:local-lvm-vm-9100-disk-0,iothread=1,size=16G",
+		"scsi0":  "local-lvm:vm-9100-disk-0,iothread=1,size=16G",
 	}
-	upd, _, changed := v.Drift(bigger)
-	if !changed {
-		t.Fatalf("drift: PVE reporting 16G against desired 8G must be a change")
+	upd, _, _ := v.Drift(bigger)
+	if got, ok := upd["scsi0"]; ok {
+		t.Fatalf("drift must NOT auto-resize a live data disk, but emitted scsi0=%v", got)
 	}
-	if got := upd["scsi0"]; got != "local-lvm:8,iothread=1" {
-		t.Errorf("drift update scsi0 = %v, want %q", got, "local-lvm:8,iothread=1")
+	anoms := v.DriftAnomalies(bigger)
+	if len(anoms) == 0 {
+		t.Fatalf("size mismatch on a live data disk must surface as an anomaly, got none")
 	}
-	// iothread missing on the PVE side also must drift.
+	found := false
+	for _, m := range anoms {
+		if strings.Contains(m, "scsi0") && strings.Contains(m, "NOT auto-resize") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("anomaly must name scsi0 + the no-auto-resize guard; got: %v", anoms)
+	}
+
+	// iothread missing on the PVE side must still produce a SAFE in-place
+	// write that preserves PVE's live volume id (vm-9100-disk-0) and exact
+	// size spelling.
 	noIOThread := map[string]any{
 		"memory": 1024,
-		"scsi0":  "local-lvm:local-lvm-vm-9100-disk-0,size=8G",
+		"scsi0":  "local-lvm:vm-9100-disk-0,size=8G",
 	}
-	if _, _, changed := v.Drift(noIOThread); !changed {
-		t.Errorf("drift: PVE report without iothread=1 against desired iothread=true must be a change")
+	upd2, stop, changed := v.Drift(noIOThread)
+	if !changed {
+		t.Fatalf("iothread toggle on identical pool+size must produce a safe update")
+	}
+	if !stop {
+		t.Errorf("iothread toggle is stop-required")
+	}
+	if got, ok := upd2["scsi0"].(string); !ok || !strings.Contains(got, "vm-9100-disk-0") || !strings.Contains(got, "iothread=1") {
+		t.Errorf("safe iothread write must PRESERVE PVE's live volume id+size; got %v", upd2["scsi0"])
 	}
 }
 
