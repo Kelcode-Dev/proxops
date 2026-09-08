@@ -419,7 +419,7 @@ func (v *VM) Validate() error {
 		"efidisk0", "tpm0", "serial0",
 		"onboot", "startup", "protection", "agent",
 		"acpi", "tablet", "hotplug", "boot",
-		"nestedvirt", "hidden",
+		"nestedvirt", "hidden", "tags",
 	} {
 		structuredReserved[k] = true
 	}

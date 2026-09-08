@@ -349,7 +349,7 @@ func (l *LXC) Validate() error {
 		"cores": true, "rootfs": true, "ostemplate": true, "ostype": true, "arch": true,
 		"hostname": true, "nameserver": true, "searchdomain": true, "unprivileged": true,
 		"onboot": true, "protection": true, "nesting": true, "keyctl": true, "fuse": true,
-		"start": true,
+		"start": true, "tags": true,
 	}
 	for k := range l.Spec.Extra {
 		if strings.HasPrefix(k, "net") || strings.HasPrefix(k, "mp") {
