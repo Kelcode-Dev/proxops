@@ -70,6 +70,7 @@ type Cycle struct {
 	ActionsError  int       `json:"actions_error"`
 	Pruned        int       `json:"pruned"`
 	PruneDeferred int       `json:"prune_deferred"`
+	Skipped       int       `json:"skipped"`
 	Anomalies     int       `json:"anomalies"`
 	DesiredStale  bool      `json:"desired_stale"`
 	ReadOnly      bool      `json:"read_only"`
@@ -159,6 +160,16 @@ func (s *Store) BumpAnomaly() {
 	defer s.mu.Unlock()
 	if s.last != nil {
 		s.last.Anomalies++
+	}
+}
+
+// BumpSkipped counts a single skip (untagged objects, fail-closed reads).
+// Called once per skipped action.
+func (s *Store) BumpSkipped() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.last != nil {
+		s.last.Skipped++
 	}
 }
 

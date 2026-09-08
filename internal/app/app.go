@@ -306,8 +306,8 @@ func (a *Agent) statusReport() string {
 	if cyc.DesiredStale {
 		buf.lines = append(buf.lines, "DESIRED STATE IS STALE (git fetch has been failing)")
 	}
-	buf.lines = append(buf.lines, fmt.Sprintf("objects=%d actions_ok=%d actions_err=%d pruned=%d prune_deferred=%d anomalies=%d",
-		cyc.Objects, cyc.ActionsOK, cyc.ActionsError, cyc.Pruned, cyc.PruneDeferred, cyc.Anomalies))
+	buf.lines = append(buf.lines, fmt.Sprintf("objects=%d actions_ok=%d actions_err=%d pruned=%d prune_deferred=%d skipped=%d anomalies=%d",
+		cyc.Objects, cyc.ActionsOK, cyc.ActionsError, cyc.Pruned, cyc.PruneDeferred, cyc.Skipped, cyc.Anomalies))
 	for _, o := range a.store.Objects() {
 		line := fmt.Sprintf("  %-8s %-40s %-10s %-12s %s",
 			o.Kind, o.Name, shortID(o.ID), shortState(o.State), o.PruneReason)
@@ -366,6 +366,15 @@ func (a *Agent) ApplyOnce(ctx context.Context, dryRun bool) (string, error) {
 // ShowStatus prints a snapshot of the in-memory status store.
 func (a *Agent) ShowStatus(ctx context.Context) error {
 	a.log.Info("status requested")
+	// One-shot `pveconform status` must be useful by itself: if no cycle has
+	// completed yet, run a read-only cycle so the report reflects PVE + git
+	// now rather than showing an empty "no cycle" message.
+	if a.store.Last() == nil {
+		if _, _, err := a.recDry.RunOneCycle(ctx); err != nil {
+			a.log.Warn("status: dry cycle failed; showing empty report",
+				slog.String("err", err.Error()))
+		}
+	}
 	out := a.statusReport()
 	fmt.Println(out)
 	return nil

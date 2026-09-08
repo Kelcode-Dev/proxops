@@ -636,8 +636,15 @@ func (l *LXC) lxcDiskSlotDrift(slot, wantWire, curWire string) (map[string]any, 
 	anoms := make([]string, 0, 1)
 	cur := parseDiskInfo(curWire)
 	want := parseDiskInfo(wantWire)
-	if cur.volumeName == "" {
-		// PVE has not allocated a volume at this slot; create-form is safe.
+	// "New slot" == PVE has NOT allocated storage at this slot (report
+	// value absent/empty, or PVE's bare "none" form). ONLY then is a
+	// create-form write safe. Any non-empty PVE value — a live volume id,
+	// a bare "pool:2G"-form allocation without a PVE-assigned volume
+	// name, even a malformed string — is a live allocation: an auto
+	// rewrite would recreate the volume and destroy its data (probed on
+	// conformance-dev, PVE 9.2), so pool/size/storage mismatch below is
+	// a non-destructive anomaly, not a write.
+	if isNewStorageSlot(curWire) {
 		if !diskMatches(cur, want) {
 			upd[slot] = wantWire
 		}

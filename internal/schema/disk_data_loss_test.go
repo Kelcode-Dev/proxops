@@ -185,3 +185,173 @@ func TestLXCRootfsSizeDriftIsAnomaly(t *testing.T) {
 		t.Errorf("LXC rootfs pool/size drift must surface as a data-loss anomaly; got %v", anoms)
 	}
 }
+
+// TestDiskLiveOnlyBareVolumeIsAnomalyNotWrite: PVE reports a bare
+// "local-lvm:4G" (no volume name) at scsi0; manifest wants 8G local-lvm.
+// The size mismatch on a live slot must be a non-destructive anomaly, and
+// pveconform must NOT emit a scsi0 write (which would recreate the volume).
+func TestDiskLiveOnlyBareVolumeIsAnomalyNotWrite(t *testing.T) {
+	vm := vmWithOneDisk(t, false) // wants scsi0 local-lvm 8GiB
+	// PVE reports a bare numeric allocation "local-lvm:4" (pool + GiB size,
+	// no volume name) — a LIVE volume. Manifest wants 8GiB at the same pool.
+	live := liveBaseline("local-lvm:4")
+	upd, _, _ := vm.Drift(live)
+	if v, ok := upd["scsi0"]; ok {
+		t.Fatalf("pveconform must NOT write scsi0 over a bare live volume; got %v", v)
+	}
+	anoms := vm.DriftAnomalies(live)
+	if len(anoms) == 0 {
+		t.Fatalf("bare live volume size mismatch must yield a non-destructive anomaly, got none")
+	}
+}
+
+// TestDiskNewSlotBareNoneIsSafeWrite: PVE reports scsi0 = "none" (empty
+// slot). That IS a new slot (no live allocation): the create-form write is
+// safe and must produce no anomaly.
+func TestDiskNewSlotBareNoneIsSafeWrite(t *testing.T) {
+	vm := vmWithOneDisk(t, false)
+	live := liveBaseline("none")
+	upd, _, changed := vm.Drift(live)
+	if !changed {
+		t.Fatalf("new slot (none form) must produce a create write")
+	}
+	if _, ok := upd["scsi0"]; !ok {
+		t.Errorf("new slot must be written; got %v", upd)
+	}
+	if anoms := vm.DriftAnomalies(live); len(anoms) != 0 {
+		t.Errorf("new slot must not be an anomaly; got %v", anoms)
+	}
+}
+
+// TestLXCRootfsBareFormSizeDriftIsAnomaly: same guard on LXC rootfs. PVE
+// reports rootfs as a bare "local-lvm:8G" (no volume name); manifest wants
+// 4GiB local-lvm. Must be an anomaly + no rootfs write.
+func TestLXCRootfsBareFormSizeDriftIsAnomaly(t *testing.T) {
+	src := "apiVersion: " + schema.APIVersion + "\n" +
+		"kind: LXC\n" +
+		"metadata:\n  name: bare-rootfs-lxc\n" +
+		"spec:\n" +
+		"  node: pve01\n" +
+		"  vmid: 300\n" +
+		"  memory: 512MiB\n" +
+		"  cpu: {cores: 1}\n" +
+		"  template: some-template\n" +
+		"  root: {storage: local-lvm, size: 4GiB}\n" +
+		"  networks:\n" +
+		"    - {bridge: vmbr0}\n"
+	lxc := schema.NewLXC()
+	if err := schema.YAMLTo(src, lxc); err != nil {
+		t.Fatalf("YAMLTo: %v", err)
+	}
+	// PVE reports a bare numeric rootfs "local-lvm:8" (pool + GiB, no volume
+	// name) — a LIVE allocation. Manifest wants 4GiB at the same pool.
+	live := map[string]any{
+		"memory": 512,
+		"cores":  1,
+		"rootfs": "local-lvm:8",
+		"net0":   "veth=VETH",
+		"tags":   []any{"pveconform"},
+	}
+	upd, _, _ := lxc.Drift(live)
+	if v, ok := upd["rootfs"]; ok {
+		t.Fatalf("pveconform must NOT write rootfs over a bare live LXC volume; got %v", v)
+	}
+	anoms := lxc.DriftAnomalies(live)
+	if len(anoms) == 0 {
+		t.Fatalf("LXC bare-form rootfs size mismatch must be an anomaly, got none")
+	}
+}
+
+// TestLXCRootfsAbsentIsEmptyNewSlot: PVE reports no rootfs value. Safe
+// create write, no anomaly.
+func TestLXCRootfsAbsentIsEmptyNewSlot(t *testing.T) {
+	src := "apiVersion: " + schema.APIVersion + "\n" +
+		"kind: LXC\n" +
+		"metadata:\n  name: bare-rootfs-new\n" +
+		"spec:\n" +
+		"  node: pve01\n" +
+		"  vmid: 301\n" +
+		"  memory: 512MiB\n" +
+		"  cpu: {cores: 1}\n" +
+		"  template: some-template\n" +
+		"  root: {storage: local-lvm, size: 4GiB}\n" +
+		"  networks:\n" +
+		"    - {bridge: vmbr0}\n"
+	lxc := schema.NewLXC()
+	if err := schema.YAMLTo(src, lxc); err != nil {
+		t.Fatalf("YAMLTo: %v", err)
+	}
+	live := map[string]any{
+		"memory": 512,
+		"cores":  1,
+		"net0":   "veth=VETH",
+		"tags":   []any{"pveconform"},
+		// no rootfs key
+	}
+	upd, _, changed := lxc.Drift(live)
+	if !changed {
+		t.Fatalf("absent LXC rootfs must produce a create write")
+	}
+	if _, ok := upd["rootfs"]; !ok {
+		t.Errorf("absent rootfs must be written; got %v", upd)
+	}
+	if anoms := lxc.DriftAnomalies(live); len(anoms) != 0 {
+		t.Errorf("fresh LXC rootfs create must not be an anomaly; got %v", anoms)
+	}
+}
+
+// TestDiskBareFormMatchingIsConvergedNoOp: PVE reports the bare numeric form
+// "local-lvm:8" matching the desired pool+size (no volume name). This is a
+// LIVE allocation that pveconform "owns" (pool+size match): converged, no
+// write, no anomaly, no stop. Pins that bare forms don't false-flap.
+func TestDiskBareFormMatchingIsConvergedNoOp(t *testing.T) {
+	vm := vmWithOneDisk(t, false)       // scsi0 local-lvm 8GiB
+	live := liveBaseline("local-lvm:8") // bare: pool + GiB, exactly as desired
+	upd, stop, changed := vm.Drift(live)
+	if changed {
+		t.Errorf("converged bare form must not produce writes; got %v stop=%v", upd, stop)
+	}
+	if anoms := vm.DriftAnomalies(live); len(anoms) != 0 {
+		t.Errorf("converged bare form must not raise anomalies; got %v", anoms)
+	}
+}
+
+// TestLXCRootfsBareFormMatchingIsConverged: same no-flap pin for LXC rootfs.
+func TestLXCRootfsBareFormMatchingIsConverged(t *testing.T) {
+	src := "apiVersion: " + schema.APIVersion + "\n" +
+		"kind: LXC\n" +
+		"metadata:\n  name: bare-rootfs-match\n" +
+		"spec:\n" +
+		"  node: pve01\n" +
+		"  vmid: 302\n" +
+		"  memory: 512MiB\n" +
+		"  cpu: {cores: 1}\n" +
+		"  template: some-template\n" +
+		"  root: {storage: local-lvm, size: 8GiB}\n" +
+		"  networks:\n" +
+		"    - {bridge: vmbr0}\n"
+	lxc := schema.NewLXC()
+	if err := schema.YAMLTo(src, lxc); err != nil {
+		t.Fatalf("YAMLTo: %v", err)
+	}
+	// Fully-converged fixture: hostname + net0 spelled in LXC's wire form; the
+	// bare rootfs "local-lvm:8" matches the desired pool+size. The ONLY thing
+	// under test is that the bare-form rootfs does NOT flap.
+	live := map[string]any{
+		"memory":       512,
+		"cores":        1,
+		"hostname":     "bare-rootfs-match",
+		"rootfs":       "local-lvm:8",
+		"net0":         "name=net0,bridge=vmbr0",
+		"ostype":       "linux",
+		"unprivileged": "0",
+		"tags":         []any{"pveconform"},
+	}
+	upd, stop, changed := lxc.Drift(live)
+	if changed {
+		t.Errorf("converged bare-form LXC rootfs must not produce writes; got %v stop=%v", upd, stop)
+	}
+	if anoms := lxc.DriftAnomalies(live); len(anoms) != 0 {
+		t.Errorf("converged bare-form LXC rootfs must not raise anomalies; got %v", anoms)
+	}
+}

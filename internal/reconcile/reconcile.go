@@ -289,6 +289,12 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 		res.Actions = len(pl.Actions)
 		res.Skipped = len(pl.Skipped)
 		res.PruneDeferred = len(pl.Deferred)
+		for i := 0; i < len(pl.Skipped); i++ {
+			r.Store.BumpSkipped()
+		}
+		// Prune-deferred bumps are recorded by the executor's
+		// recordDeferred (one BumpPruneDeferred per Deferred action);
+		// don't double-count here.
 		r.Store.FinishCycle(false, "")
 		metrics.CyclesTotal.WithLabelValues("dry_run").Inc()
 		r.log.Info("dry-run cycle complete",
@@ -304,6 +310,9 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 	results := r.exec.Run(ctx, pl)
 	res.Actions = len(pl.Actions)
 	res.Skipped = len(pl.Skipped)
+	for i := 0; i < res.Skipped; i++ {
+		r.Store.BumpSkipped()
+	}
 	res.PruneDeferred = len(pl.Deferred)
 	for _, rr := range results {
 		if rr.OK {

@@ -732,6 +732,15 @@ func isNoneSlot(s string) bool {
 	return s == "none" || strings.HasPrefix(s, "none,") || strings.HasPrefix(s, "none;")
 }
 
+// isNewStorageSlot reports whether PVE has NOT allocated any storage at
+// the given slot (report value absent/empty, or PVE's "none" form). Only
+// such slots are safe to write a create-form drive to; a live volume at
+// the slot must NOT be auto-rewritten (data loss).
+func isNewStorageSlot(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	return trimmed == "" || isNoneSlot(trimmed)
+}
+
 // cdromManagedState returns whether the manifest declares a `cdrom` block
 // and, if so, whether it is the "attach" (real ISO ref) or the "detach"
 // (iso: none sentinel) state. Used at ToCreateParams/Drift time so the
@@ -1205,15 +1214,24 @@ func (v *VM) diskSlotDrift(current map[string]any) (map[string]any, bool, []stri
 		curRaw := pveStr(current[slot])
 		cur := parseDiskInfo(curRaw)
 		want := parseDiskInfo(driveVolumeString(d))
-		if cur.volumeName == "" {
-			// No live volume at this slot: PVE has not allocated it, so a
-			// create-form write is safe.
-			if !diskMatches(cur, want) {
-				upd[slot] = driveVolumeString(d)
-				stop = true
-			}
+		// "New slot" == PVE has NOT allocated any storage at this
+		// slot (report value absent/empty, or PVE's bare "none" form).
+		// ONLY then is a create-form write safe. A non-empty PVE
+		// value is a live allocation: an auto rewrite would
+		// recreate the volume and DESTROY its data (PVE 9.2 has
+		// no safe /resize endpoint), so pool/size/storage
+		// mismatch is reported as a non-destructive anomaly
+		// below instead of written.
+		if isNewStorageSlot(curRaw) {
+			// Empty slot: PVE allocated nothing here, so the create-form
+			// write is safe. Only this case auto-writes.
+			upd[slot] = driveVolumeString(d)
+			stop = true
 			continue
 		}
+		// Live allocation present at the slot: a pool/size/storage rewrite
+		// would recreate the volume and destroy its data, so pveconform
+		// reports it (poolChanged/sizeChanged below) instead of writing.
 		poolChanged := cur.pool != want.pool
 		sizeChanged := want.sizeSet && (cur.sizeSet && cur.sizeBytes != want.sizeBytes)
 		if poolChanged || sizeChanged {
