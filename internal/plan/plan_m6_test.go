@@ -81,15 +81,15 @@ metadata:
 spec:
   nodes: [n1, n2]
   storage: local
-  filename: t.gz
-  url: https://example.com/t.gz
+  filename: t.tar.gz
+  url: https://example.com/t.tar.gz
 `, ctt); err != nil {
 		t.Fatalf("YAMLTo: %v", err)
 	}
 	live := &plan.LiveInventory{
 		Configs: map[string]map[string]any{
-			"n1|CTTemplate|local:t.gz": {"present": true},
-			"n2|CTTemplate|local:t.gz": {"present": false},
+			"n1|CTTemplate|local:t.tar.gz": {"present": true},
+			"n2|CTTemplate|local:t.tar.gz": {"present": false},
 		},
 		Power: map[string]string{},
 	}

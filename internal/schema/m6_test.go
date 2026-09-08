@@ -727,8 +727,10 @@ spec:
 		t.Fatalf("YAMLTo firewall: %v", err)
 	}
 	p, _ := withFW.ToCreateParams()
-	if got, _ := p["net0"].(string); got != "virtio,bridge=vmbr0,vlan=100,rate=50,firewall=1" {
-		t.Errorf("net0 (with firewall) = %q, want virtio,bridge=vmbr0,vlan=100,rate=50,firewall=1", got)
+	// PVE 9.2 wire: the VLAN tag on a QEMU NIC is `tag=N`, not `vlan=N`
+	// (the latter is rejected with "property is not defined in schema").
+	if got, _ := p["net0"].(string); got != "virtio,bridge=vmbr0,tag=100,rate=50,firewall=1" {
+		t.Errorf("net0 (with firewall) = %q, want virtio,bridge=vmbr0,tag=100,rate=50,firewall=1", got)
 	}
 	withoutFW := schema.NewVM()
 	if err := schema.YAMLTo(noFirewall, withoutFW); err != nil {

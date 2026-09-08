@@ -302,7 +302,7 @@ func (a *Agent) statusReport() string {
 		return "no reconcile cycle has completed yet"
 	}
 	buf.lines = append(buf.lines, fmt.Sprintf("last cycle: %s (commit %s)",
-		stateWord(cyc.Aborted, cyc.AbortReason), cyc.Commit))
+		stateWord(cyc.Aborted, cyc.AbortReason, cyc.ActionsError), cyc.Commit))
 	if cyc.DesiredStale {
 		buf.lines = append(buf.lines, "DESIRED STATE IS STALE (git fetch has been failing)")
 	}
@@ -405,9 +405,21 @@ func (b *slogBuilder) String() string {
 	return out
 }
 
-func stateWord(aborted bool, reason string) string {
+// stateWord summarizes the cycle outcome for the status report.
+// "converged" means ALL planned actions succeeded; any errored action
+// downgrades to "incomplete" — an operator reading "converged" must be
+// able to trust that PVE matches git, and a cycle with failed downloads
+// does not.
+func stateWord(aborted bool, reason string, actionsError int) string {
 	if aborted {
 		return "ABORTED (" + reason + ")"
+	}
+	if actionsError > 0 {
+		suffix := "s"
+		if actionsError == 1 {
+			suffix = ""
+		}
+		return "incomplete (" + strconv.Itoa(actionsError) + " failed action" + suffix + ")"
 	}
 	return "converged"
 }

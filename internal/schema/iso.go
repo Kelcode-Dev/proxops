@@ -156,6 +156,11 @@ func (i *ISO) Validate() error {
 	}
 	if !artifactNameRe.MatchString(i.Spec.Filename) {
 		return fmt.Errorf("%s: spec.filename %q invalid (no path separators)", i.Ref(), i.Spec.Filename)
+	}	// PVE 9.2 dir-storage iso pool only accepts .iso | .img (probed on
+	// conformance-dev 2026-09-08); other extensions are 400 "wrong file
+	// extension" at download time. Fail closed at parse.
+	if ok, why := artifactExtAccept(i.Spec.Filename, "iso"); !ok {
+		return fmt.Errorf("%s: spec.filename %q: %s (PVE 9.2 iso dir-storage accepts .iso | .img)", i.Ref(), i.Spec.Filename, why)
 	}
 	if i.Spec.URL == "" {
 		return fmt.Errorf("%s: spec.url must be set", i.Ref())

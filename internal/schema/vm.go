@@ -1197,7 +1197,7 @@ func diskMatches(a, b pveDiskInfo) bool {
 // dropped — PVE leaves it off when it's 0, and Drift (nicMatches) compares
 // owned fields only.
 //
-// PVE wire: "virtio,bridge=vmbr0,vlan=100,rate=500,firewall=1".
+// PVE wire: "virtio,bridge=vmbr0,tag=100,rate=500,firewall=1".
 func nicString(n NIC) string {
 	model := n.Model
 	if model == "" {
@@ -1212,7 +1212,9 @@ func nicString(n NIC) string {
 	sb.WriteString(head)
 	sb.WriteString(",bridge=" + bridge)
 	if n.VLAN > 0 {
-		fmt.Fprintf(&sb, ",vlan=%d", n.VLAN)
+		// PVE's QEMU NIC wire key is "tag" (PVE 9.2 verified: "vlan" is
+		// rejected with "property is not defined in schema").
+		fmt.Fprintf(&sb, ",tag=%d", n.VLAN)
 	}
 	if n.RateLimit > 0 {
 		// PVE 9.x accepts both "rate=<mbit/s>" and "mbit/s=<mbit>" forms;
@@ -1277,10 +1279,15 @@ func parseNICFields(s string) nicFields {
 			switch k {
 			case "bridge":
 				out.bridge = v
-			case "vlan":
+			case "tag":
 				out.vlan, _ = strconv.Atoi(v)
 			case "rate":
 				out.rate, _ = strconv.Atoi(v)
+			case "vlan":
+				// PVE 8-era alias, kept for parse-tolerance. The writer
+				// only ever emits "tag"; "vlan" in the current field map
+				// means PVE stored a VLAN tag under that key.
+				out.vlan, _ = strconv.Atoi(v)
 			case "firewall":
 				out.firewall = v == "1" || v == "true"
 			case "virtio", "vmxnet3", "e1000", "e1000-82540", "rtl8139", "i82551", "ne2k_pci", "pcnet", "shaper":
