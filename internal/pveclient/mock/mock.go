@@ -49,7 +49,6 @@ type Server struct {
 	cfg       Config
 	tickets   map[string]bool
 	objs      map[string]map[int]VM                 // node -> id -> record
-	cid       uint32                                // last assigned clone id
 	isos      map[string]map[string]map[string]bool // node -> storage -> filename
 	templates map[string]map[string]map[string]bool // node -> storage -> filename (vztmpl pool)
 	tasks     map[string]*task
@@ -262,11 +261,11 @@ func (s *Server) split(s2 string) (h, t string, ok bool) {
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api2/json/")
 
-	switch {
-	case rest == "access/ticket":
+	switch rest {
+	case "access/ticket":
 		s.handleTicket(w, r)
 		return
-	case rest == "version":
+	case "version":
 		writeOK(w, map[string]any{"version": "8.2", "release": "mock"})
 		return
 	}
@@ -485,11 +484,9 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 	}
 
 	// PVE power/status endpoints sit under "status/..."; flatten them so the
-	// action switch sees "start"/"stop"/"shutdown"/"reboot"/"current".
-	action := after
-	if strings.HasPrefix(action, "status/") {
-		action = strings.TrimPrefix(action, "status/")
-	}
+	// action switch sees "start"/"stop"/"shutdown"/"reboot"/"current"
+	// (TrimPrefix is a no-op when the prefix is absent).
+	action := strings.TrimPrefix(after, "status/")
 
 	// Actions:
 	switch action {

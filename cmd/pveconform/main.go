@@ -177,9 +177,13 @@ func newDiffCmd(gf *globalFlags, root *cobra.Command) *cobra.Command {
 				return err
 			}
 			if out == "" {
-				fmt.Fprintln(cmd.OutOrStdout(), "no drift")
+				if _, werr := fmt.Fprintln(cmd.OutOrStdout(), "no drift"); werr != nil {
+					return werr
+				}
 			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), out)
+				if _, werr := fmt.Fprintln(cmd.OutOrStdout(), out); werr != nil {
+					return werr
+				}
 			}
 			return nil
 		},
@@ -203,7 +207,9 @@ func newApplyCmd(gf *globalFlags, root *cobra.Command) *cobra.Command {
 				return err
 			}
 			if out != "" {
-				fmt.Fprintln(c.OutOrStdout(), out)
+				if _, werr := fmt.Fprintln(c.OutOrStdout(), out); werr != nil {
+					return werr
+				}
 			}
 			return nil
 		},

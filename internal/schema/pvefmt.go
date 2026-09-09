@@ -1,7 +1,6 @@
 package schema
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -62,19 +61,3 @@ func pveDiskSizeBytes(s string) (int64, bool) {
 	}
 	return 0, false
 }
-
-// diskSizeEqual reports whether two PVE disk size strings are the same bytes.
-// Either side may be empty (then equal only if the other is empty).
-func diskSizeEqual(a, b string) bool {
-	ab, oa := pveDiskSizeBytes(a)
-	bb, ob := pveDiskSizeBytes(b)
-	if !oa && !ob {
-		return true // both unparseable → treat as equal to avoid false drift
-	}
-	if oa != ob {
-		return false
-	}
-	return ab == bb
-}
-
-var _ = fmt.Sprintf

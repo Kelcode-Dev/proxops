@@ -109,7 +109,9 @@ func buildRepo(t *testing.T, dir string, files map[string]string) string {
 	}
 	// set the default branch to "main" so New's fetch target exists.
 	// PlainInit uses default HEAD; ensure main is checked out as current.
-	wt.Checkout(&git.CheckoutOptions{Branch: "refs/heads/main", Create: true, Force: true})
+	if err := wt.Checkout(&git.CheckoutOptions{Branch: "refs/heads/main", Create: true, Force: true}); err != nil {
+		t.Fatalf("checkout main: %v", err)
+	}
 	return abs
 }
 

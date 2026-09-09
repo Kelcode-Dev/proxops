@@ -169,15 +169,20 @@ func New(cfg *config.Config, log *slog.Logger, registry *prometheus.Registry, ve
 	return a, nil
 }
 
-// healthInfo returns the liveness inputs that /healthz reads.
+// healthInfo returns the liveness inputs that /healthz reads. It may run on
+// the HTTP server's goroutine while the reconcile loop mutates the
+// bookkeeping fields, so they are read under mu.
 func (a *Agent) healthInfo() server.Info {
-	sinceGitFetch := time.Since(a.lastGit)
-	sincePVERead := time.Since(a.lastPVE)
-	ready := a.ready
-	if a.lastGit.IsZero() {
+	a.mu.Lock()
+	lastGit, lastPVE, ready := a.lastGit, a.lastPVE, a.ready
+	a.mu.Unlock()
+
+	sinceGitFetch := time.Since(lastGit)
+	sincePVERead := time.Since(lastPVE)
+	if lastGit.IsZero() {
 		sinceGitFetch = time.Since(time.Now()) // no successful fetch yet
 	}
-	if a.lastPVE.IsZero() {
+	if lastPVE.IsZero() {
 		sincePVERead = time.Since(time.Now())
 	}
 	return server.Info{
@@ -280,11 +285,11 @@ func (a *Agent) runApply(ctx context.Context) (reconcile.Result, error) {
 		// A hard error from the pipeline itself (unexpected). Still report the
 		// current cycle result so callers can read store state.
 		a.markPVERead()
-		a.ready = false
+		a.setReady(false)
 		return res, fmt.Errorf("reconcile: %w", err)
 	}
 	a.markPVERead()
-	a.ready = !res.Aborted
+	a.setReady(!res.Aborted)
 	if res.Aborted {
 		return res, &AbortError{Reason: res.AbortReason}
 	}
@@ -292,7 +297,18 @@ func (a *Agent) runApply(ctx context.Context) (reconcile.Result, error) {
 }
 
 // markPVERead records that a PVE read succeeded.
-func (a *Agent) markPVERead() { a.lastPVE = time.Now() }
+func (a *Agent) markPVERead() {
+	a.mu.Lock()
+	a.lastPVE = time.Now()
+	a.mu.Unlock()
+}
+
+// setReady updates the readiness flag read by /healthz.
+func (a *Agent) setReady(v bool) {
+	a.mu.Lock()
+	a.ready = v
+	a.mu.Unlock()
+}
 
 // statusReport renders a text snapshot of the status store.
 func (a *Agent) statusReport() string {

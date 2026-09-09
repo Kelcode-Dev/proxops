@@ -119,7 +119,3 @@ func volidFilename(volid, content string) string {
 	}
 	return volid
 }
-
-// isoVolidFilename is retained for callers that pre-date HasContent. It is
-// now just a thin wrapper around volidFilename.
-func isoVolidFilename(volid string) string { return volidFilename(volid, "iso") }

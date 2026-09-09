@@ -873,7 +873,3 @@ func (l *LXC) allTags() []string {
 	}
 	return out
 }
-
-func itoa(i int) string {
-	return strconv.Itoa(i)
-}

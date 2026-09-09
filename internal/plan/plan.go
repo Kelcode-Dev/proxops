@@ -657,16 +657,6 @@ func HasTag(cfg map[string]any, t string) bool {
 	return false
 }
 
-// inDeferred reports whether action a is already in deferred list d.
-func inDeferred(d []Action, a Action) bool {
-	for _, x := range d {
-		if x.Node == a.Node && x.ID == a.ID && x.Kind == a.Kind {
-			return true
-		}
-	}
-	return false
-}
-
 // normalizePower maps PVE's raw status to "running"/"stopped".
 func normalizePower(s string) string {
 	switch strings.ToLower(s) {

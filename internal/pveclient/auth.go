@@ -158,9 +158,18 @@ func (a *Auth) fetchTicket(ctx context.Context, c *Client) error {
 	if err != nil {
 		return fmt.Errorf("ticket exchange: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			// A late close error is logged-only: the ticket has already been
+			// cached, and the next request re-exchanges if PVE rejects it.
+			c.log.Warn("pve ticket response body close failed", "err", cerr.Error())
+		}
+	}()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("ticket exchange: read response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		msg := strings.TrimSpace(string(body))
 		if len(msg) > 200 {

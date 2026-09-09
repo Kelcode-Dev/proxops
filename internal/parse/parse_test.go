@@ -52,17 +52,6 @@ spec:
   url: https://example.com/debian-13.tar.zst
 `
 
-const isoA = `apiVersion: proxops/v1alpha1
-kind: ISO
-metadata:
-  name: talos-iso
-spec:
-  nodes: [pve01]
-  storage: local
-  filename: talos.iso
-  url: https://example.com/talos.iso
-`
-
 const lxcA = `apiVersion: proxops/v1alpha1
 kind: LXC
 metadata:

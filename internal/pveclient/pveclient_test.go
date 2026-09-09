@@ -243,7 +243,9 @@ func TestDeleteRunningVMRefused(t *testing.T) {
 		t.Fatal("expected delete-refused error for running VM")
 	}
 	// stop then delete → gone
-	c.VM().Stop(context.Background(), "pve", 100)
+	if _, err := c.VM().Stop(context.Background(), "pve", 100); err != nil {
+		t.Fatalf("Stop before delete: %v", err)
+	}
 	if _, err := c.VM().Delete(context.Background(), "pve", 100); err != nil {
 		t.Fatalf("Delete after stop: %v", err)
 	}

@@ -257,8 +257,16 @@ func (c *Client) Do(ctx context.Context, method, node, path string, params url.V
 			continue
 		}
 
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		respBody, rErr := io.ReadAll(resp.Body)
+		cErr := resp.Body.Close()
+		if rErr != nil {
+			c.registerFailure(isWrite)
+			lastErr = fmt.Errorf("pve %s %s: read response: %w", method, path, rErr)
+			continue
+		}
+		if cErr != nil {
+			c.log.Warn("pve response body close failed", "method", method, "node", node, "path", path, "err", cErr.Error())
+		}
 
 		switch {
 		case resp.StatusCode >= 200 && resp.StatusCode < 300:

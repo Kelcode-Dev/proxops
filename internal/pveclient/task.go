@@ -146,7 +146,6 @@ func (w *TaskWaiter) Wait(ctx context.Context, tid TaskID) (*TaskStatus, error) 
 				return &last, nf
 			}
 			// transient: log and keep polling.
-			s = last
 			w.log.Warn("task status read failed; retrying", "node", tid.Node, "upid", tid.UPID, "err", err.Error())
 		} else {
 			last = s

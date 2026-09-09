@@ -17,6 +17,7 @@
 package parse
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -220,43 +221,6 @@ func refToCycleString(cyc []schema.Ref) string {
 	return strings.Join(parts, " → ")
 }
 
-// detectCycle is iterative DFS (white→gray→black) over the dependency DAG.
-func detectCycle(order []schema.Ref, edges map[schema.Ref][]schema.Ref) error {
-	const (
-		white = 0
-		gray  = 1
-		black = 2
-	)
-	color := map[schema.Ref]int{}
-	for _, start := range order {
-		if color[start] != white {
-			continue
-		}
-		var stack []schema.Ref
-		color[start] = gray
-		stack = append(stack, start)
-		for len(stack) > 0 {
-			cur := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			advanced := false
-			for _, dep := range edges[cur] {
-				switch color[dep] {
-				case gray:
-					return fmt.Errorf("dependency cycle detected involving %s and %s", cur, dep)
-				case white:
-					color[dep] = gray
-					stack = append(stack, dep)
-					advanced = true
-				}
-			}
-			if !advanced {
-				color[cur] = black
-			}
-		}
-	}
-	return nil
-}
-
 // ByRef returns the resource for a Ref.
 func (idx *Index) ByRef(ref schema.Ref) (schema.Resource, bool) {
 	r, ok := idx.byRef[ref]
@@ -328,17 +292,16 @@ func walkManifests(root string) ([]string, error) {
 
 // readDocs decodes a multi-document YAML file into raw maps.
 func readDocs(path string) ([]map[string]any, error) {
-	f, err := os.Open(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 
 	var docs []map[string]any
-	dec := yaml.NewDecoder(f)
+	dec := yaml.NewDecoder(bytes.NewReader(b))
 	for {
 		var doc map[string]any
-		err := dec.Decode(&doc)
+		err = dec.Decode(&doc)
 		if err == io.EOF {
 			break
 		}

@@ -70,24 +70,3 @@ func (b *writeBreaker) isOpen() bool {
 	defer b.mu.Unlock()
 	return b.open
 }
-
-// reason summarizes state for logs.
-func (b *writeBreaker) reason() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.open {
-		return "closed"
-	}
-	return "open until " + b.openUntil.UTC().Format(time.RFC3339)
-}
-
-// state is a small serializable snapshot for the /status endpoint.
-func (b *writeBreaker) state() map[string]any {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	m := map[string]any{"open": b.open, "consecutive_failures": b.consec, "threshold": b.threshold}
-	if b.open {
-		m["open_until"] = b.openUntil.UTC().Format(time.RFC3339)
-	}
-	return m
-}
