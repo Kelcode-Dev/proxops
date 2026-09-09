@@ -41,9 +41,15 @@ const (
 )
 
 // Object records one managed object's latest status.
+//
+// Cluster scopes the record in a multi-cluster deployment: the same PVE
+// name/ID can exist on different clusters, so per-cluster reconcilers tag
+// every record with their cluster identity. Single-cluster operators see
+// exactly one cluster value on every object.
 type Object struct {
 	Kind            schema.Kind `json:"kind"`
 	Name            string      `json:"name"`
+	Cluster         string      `json:"cluster,omitempty"`
 	Node            string      `json:"node"`
 	ID              int         `json:"id"`
 	State           State       `json:"state"`
@@ -55,9 +61,14 @@ type Object struct {
 }
 
 // Ref is the logical key for an object.
+//
+// Cluster is part of the key in M8 multi-cluster deployments so two
+// clusters that both reconcile an object named "cache-01" keep separate
+// status records in the shared Store.
 type Ref struct {
-	Kind schema.Kind
-	Name string
+	Cluster string
+	Kind    schema.Kind
+	Name    string
 }
 
 // Cycle summarizes the most recent reconcile cycle.
@@ -113,7 +124,7 @@ func (s *Store) SetObject(o *Object) {
 	defer s.mu.Unlock()
 	cp := *o
 	cp.UpdatedAt = time.Now()
-	s.objects[Ref{Kind: o.Kind, Name: o.Name}] = cp
+	s.objects[Ref{Cluster: cp.Cluster, Kind: cp.Kind, Name: cp.Name}] = cp
 }
 
 // BumpActionsOK increments the action success counter.
@@ -186,7 +197,8 @@ func (s *Store) FinishCycle(aborted bool, reason string) {
 	s.last.Objects = len(s.objects)
 }
 
-// Objects returns a snapshot of all object records.
+// Objects returns a snapshot of all object records, in deterministic
+// (cluster, kind, name) order.
 func (s *Store) Objects() []Object {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -194,7 +206,30 @@ func (s *Store) Objects() []Object {
 	for _, o := range s.objects {
 		out = append(out, o)
 	}
+	sortObjects(out)
 	return out
+}
+
+func sortObjects(o []Object) {
+	for i := 1; i < len(o); i++ {
+		for j := i; j > 0; j-- {
+			if !lessObject(o[j], o[j-1]) {
+				break
+			}
+			o[j], o[j-1] = o[j-1], o[j]
+		}
+	}
+}
+
+// lessObject orders records by cluster, then kind, then name.
+func lessObject(a, b Object) bool {
+	if a.Cluster != b.Cluster {
+		return a.Cluster < b.Cluster
+	}
+	if string(a.Kind) != string(b.Kind) {
+		return string(a.Kind) < string(b.Kind)
+	}
+	return a.Name < b.Name
 }
 
 // ObjectCount returns the number of distinct managed objects.

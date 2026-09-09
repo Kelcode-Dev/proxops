@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,7 +33,32 @@ type LogConfig struct {
 	Level string `yaml:"level"` // debug | info | warn | error
 }
 
+// PVECluster is one named PVE cluster: a single API endpoint plus the
+// allowlist of PVE node names that belong to it.
+//
+// The cluster NAME is the stable identifier shared by GitOps composition
+// (the clusters/<name>/ directory) and this configuration. It is NOT a PVE
+// node name — a cluster can span many PVE nodes (its Nodes allowlist).
+type PVECluster struct {
+	// BaseURL is the PVE API endpoint (scheme://host[:port]) the agent talks
+	// to for this cluster. PVE exposes the entire API on every node, so one
+	// endpoint reaches every node/object in the cluster; the PVE node name
+	// lives only in the request path, never the host.
+	// Example: "https://pve-dev-01.example.invalid:8006".
+	BaseURL string `yaml:"base-url"`
+	// Nodes is the allowlist of PVE node names in this cluster. A manifest
+	// whose spec.node is not in this list (when the list is non-empty) fails
+	// closed before any PVE call — this is the per-cluster node boundary.
+	// When empty, no allowlist check is performed for that cluster.
+	Nodes []string `yaml:"nodes"`
+}
+
 // PVEConfig holds Proxmox connection settings.
+//
+// Credentials (auth/user/token/password/ca-file) are SHARED across all
+// clusters; endpoints differ PER CLUSTER. Each cluster reconciles against a
+// single PVE endpoint and node allowlist — there is no implicit "current
+// cluster" global state.
 type PVEConfig struct {
 	Auth AuthMethod `yaml:"auth"` // token (default) | ticket
 	// User is the PVE user ID; for tokens it is the token owner,
@@ -49,20 +75,42 @@ type PVEConfig struct {
 	// Password is the user's password (ticket auth only).
 	// Prefer env PVECONFORM_PVE_PASSWORD.
 	Password string `yaml:"password"`
-	// BaseURL is the PVE API endpoint (scheme://host[:port]) the agent
-	// talks to. Every request — cluster-wide, per-node, ticket exchange —
-	// goes through this single endpoint; PVE exposes the entire API on each
-	// node, so the node identity lives only in the request path, never in
-	// the host. Example: "https://pve-dev-01.example.invalid:8006".
-	BaseURL string `yaml:"base-url"`
-	// Nodes is the allowlist of PVE node names this cluster is expected to
-	// contain. Used to validate manifest spec.node values at parse time so
-	// a typo in a node name fails fast instead of producing confusing
-	// per-request 404s. When empty, no allowlist check is performed.
-	Nodes []string `yaml:"nodes"`
-	// CAFile optionally points at the PVE cluster self-signed CA certificate.
-	// When empty the system trust store is used.
+	// CAFile optionally points at a PVE cluster self-signed CA. It applies
+	// to every cluster endpoint in this configuration; per-cluster CAs come
+	// with SOPS (post-M8). When empty the system trust store is used.
 	CAFile string `yaml:"ca-file"`
+	// Clusters is the set of named PVE clusters. At least one entry is
+	// required. Each cluster is reconciled against its own base-url and
+	// node allowlist.
+	Clusters map[string]PVECluster `yaml:"clusters"`
+}
+
+// clusterNameRe validates a named cluster: lowercase alnum + '-', no
+// leading '-'. This matches the GitOps composition directory grammar
+// (clusters/<cluster>/), so a cluster's config key and its composition
+// directory are always the same string.
+var clusterNameRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+
+// ValidClusterName reports whether s is a usable named cluster.
+func ValidClusterName(s string) bool {
+	return len(s) >= 1 && len(s) <= 64 && clusterNameRe.MatchString(s)
+}
+
+// ClusterNames returns the cluster names in deterministic (lexicographic)
+// order, so multi-cluster processing is stable across runs.
+func (c *PVEConfig) ClusterNames() []string {
+	names := make([]string, 0, len(c.Clusters))
+	for n := range c.Clusters {
+		names = append(names, n)
+	}
+	sortStrings(names)
+	return names
+}
+
+// Cluster returns the named cluster and whether it exists.
+func (c *PVEConfig) Cluster(name string) (PVECluster, bool) {
+	cluster, ok := c.Clusters[name]
+	return cluster, ok
 }
 
 // GitConfig holds git source-of-truth settings.
@@ -98,15 +146,15 @@ type Config struct {
 	DataDir string          `yaml:"data-dir"` // git cache, CA pinning; default ~/.local/share/pveconform
 }
 
-// Defaults returns a Config with sensible default values. PVE.BaseURL is
-// intentionally NOT defaulted: the API endpoint is environment-specific and
-// Validate() refuses to run the agent when it is absent.
+// Defaults returns a Config with sensible default values. PVE cluster
+// endpoints are intentionally NOT defaulted: they are environment-specific
+// and Validate() refuses to run the agent when no named cluster is present.
 func Defaults() *Config {
 	return &Config{
-		Log:     LogConfig{Level: "info"},
-		PVE:     PVEConfig{Auth: AuthToken},
-		Git:     GitConfig{Branch: "main"},
-		Rec:     ReconcileConfig{PollInterval: 30 * time.Second, TaskTimeout: 30 * time.Minute, PruneBudget: 3},
+		Log:  LogConfig{Level: "info"},
+		PVE:  PVEConfig{Auth: AuthToken, Clusters: map[string]PVECluster{}},
+		Git:  GitConfig{Branch: "main"},
+		Rec:  ReconcileConfig{PollInterval: 30 * time.Second, TaskTimeout: 30 * time.Minute, PruneBudget: 3},
 		Listen:  "127.0.0.1:9494",
 		DataDir: defaultDataDir(),
 	}
@@ -203,26 +251,55 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Sprintf("pve.auth must be %q or %q, got %q", AuthToken, AuthTicket, c.PVE.Auth))
 	}
 
-	// PVE connection shape: base-url must be present and a parseable
-	// http(s) URL; node names must be plain identifiers (no path or
-	// space characters). Reject duplicates.
-	if c.PVE.BaseURL == "" {
-		errs = append(errs, "pve.base-url is required (e.g. https://<host>[:port])")
-	} else {
-		if u, err := url.Parse(c.PVE.BaseURL); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-			errs = append(errs, "pve.base-url must be a parseable http(s)://host[:port] URL with a host component")
-		}
+	// Named PVE clusters (M8 multi-cluster model). At least one cluster is
+	// required. Each cluster needs a parseable base-url endpoint and a
+	// well-formed node allowlist. This is the multi-cluster "fail closed"
+	// boundary: a resource may only be reconciled against the cluster whose
+	// composition explicitly includes it, and the endpoint + node allowlist
+	// of that cluster are the only ones that apply.
+	if len(c.PVE.Clusters) == 0 {
+		errs = append(errs, "pve.clusters: at least one named PVE cluster is required (each with its own base-url)")
 	}
-	seen := map[string]bool{}
-	for i, n := range c.PVE.Nodes {
-		if strings.TrimSpace(n) == "" || strings.ContainsAny(n, " /") {
-			errs = append(errs, fmt.Sprintf("pve.nodes[%d]: %q is not a valid PVE node name", i, n))
+	// Endpoints must be unique across clusters. Prune scoping is endpoint-
+	// based (the PVE /cluster/resources listing for that endpoint is the
+	// live inventory), so two shared clusters would share a live inventory
+	// and one could prune the other — a footgun the model must not allow.
+	endpointSeen := map[string]string{}
+	for _, name := range c.PVE.ClusterNames() {
+		base := c.PVE.Clusters[name].BaseURL
+		if base == "" {
 			continue
 		}
-		if seen[n] {
-			errs = append(errs, fmt.Sprintf("pve.nodes: duplicate entry %q", n))
+		if other, dup := endpointSeen[base]; dup {
+			errs = append(errs, fmt.Sprintf("pve.clusters.%s and pve.clusters.%s share base-url %q; each cluster must have its own PVE endpoint", other, name, base))
+			continue
 		}
-		seen[n] = true
+		endpointSeen[base] = name
+	}
+	for _, name := range c.PVE.ClusterNames() {
+		cluster, _ := c.PVE.Cluster(name)
+		if !ValidClusterName(name) {
+			errs = append(errs, fmt.Sprintf("pve.clusters: %q is not a valid cluster name (lowercase alnum + '-', no leading '-')", name))
+			continue
+		}
+		if cluster.BaseURL == "" {
+			errs = append(errs, fmt.Sprintf("pve.clusters.%s.base-url is required (e.g. https://<host>[:port])", name))
+			continue
+		}
+		if u, err := url.Parse(cluster.BaseURL); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			errs = append(errs, fmt.Sprintf("pve.clusters.%s.base-url must be a parseable http(s)://host[:port] URL with a host component", name))
+		}
+		seen := map[string]bool{}
+		for i, n := range cluster.Nodes {
+			if strings.TrimSpace(n) == "" || strings.ContainsAny(n, " /") {
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s.nodes[%d]: %q is not a valid PVE node name", name, i, n))
+				continue
+			}
+			if seen[n] {
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s.nodes: duplicate entry %q", name, n))
+			}
+			seen[n] = true
+		}
 	}
 
 	if c.Git.URL != "" && c.Git.Path != "" {
@@ -294,4 +371,13 @@ func defaultDataDir() string {
 
 func joinErrs(errs []string) string {
 	return strings.Join(errs, "; ")
+}
+
+// sortStrings is a tiny stable lexicographic sort for cluster names.
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
 }

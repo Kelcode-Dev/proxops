@@ -136,6 +136,13 @@ type PlanOptions struct {
 	// the executor can defer a dependant whose prerequisite failed in-cycle.
 	// Returns nil → no deferral (all actions attempted in plan order).
 	Edges EdgesFunc
+	// NodeAllowlist restricts live-inventory consideration (configs, power,
+	// AND prune candidates) to these PVE node names. Empty = accept all
+	// nodes. This is the M8 cluster boundary: two clusters that share a PVE
+	// endpoint (forbidden by config) would otherwise be able to prune each
+	// other's objects; within one cluster the allowlist scopes every
+	// planner decision to that cluster's configured nodes.
+	NodeAllowlist []string
 }
 
 // Plan walks desired vs. live and emits the ordered action list.
@@ -195,10 +202,10 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		updParams, stopFirst, changed := r.Drift(cfg)
 
 		// Non-destructive anomalies: live-only slots (VM disks / NICs / LXC
-		// mount-points) that the manifest does not declare. pveconform will
-		// NOT auto-delete these (the executor skips Anomaly actions); they
-		// are surfaced on /status + /metrics so the operator can remove
-		// them by hand.
+		// mount-points) that the manifest does not declare.
+		// pveconform will NOT auto-delete these (the executor skips Anomaly
+		// actions); they are surfaced on /status + /metrics so the operator
+		// can remove them by hand.
 		if anomalies := r.DriftAnomalies(cfg); anomalies != nil {
 			for _, msg := range anomalies {
 				an := Action{
@@ -278,6 +285,13 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 
 	for _, res := range live.Listing {
 		if res.Node == "" || res.Vmid <= 0 || res.Type == "" {
+			continue
+		}
+		// Cluster boundary: prune candidates are limited to the cluster's
+		// configured node allowlist. A tagged live object on a node outside
+		// this cluster's allowlist is never a candidate, no matter what the
+		// desired composition says.
+		if !nodeAllowed(opts.NodeAllowlist, res.Node) {
 			continue
 		}
 		// PVE's cluster/resources "type" is "qm" or "lxc". A live CTT (an LXC
@@ -422,7 +436,13 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 // finally — for every desired ARTIFACT (ISO and CTTemplate), probes the PVE
 // storage backend's content listing to emit {"present": bool} at the
 // artifactKey(node, storage, filename, kind) for each declared node.
-func LoadLive(ctx context.Context, c *pveclient.Client, desired []schema.Resource) (*LiveInventory, error) {
+//
+// allowedNodes, when non-empty, restricts the live inventory to those PVE
+// node names: listing entries on other nodes are not read, not counted,
+// and — critically — not considered as prune candidates. This is the
+// cluster-scope gate that keeps one cluster's planner from acting on
+// objects that belong to another cluster's composition.
+func LoadLive(ctx context.Context, c *pveclient.Client, desired []schema.Resource, allowedNodes []string) (*LiveInventory, error) {
 	listing, err := c.ClusterResources(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("cluster resources: %w", err)
@@ -434,6 +454,9 @@ func LoadLive(ctx context.Context, c *pveclient.Client, desired []schema.Resourc
 	}
 	for _, res := range listing {
 		if res.Node == "" || res.Vmid <= 0 || res.Type == "" {
+			continue
+		}
+		if !nodeAllowed(allowedNodes, res.Node) {
 			continue
 		}
 		kind := normalizeKind(res.Type)
@@ -595,6 +618,21 @@ func planArtifact(p *Plan, r schema.Resource, live *LiveInventory, levels Levels
 				kind, filename, storage, node),
 		})
 	}
+}
+
+// nodeAllowed reports whether node passes the allowlist. An empty allowlist
+// accepts every node (single-node test mocks, MVP-era config without
+// pve.nodes).
+func nodeAllowed(allow []string, node string) bool {
+	if len(allow) == 0 {
+		return true
+	}
+	for _, a := range allow {
+		if a == node {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeKind maps PVE's /cluster/resources type field to schema.Kind.

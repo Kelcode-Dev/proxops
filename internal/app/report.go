@@ -7,7 +7,8 @@ import (
 	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
 )
 
-// renderPlan produces a human-readable --diff report from a plan.
+// renderClusterPlan produces a human-readable --diff report from a plan.
+// The plan is already scoped to a single cluster by the caller.
 //
 // Shape (per line):
 //
@@ -15,7 +16,7 @@ import (
 //
 // Sections are grouped: "will create", "will update", "power", "will delete
 // (prune)", "deferred (budget)", "skipped (untagged)".
-func renderPlan(p *plan.Plan) string {
+func renderClusterPlan(p *plan.Plan) string {
 	if p == nil {
 		return ""
 	}

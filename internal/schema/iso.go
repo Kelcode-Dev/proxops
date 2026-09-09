@@ -94,11 +94,12 @@ func artifactNodes(legacy string, declared []string) []string {
 }
 
 // ISO is a schema.Resource for Kind=ISO.
+// ISO is a schema.Resource for Kind=ISO.
 type ISO struct {
-	APIVersion string
-	Kind       Kind
-	Metadata   Metadata
-	Spec       ISOSpec
+	APIVersion string   `yaml:"apiVersion" json:"apiVersion"`
+	Kind       Kind     `yaml:"kind" json:"kind"`
+	Metadata   Metadata `yaml:"metadata" json:"metadata"`
+	Spec       ISOSpec  `yaml:"spec" json:"spec"`
 }
 
 // NewISO returns an empty ISO.

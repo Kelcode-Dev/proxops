@@ -23,6 +23,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -116,9 +117,10 @@ type Client struct {
 	breaker *writeBreaker
 	log     *slog.Logger
 
-	mu        sync.Mutex
-	lastRead  time.Time
-	lastWrite time.Time
+	mu            sync.Mutex
+	lastRead      time.Time
+	lastWrite     time.Time
+	writesMonotonic atomic.Uint64 // counts POST/PUT/DELETE for read-only audit
 }
 
 // New builds a Client. CAFile may be empty (the system trust store is used).
@@ -209,6 +211,11 @@ func (c *Client) Do(ctx context.Context, method, node, path string, params url.V
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Count only the first attempt per request so the read-only audit
+		// sees "attempts" not "retries".
+		if attempt == 0 && isWrite {
+			c.writesMonotonic.Add(1)
+		}
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():

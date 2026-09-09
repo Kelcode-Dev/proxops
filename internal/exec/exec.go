@@ -36,7 +36,15 @@ type Executor struct {
 	log         *slog.Logger
 	// taskInterval is the polling cadence for task status; default 2s.
 	taskInterval time.Duration
+	// cluster is the pveconform cluster this executor reconciles; every
+	// statusx.Object it writes is tagged with it so a multi-cluster agent
+	// keeps per-cluster records.
+	cluster string
 }
+
+// SetCluster pins the pveconform cluster identity on the executor. The agent
+// composition root calls it once per cluster before any cycle runs.
+func (e *Executor) SetCluster(c string) { e.cluster = c }
 
 // New builds an Executor. taskTimeout bounds task awaits per action; interval
 // is the task polling cadence (0 = 2s default).
@@ -124,6 +132,7 @@ func (e *Executor) deferByDependency(a plan.Action, dep string) {
 		e.store.SetObject(&statusx.Object{
 			Kind:        a.Kind,
 			Name:        a.Name,
+			Cluster:     e.cluster,
 			Node:        a.Node,
 			ID:          a.ID,
 			State:       statusx.Skipped,
@@ -156,7 +165,7 @@ func (e *Executor) execute(ctx context.Context, a plan.Action) Result {
 	if e.store != nil {
 		state := e.stateFor(a, ok)
 		e.store.SetObject(&statusx.Object{
-			Kind: a.Kind, Name: a.Name, Node: a.Node, ID: a.ID,
+			Cluster: e.cluster, Kind: a.Kind, Name: a.Name, Node: a.Node, ID: a.ID,
 			State:           state,
 			LastAction:      string(a.What),
 			LastError:       errMsg(err),

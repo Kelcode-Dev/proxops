@@ -6,15 +6,17 @@ import (
 	"github.com/GizzmoShifu/proxmox-operator/internal/parse"
 )
 
-// TestExamplesDirParses verifies that the shipped examples/ directory
-// round-trips through BuildIndex. Guard against docs/examples drift.
+// TestExamplesDirParses verifies that the shipped examples/ directory — in
+// the M8 multi-cluster layout (clusters/<cluster>/resources.yaml +
+// <kind>/{base,<cluster>}/<manifest>.yaml) — round-trips through the
+// cluster-scoped index builder. Guard against docs/examples drift.
 func TestExamplesDirParses(t *testing.T) {
-	idx, err := parse.BuildIndex("../../examples")
+	idx, err := parse.BuildClusterIndex("../../examples", "example", []string{"example"})
 	if err != nil {
-		t.Fatalf("parse examples/: %v", err)
+		t.Fatalf("BuildClusterIndex: %v", err)
 	}
 	got := len(idx.List())
 	if want := 5; got != want {
-		t.Fatalf("parsed %d resources from examples/, want %d", got, want)
+		t.Fatalf("parsed %d resources for cluster example/, want %d", got, want)
 	}
 }

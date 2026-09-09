@@ -1,249 +1,263 @@
 # Architecture
 
-`pveconform` is a single-process, cluster-wide GitOps reconciler:
+`pveconform` is a single-process, multi-cluster GitOps reconciler for
+Proxmox VE. One agent reads one git repository and converges **every
+configured PVE cluster**:
 
 ```
-                 +----------------------------------------------+
-                 |                pveconform agent              |
-  git repo       |                                              |
- (HTTPS or local)|  +-------+  +--------+  +----+  +--------+  |
-  +------------->|  | gitx  |  | parse  |  |    |  | server |  |
-  |              |  +---+---+  +---+----+  |plan|  | /healthz| |
-  |              |      |            |     +----+  | /metrics| |
-  |              |  Index   +-------+-------+      | /status | |
-  |              |       |   |   LoadLive      |    +--------+ |
-  |              v       v   v        v        |               |
-  |          +---------------------------+     |               |
-  |          |    PlanActions (pure)     |     |               |
-  |          +-------------+-------------+     |               |
-  |                        |  Plan            |               |
-  |                        v                  |               |
-  |              +---------------------------+ |               |
-  |              |  Executor (apply mode)  | |               |
-  |              +-------------+-------------+               |
-  |                        | PVE form values + task UPIDs    |
-  +------------------------+---------------------------------+
-                             |
-                             v
-                     Proxmox VE API (8006)
-                     /api2/json/...
+                          pveconform agent
+        +-----------------------------------------------------------+
+        |        config:  pve.clusters = {conformance-dev, ...}     |
+        |                                                          |
+  git   |        +---------+   clusters/<c>/resources.yaml        |
+  repo  +------->|   gitx  |   (composition: which files each     |
+ (HTTPS or  |    +----+----+    cluster consumes)                |
+  local)    |         |                                         |
+            |    +-----v-----+                                  |
+            |    | composition  |  (repo boundary, fail-closed) |
+            |    +------+-------+                              |
+            |        |  per cluster (deterministic order)      |
+            |   +----v------------------------------------------+
+            |   |  for each cluster <name>:                     |
+            |   |    parse.BuildClusterIndex                    |
+            |   |      clusters/<name>/resources.yaml           |
+            |   |      <kind>/{base|<name>}/...yaml             |
+            |   |    pveclient[<name>]  (own endpoint +         |
+            |   |       own node allowlist)                    |
+            |   |    plan.LoadLive + PlanActions                |
+            |   |      (live inventory scoped to allowlist)     |
+            |   |    executor (apply mode)                      |
+            |   +-----------------------------------------------+
+            +---------------------------------------------------+
+                                   |
+                    Proxmox VE API per cluster (8006)
+                    /api2/json/...
 ```
 
-Every cycle is: **fetch → parse → load-live → plan → execute → report**.
-Statelessness is deliberate: restart = full re-diff. There is no local state
-file beyond the git cache.
+Every cluster cycle is: **fetch -> compose -> parse -> load-live -> plan ->
+execute -> report**. Clusters are processed in deterministic (name-sorted)
+order. Statelessness is deliberate: restart = full re-diff.
+
+## Multi-cluster composition
+
+The cluster boundary is the M8 invariant that keeps multi-cluster operation
+safe:
+
+```
+Git composition     ->  clusters/<name>/resources.yaml
+named cluster       ->  config pve.clusters.<name> (fail-closed cross-check)
+PVE endpoint        ->  that cluster's base-url (one pveclient per cluster)
+PVE node            ->  that cluster's node allowlist (fail-closed pre-PVE)
+PVE resource        ->  only objects on those nodes are ever read/written/pruned
+```
+
+- **Composition is explicit**: a cluster reconciles exactly the resource
+  files its `resources.yaml` lists. There is no overlay, inheritance, or
+  merge (pveconform does not use Kustomize and deliberately avoids
+  Kustomize semantics).
+- **Reusable bases**: `<kind>/base/*.yaml` are shared *by reference*: any
+  number of clusters may list the same file. Ownership is by composition,
+  not by directory.
+- **Cluster-specific resources**: `<kind>/<cluster>/*.yaml` are only
+  consumed by the cluster that lists them.
+- **Fail-closed identity**: a composition with no `pve.clusters` entry (or a
+  configured cluster with no composition) aborts at start -- pveconform can
+  never reconcile an endpoint whose desired set is unknown.
+- **No cross-cluster dependencies**: a structured edge
+  (`VM.cdrom.iso`, `LXC.template`) or `depends-on` annotation resolves
+  inside the referring cluster's index. A target listed only by another
+  cluster is a parse error. (A dependency is valid whenever the target is in
+  the referencing cluster's index -- always true for a shared base, since
+  both clusters list the same file.)
+- **Same PVE id / same name across clusters is fine**; same `(node, PVE id)`
+  inside one cluster is not (PVE's per-node integer pool is shared by VM+LXC).
+- **Prune scoping**: the planner's live inventory and prune candidates are
+  filtered by the cluster's node allowlist, so one cluster can never prune
+  objects that live on another cluster's nodes. (Config additionally forbids
+  two clusters sharing one endpoint -- prune scoping is endpoint-based, and
+  merging inventories would be a footgun.)
+
+The root config file (`.config.yaml` / `config/pveconform.yaml`) remains the
+bootstrap/configuration entry point in M8. `clusters/<cluster>/config.yaml`
+exists as the documented home for future cluster-specific configuration
+(and eventually SOPS-resolved credentials); the process configuration
+format is not redesigned around it in M8. See "Future: per-cluster secrets
+(SOPS)" in OPERATIONS.md.
 
 ## The layers
 
-### gitx — source of truth
+### gitx -- source of truth
 
-- **URL mode** (default): `go-git` clone into `data-dir`, shallow `main`
-  checkout, `fetch` on each cycle. Fetch failures are *advisory*: the agent
-  keeps the last-good tree and flags `desired-stale` on that cycle (fail-open
-  on stale reads, never on garbage).
-- **Local mode** (`--git-path` / `git.path`): the work tree is authoritative;
-  the agent never writes it (MVP: no local commit — for air-gapped hosts that
-  maintain their own git).
+One git source (URL or local work tree) serves **all** clusters: the
+composition is cluster-scoped at parse time, not at fetch time. URL mode:
+`go-git` clone into `data-dir`, `fetch` on each tick; fetch failures are
+*advisory* -- the agent keeps the last-good tree and flags `desired-stale`
+(fail-open on stale reads, never on garbage). Local mode: the work tree is
+authoritative; the agent never writes it.
 
-### parse — manifest tree → typed Index
+### composition -- the GitOps boundary
 
-Walks `*.yaml`/`*.yml`, decodes each document into the right `schema.Resource`
-(VM / LXC / CTTemplate / ISO), validates it (including pinned-`vmid` > 0 for
-ids, node-name shape, quantity units, and that LXCs reference a template),
-checks for duplicate refs AND duplicate PVE-ids within a node (the id space is
-shared for VM/LXC; artifacts have no id), then resolves the **dependency DAG**:
+Read-only. Discovers `clusters/*/resources.yaml`, resolves + validates every
+resource path (exists, inside repo root, `.yaml`, no duplicates), enforces
+the repo shape (rejects legacy `<kind>/foo.yaml` placed directly under a kind
+root), and cross-checks compositions against configured clusters (both
+directions fail closed).
 
-- **structured edges** — `schema.Resource.Deps()` yields inferred edges
-  (`VM → ISO` via `spec.hardware.cdrom.iso`, `LXC → CTTemplate` via
-  `spec.template`);
-- **annotation edges** — the `proxops/depends-on` `Kind:name` list.
+### parse -- per-cluster desired index
 
-`parse.ResolveArtifactRefs` (via `schema.ResolveArtifactRefs`) validates both
-edge sets: unknown targets and reference cycles fail closed and abort the whole
-cycle; it also rewrites the referencing VM/LXC so the resolved PVE storage
-volume (`local:iso/…`, `local:vztmpl/…`) is embedded and the referencing node is
-a declared placement node of the artifact. `Index.Levels()` computes the
-topological create-level (Kahn) of every ref; the planner consumes it.
+`parse.BuildClusterIndex(root, cluster, configuredClusters)` builds the
+Index for exactly that cluster's composed files:
 
-### pveclient — thin PVE JSON API client
+- routing to typed resources (VM / LXC / CTTemplate / ISO) + `Validate()`;
+- duplicate `(kind, name)` refs -> error;
+- duplicate PVE id on a node **within the cluster** -> error;
+- structured edges (`VM -> ISO` via `hardware.cdrom.iso`,
+  `LXC -> CTTemplate` via `spec.template`) + `depends-on` annotation edges;
+- unknown edge targets / cycles fail the cluster's cycle (no cross-cluster
+  resolution, by construction).
 
-No third-party PVE library. Only what the reconciler actually calls.
+`parse.BuildIndex` (whole-tree walk) still exists for the examples check and
+test tooling; the M8 runtime always uses the cluster-scoped builders.
 
-**One endpoint, all traffic.** PVE exposes its complete JSON API on every node,
-so the agent talks to a *single* base URL (`pve.base-url`, e.g.
-`https://pve-dev-01.example.invalid:8006`) for everything — cluster-wide reads
-(`/cluster/resources`, `/version`), ticket exchange (`/access/ticket`), and
-per-node object calls. The PVE node identity (e.g. `pve-dev-01`) appears **only
-in the request path** (`/nodes/pve-dev-01/...`), never in the host. This is what
-makes the agent work when a node name is not a resolvable DNS hostname (the
-conformance-dev case). `pve.nodes` is an optional allowlist of known node names
-used to validate `spec.node` in manifests; it is not a set of hosts to dial.
+### pveclient -- thin PVE JSON API client
 
-- Auth: PVE API token (`Authorization: PVEAPIToken=user@realm!id=value`) —
-  default; or username+password ticket exchange (`POST /access/ticket` →
-  `PVEAuthCookie`, with `X-CSRF-Token`).
-- Read: `GET /version`, `GET /cluster/resources`, per-object
-  `GET /qemu|lxc/{id}/config`, `GET /nodes/{n}/{qemu|lxc}/{id}/status/current`,
-  `GET /nodes/{n}/storage/{s}/content` (artifact listing).
-- Write: `POST /qemu|lxc` (create), `POST .../config` (update),
-  `POST .../status/{start|stop|shutdown|reboot}` (power),
-  `DELETE /qemu|lxc/{id}` (PVE 9.x delete), `POST .../resize` is **501 / not-implemented** on PVE 9.2 — pveconform does not call it; disk pool/size drift is instead surfaced as a non-destructive anomaly (data-loss guard).
-  `POST /nodes/{n}/storage/{s}/download-url` (ISO **and** CTTemplate vztmpl —
-  routed by the `content` form parameter). The PVE 8-era `POST /nodes/{n}/storage/{s}/download` path returns 501 "Method not implemented" on PVE 9.2 dir storage. Filename extension is validated at parse time against PVE 9.2 contract: `vztmpl` accepts `.tar | .tar.zst | .tar.xz | .tar.gz`, `iso` accepts `.iso | .img` (see `schema/artifact_ext.go`).
+No third-party PVE library. **One endpoint per cluster**: each configured
+cluster gets its own `pveclient.Client` pinned to that cluster's
+`base-url`. PVE exposes its complete JSON API on every node, so one endpoint
+reaches every node/object of *that* cluster; the PVE node name lives only in
+the request path. Auth is shared across clusters (token or ticket,
+credentials from the environment).
 
-> **PVE 9.2 storage quirk.** `GET /nodes/{n}/storage/{s}/content/iso` and
-> `…/content/vztmpl` return `500 "unable to parse directory volume name"`
-> because PVE's dir-storage *listing* treats the type segment as a volume id.
-> The bare `GET …/content` (no type) works and returns entries tagged with a
-> `content` field; `Storage.HasContent` filters on it. See OPERATIONS.md.
-- Async: any mutating call that returns a string `data` is a task UPID; the
-  `TaskWaiter` polls `GET /tasks/{upid}/status` until `stopped`+`OK`
-  (bounded by `reconcile.task-timeout`).
-- Resilience: retry with jittered backoff on 5xx/transient; PVE's
-  `HTTP 500 "no such vm"` maps to `IsNotFound`; a write circuit breaker
-  halts further writes after N consecutive failures; PVE "operation already
-  in progress" is a non-retried failure the planner re-diffs next cycle.
+Adoption additionally uses read-only listing surfaces: `GET
+/cluster/nodes`, `GET /nodes/{n}/qemu`, `GET /nodes/{n}/lxc`,
+`GET /nodes/{n}/storage`, `GET /nodes/{n}/storage/{s}/content`. The client
+counts every POST/PUT/DELETE (`WritesPerformed`) so `adopt` can assert the
+read-only invariant (zero writes).
 
-The mock server (`internal/pveclient/mock`) is a stateful httptest PVE:
-token+ticket auth, per-node object store (qemu/lxc share the PVE id space),
-ISO storage, async task settle-after-N-ticks, PVE-shape error envelopes.
-Tests run against it for pveclient unit tests and, in `internal/reconcile`,
-against a **real git work tree** for the full e2e pipe.
+### plan -- pure planner + safety model (cluster-scoped)
 
-### plan — pure planner + safety model
+`plan.LoadLive(ctx, client, desired, allowedNodes)` snapshots PVE:
+- cluster listing -> per-object config + power, **only for nodes in
+  `allowedNodes`**;
+- for every desired artifact, probes storage content per declared
+  `(node, storage, content)` and records `{present: bool}`.
 
-`plan.LoadLive(ctx, client, desired)` snapshots PVE:
-- cluster listing → per-object config + power for every **VM** and **LXC**;
-- for every desired **artifact** (an ISO and a CTTemplate — see
-  `schema.ArtifactKind`), probes the PVE storage content listing once per
-  `(node, storage, content)` and records `{present: bool}` at
-  `artifactKey(node, storage, filename, kind)` in the inventory. `HasContent`
-  filters the bare `GET …/content` result (PVE 9.2 quirk noted above).
+`plan.PlanActions(ctx, desired, live, opts)` is pure (never writes).
+`opts.NodeAllowlist` restricts **prune candidates** to the cluster's nodes
+-- a tagged live object on a node outside the allowlist is invisible to this
+cluster's planner (neither a prune candidate nor a skip entry). The rest of
+the safety model is unchanged:
 
-`plan.PlanActions(ctx, desired, live, opts)` is a free function returning
-`*Plan` — **it never writes**. It emits:
+- **Ownership gate**: `pveconform` tag required for any delete.
+- **Prune budget**: max N *per cluster* per cycle (default 3).
+- **Empty-desired anomaly guard**: 0 desired of a kind + more tagged live
+  objects than the budget -> prunes for that kind suppressed,
+  `Plan.Anomaly` set.
+- **Conservative artifacts**: ISO/CTTemplate are never pruned.
+- **Live-only disk anomalies**: VM/LXC slots present on PVE but not in the
+  manifest are surfaced as non-destructive anomalies and never auto-removed.
+- **Data-loss guards**: pool/size drift on a live data volume is anomaly +
+  stop, never an auto-rewrite.
+- **Deterministic + topological order**: tier/level/what/node/id/name;
+  dependants create after prerequisites; prunes reverse-ordered;
+  in-cycle prerequisite deferral via `Action.Deps`.
 
-1. **Tier 0, pass A** — for each desired object:
-   - artifact → `planArtifact`: for each node in `spec.nodes`, presence from
-     `live.Configs` → `Create` (a `Storage().Download`) when missing, zero
-     actions when present, `Skipped` when the storage listing is unreadable.
-     One create per missing node; artifacts are never pruned.
-   - VM/LXC → standard flow: absent → `Create`; present →
-     `Drift(current)` → `Update` (optionally `StopFirst`); power verb →
-     `Start`/`Stop` (independent of config drift). The VM/LXC `Create` action
-     carries **`Level`** (topological, from `Index.Levels`) and **`Deps`**
-     (from `Index.EdgesFor`) so the executor can defer the dependant when a
-     prerequisite fails in-cycle.
-2. **Tier 9, pass B (prune)** — for each live PVE-listing entry of a managed
-   **VM** or **LXC**, NOT claimed by desired, tagged `pveconform`:
-   - untagged → `Skipped` (never touched);
-   - tagged → prune candidate.
-   Membership is by PVE id+node AND ref string. Artifacts are not PVE
-   listing entries, so they are invisible to prune (conservative-no-delete).
+### exec -- serial executor (per cluster)
 
-The safety model:
+One executor per cluster (bound to that cluster's PVE client and status tag).
+Actions run in plan order; stop-required flows: Stop -> Update -> Start
+(restored only when `DesiredPower=started`). Failures never abort the cycle;
+the next cycle re-diffs. Every `statusx.Object` record is tagged with the
+cluster.
 
-- **Ownership gate**: `pveconform` tag is required for any delete; the tag is
-  added automatically at create time.
-- **Prune budget**: max N deletes per cycle (default 3); extras go to
-  `Deferred` and surface on `/status`.
-- **Empty-desired anomaly guard**: if a kind has 0 desired and more
-  pveconform-tagged live objects than the budget, ALL prunes for that kind are
-  suppressed, `Plan.Anomaly` is set, and the cycle logs it. This catches the
-  classic "someone deleted all VM manifests by accident" shape without losing
-  the safety model for ordinary small-scale deletions.
-- **Determinism + topological order**: within tier 0 the plan sorts by
-  `(Tier, Level, What, Node, ID, Name)`. Level 0 resources (artifacts:
-  ISOs + CTTemplates with no PVE reference) are always planned before
-  level-1 resources that reference them, so PVE's storage download completes
-  before any VM/LXC that embeds its volume id. Prunes (tier 9) use level
-  descending — dependants are deleted first.
-- **Structured dependencies**: pveconform infers edges from first-class
-  schema fields: `VM.spec.hardware.cdrom.iso → ISO`,
-  `LXC.spec.template → CTTemplate`. These are merged with the
-  `proxops/depends-on` annotation edges at parse time.
-- **Dependancy deferral (in-cycle)**: the executor tracks which
-  Refs failed earlier this cycle; any later action whose `Deps` intersect
-  that set is recorded as `Skipped: deferred: prerequisite <ref> failed
-  this cycle` instead of being attempted. The next cycle re-derives from
-  live state; no persistent bookkeeping.
-- **Unknown-ref + cycle**: both reject the whole cycle at parse time, no
-  PVE writes.
+### adopt -- PVE -> pveconform YAML (M8, read-only)
 
-### exec — serial executor
+`pveconform adopt --cluster <name>`:
 
-One cycle uses exactly one executor (the second reconciler instance is
-read-only and shares the plan). Actions run in plan order; each records
-`statusx` state transitions (`in_progress` → `converged` / `failed`), PVE
-task UPIDs are awaited; a stop-required flow: `Stop` → `Update` →
-`Start` (restore, only when `DesiredPower=started`). Failures never abort the
-cycle — the result is logged and statused; the next cycle re-diffs.
+1. Resolves the cluster in `pve.clusters`; uses that cluster's endpoint and
+   node allowlist (unknown cluster -> error; the command does not pick a
+   cluster for you).
+2. Enumerates nodes (allowlist; only when the allowlist is empty does it
+   query `/cluster/nodes`).
+3. Reverse-engineers every VM and LXC on those nodes from their PVE
+   `/config` report into a pveconform manifest, and every `iso`/`vztmpl`
+   storage artifact into an ISO/CTTemplate manifest (same filename on
+   several allowed nodes -> one manifest with `spec.nodes` covering them).
+4. Writes each manifest under `<kind>/<cluster>/` (cluster-specific output by
+   design -- the object was observed on that cluster; promoting something to
+   `<kind>/base/` is a deliberate human refactoring decision, never done by
+   adopt).
+5. **Gap reporting**: every PVE `/config` key pveconform does not model (and
+   that is not PVE bookkeeping: `digest`, `meta`, `vmgenid`, `smbios1`, ...)
+   is listed as a `Gap`. PVE-assigned MACs are not pinned (round-trip
+   contract: PVE owns random MACs); things PVE does not report back
+   (`ostemplate`, artifact download URLs) are explicit gaps.
+6. **INCOMPLETE manifests**: when a required value cannot be recovered
+   (e.g. `ostemplate`), the manifest is still written (so the operator sees
+   its shape) but named in the summary's `INCOMPLETE` list; the operator
+   must complete it before listing it in `resources.yaml`. `adopt` never
+   modifies `clusters/<cluster>/resources.yaml` -- the summary prints the
+   exact lines to add.
+7. **Read-only assertion**: the PVE client's write counter must be
+   unchanged at the end; adoption never creates/updates/deletes/tags
+   anything in PVE.
+
+The generated YAML is suitable for a **round-trip**: PVE -> adopt -> YAML ->
+`resources.yaml` -> `pveconform diff` -> zero unexpected drift for anything
+pveconform models. The live-only disk fixture (VM 9101's `scsi1` on
+conformance-dev) is captured into `spec.disks` by adopt, so the round-trip
+represents *both* disks instead of silently losing the anomaly.
 
 ### statusx + server
 
 `statusx.Store` is an in-memory convergence table keyed
-`node|kind|id` or `node|ISO|storage:filename`. The server exposes:
-
-- `GET /healthz` — 200 when a cycle has run within 2 minutes; 503 when stale
-  (used by systemd `WatchdogSec`-style monitoring and load balancers).
-- `GET /metrics` — Prometheus text format.
-- `GET /status` — JSON convergence table (per-object kind/name/id/state/
-  last-error/reason + cycle-level anomaly + desired-stale + commit).
+`cluster|kind|name` so every record carries its cluster. `GET /status` shows
+the multi-cluster object table; `GET /healthz` is ready once a full
+(all-clusters) cycle has run; `GET /metrics` is process-wide.
 
 ### app / CLI
 
-`internal/app` is the composition root: builds pveclient (BaseURL override for
-tests), gitx (URL or local), a status store, an apply reconciler, a dry
-reconciler, and the HTTP server. The cobra command surface:
+`internal/app` builds the agent: one git source, one status store, one
+pveclient + reconciler pair **per configured cluster** (deterministic
+sorted order), one HTTP server. Command surface:
 
-- `pveconform run` — daemon: watch loop (poll interval from config),
-  tolerates cycle aborts.
-- `pveconform diff [--dry-run]` — read-only plan for this tree + PVE.
-- `pveconform apply` — one convergence cycle, exit non-zero on any action
-  failure (abort semantics: operator must intervene).
-- `pveconform status` — print the `/status` JSON table.
-- `pveconform adopt` — scaffolds `VM`/`LXC`/`CTTemplate` YAML for live
-  tagged objects in the tree (post-MVP: ISO too).
+- `pveconform run` -- daemon: every tick, all clusters in order; a cluster's
+  abort does not block the others.
+- `pveconform diff` -- read-only plan per cluster, labelled
+  `=== <cluster> ===`.
+- `pveconform apply` -- one converge cycle per cluster; non-zero exit when
+  any cluster aborts.
+- `pveconform status` -- per-cluster convergence table.
+- `pveconform adopt --cluster <name>` -- PVE -> YAML for exactly one named
+  cluster (required flag; no implicit default). `--dry-run`/`--diff` still
+  exist on `apply`.
 
-All commands accept a `--config` path; credentials come only from the
+All commands accept `--config <path>`; credentials come only from the
 environment (see README).
 
-## Failure modes — what happens, by design
+## Failure modes -- what happens, by design
 
 | Failure | Behavior |
 |---|---|
-| git fetch fails (first) | Abort cycle; no PVE reads; `/healthz` 503 after 2 min |
-| git fetch fails (subsequent) | Keep last-good tree, cycle marked `stale` |
-| Parse fails on a manifest | Abort cycle; keep last-good tree |
-| PVE inventory read fails | Abort cycle |
-| PVE create/update returns "in progress" | Action failed (logged); next cycle re-diffs |
-| PVE task fails | Action failed; statused `failed` |
-| PVE 5xx on read (transient) | Retried w/ backoff; eventually aborts the cycle |
-| Anomaly: 0 desired + many tagged | Prunes suppressed, `anomaly` on `/status` |
-| ISO / vztmpl storage listing unreadable | Download skipped; next cycle retries (fail-closed) |
-| ISO / vztmpl download fails | Action failed; any LXC / VM that references it is **deferred** this cycle |
-| LXC create fails (missing template etc.) | Action failed; next cycle retries |
-| VM create fails | Action failed; next cycle retries |
+| git fetch fails (first) | Cluster cycles abort; no PVE reads |
+| git fetch fails (subsequent) | Keep last-good tree; cycle `stale` |
+| Composition invalid (legacy layout, missing ref, unknown cluster) | Parse fails **closed** for the affected cluster(s); no PVE writes |
+| Parse fails on a manifest | That cluster's cycle aborts; other clusters unaffected |
+| PVE inventory read fails (one cluster) | That cluster's cycle aborts |
+| PVE create/update/task fails | Action failed (statused); next cycle re-diffs |
+| 0 desired + many tagged live | Prunes suppressed for that kind on that cluster |
+| Unknown PVE config on adopt | Gap report + INCOMPLETE manifest; never silently dropped |
 
 ## Extending the set of kinds
 
-To add a new kind:
-
-1. `internal/schema/<kind>.go` — struct + `Resource`
-   interface impl (`ToCreateParams`, `Drift`, `Validate`; `Kind` constant,
-   `Ref()`).
-2. `internal/parse/parse.go` — `switch kind` case + `metadataOf` case.
-3. `internal/pveclient/` — wire primitive(s) (usually `POST /nodes/{n}/...`).
-4. `internal/pveclient/mock/mock.go` — routes + accessors (kind-agnostic id
-   space if PVE lists it alongside LXCs, else its own).
-5. `internal/plan/plan.go` — register in LoadLive (config/power + optional
-   storage probe), in PlanActions pass A/B, and any kind-specific safety.
-6. `internal/exec/exec.go` — apply() switch.
-7. `docs/SCHEMA.md` + `examples/` + an e2e test in
-   `internal/reconcile/reconcile_m4_test.go`-style.
-
-The `CTTemplate` kind is the reference example of a kind whose PVE
-**presence** is decoupled from its PVE **type** (LXC-listed, CTT-claimed).
-`ISO` is the reference example of a kind with **no PVE numeric id** (identity
-is a storage-backend key, and the live "config" is built from a storage listing
-probe, not an object read).
+1. `internal/schema/<kind>.go` -- struct + `Resource` impl.
+2. `internal/parse/parse.go` -- `switch kind` routing + `metadataOf`.
+3. `internal/composition` -- kind roots (repo-shape validation).
+4. `internal/pveclient/` -- wire primitives; `internal/pveclient/mock` --
+   routes + accessors (kind-agnostic PVE id space if PVE lists it alongside
+   LXCs).
+5. `internal/plan/plan.go` -- LoadLive + PlanActions pass A/B + any
+   kind-specific safety.
+6. `internal/exec/exec.go` -- `apply()` switch.
+7. `internal/adopt/` -- reverse-engineering + gap detection.
+8. `docs/SCHEMA.md` + `examples/` + e2e tests.

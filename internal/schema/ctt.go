@@ -53,11 +53,12 @@ type CTTSpec struct {
 }
 
 // CTTemplate is a schema.Resource for Kind=CTTemplate.
+// CTTemplate is a schema.Resource for Kind=CTTemplate (storage artifact, no PVE cid).
 type CTTemplate struct {
-	APIVersion string
-	Kind       Kind
-	Metadata   Metadata
-	Spec       CTTSpec
+	APIVersion string   `yaml:"apiVersion" json:"apiVersion"`
+	Kind       Kind     `yaml:"kind" json:"kind"`
+	Metadata   Metadata `yaml:"metadata" json:"metadata"`
+	Spec       CTTSpec  `yaml:"spec" json:"spec"`
 }
 
 // NewCTTemplate returns an empty CTTemplate (storage artifact, no PVE cid).

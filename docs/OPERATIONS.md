@@ -42,16 +42,20 @@ defaults are sensible. `internal/config.Load` merges over
 log:
   level: info            # debug | info | warn | error
 pve:
-  auth: token            # token | ticket
+  auth: token            # token | ticket (credentials are SHARED by all clusters)
   user: root@pam
   token-id: pveconform   # part of user@realm!tokenid=value
   # token: <uuid>       # prefer PVECONFORM_PVE_TOKEN env
   # token-value: <full> # prefer PVECONFORM_PVE_TOKEN_VALUE env — overrides pair
-  base-url: https://pve-dev-01.example:8006   # single endpoint for ALL traffic
-  nodes:                # optional allowlist of PVE node names
-    - pve-dev-01
-    - pve-dev-02
-  ca-file:              # optional path to PVE cluster CA
+  ca-file:               # optional PVE cluster CA (shared by every endpoint)
+  clusters:              # NAMED PVE clusters — the M8 multi-cluster model
+    conformance-dev:     #   name MUST match a GitOps composition dir
+      base-url: https://pve-dev-01.example:8006   # endpoint for ALL traffic
+                                         # to THIS cluster
+      nodes:             #   per-cluster node allowlist = the cluster boundary
+        - pve-dev-01     #   (a manifest spec.node outside it aborts the
+        - pve-dev-02     #   cluster's cycle BEFORE any PVE call)
+    # prod-a: ...  #   more clusters added as they come online
 git:
   url: https://github.com/you/pveconform-manifests.git
   branch: main
@@ -60,10 +64,18 @@ git:
 reconcile:
   poll-interval: 30s
   task-timeout: 30m
-  prune-budget: 3
+  prune-budget: 3        # max deletions per cycle, PER CLUSTER
 listen: 127.0.0.1:9494   # or 0.0.0.0:9494
 data-dir: ~/.local/share/pveconform
 ```
+
+Rules the config enforces (fail-closed): at least one named cluster; each name
+must be a valid composition identity (lowercase alnum + `-`); each `base-url`
+must parse as `http(s)://host`; **two clusters may not share one endpoint**
+(prune scoping is endpoint-based, and two compositions sharing a live
+inventory would let one prune the other); every `pve.clusters` entry must have
+a composition at `clusters/<name>/resources.yaml` in the git tree, and every
+composition must have a configured endpoint.
 
 ### Air-gapped / local mode
 
@@ -83,11 +95,12 @@ access but `rsync`/`ssh` is allowed.
   - `last_cycle`: `{commit, started_at, finished_at, objects, actions_ok,
     actions_error, pruned, prune_deferred, desired_stale, read_only,
     aborted, abort_reason}` — counters of the most recent completed cycle.
-  - `objects`: array of `{kind, name, node, id, state, last_action,
-    last_error, last_converged_at, prune_reason, updated_at}`.
+  - `objects`: array of `{cluster, kind, name, node, id, state, last_action,
+    last_error, last_converged_at, prune_reason, updated_at}` — one entry
+    per cluster-scoped object (M8 tags every record with its cluster).
 State values: `desired`, `drift`, `converged`, `in_progress`, `failed`,
-`skipped`, `pruned`. The agent never marks anything `converged` without a
-round-trip read back from PVE.
+`skipped`, `pruned`, `anomalous`. The agent never marks anything
+`converged` without a round-trip read back from PVE.
 
 Useful `systemd` / shell checks:
 
@@ -161,9 +174,14 @@ Behaviour:
 ## Pruning safety and artifact conservatism
 
 The ownership gate remains: only PVE objects tagged `pveconform` are eligible
-for pruning. The per-cycle **prune budget** (default 3) caps deletions, and the
-**empty-desired anomaly guard** suppresses prunes when a kind has 0 manifests
-but more tagged live objects than the budget. For ISO / CTTemplate, pveconform
+for pruning. The per-cycle **prune budget** (default 3, per cluster) caps
+deletions, and the **empty-desired anomaly guard** suppresses prunes when a
+kind has 0 manifests but more tagged live objects than the budget.
+**All of this is per cluster**: the candidate set, the budget, and the
+anomaly guard are scoped to one cluster's composition + node allowlist —
+an object belonging to cluster A is never pruned because it is absent from
+cluster B's composition, and an empty cluster triggers no destructive
+behaviour on its configured nodes. For ISO / CTTemplate, pveconform
 **never plans a delete** (the "conservative artifact deletion" guarantee):
 PVE storage content may be shared with tooling the agent does not manage, and
 PVE has no "delete by pveconform name" semantics.
@@ -208,10 +226,27 @@ returns non-zero. This is what you *want* in runbooks and CI. In daemon
 mode (`run`) the loop tolerates cycle aborts and keeps ticking; check the
 `/status` anomaly counter and `journalctl` for the reason.
 
+## Multi-cluster operation
+
+`diff`, `apply`, and `status` process **every configured cluster** in
+deterministic (sorted name) order and label each cluster's section
+(`=== conformance-dev ===`, `[prod-a]` ...). A failure or abort on one
+cluster never blocks the others; `apply` exits non-zero when any cluster
+aborted. Each cluster gets its own PVE endpoint + node allowlist, its own
+per-cycle prune budget, and its own empty-desired anomaly guard. The same PVE
+id and the same name can exist on different clusters (id/name spaces are
+cluster-scoped).
+
+To add a cluster: add `pve.clusters.<name>` to the config AND add
+`clusters/<name>/resources.yaml` to the git tree. Both sides must agree; a
+mismatch fails closed at config validation.
+
 ## Working with PVE
 
 ### What pveconform does *not* do in MVP
 
+- **No VM replication.** PVE's `repl*` properties are not modelled
+  (deliberate; see docs/GAPS.md).
 - **No PVE pool management.** `pool` is not a schema field.
 - **No `qm`/`pct` shell-outs.** PVE API is the only interface.
 - **No deletion of ISOs.** ISO manifests only create (download). Remove the
@@ -230,9 +265,54 @@ drift, not state-machine confusion.
 
 ### Adopting existing PVE objects
 
-`pveconform adopt` (M5+) scaffolds YAML from live tagged PVE objects so you
-can `git push` then `pveconform apply` to move them under management.
-Post-MVP.
+`pveconform adopt` (M8) reverse-engineers live PVE objects into pveconform
+YAML. It is READ-ONLY with respect to PVE (it asserts zero PVE writes) and
+requires an explicit cluster:
+
+```sh
+pveconform adopt --cluster conformance-dev --config .config.yaml
+```
+
+What it does:
+
+- uses that cluster's configured endpoint + node allowlist;
+- writes one manifest per live object under `<kind>/<conformance-dev>/` in
+  the git work tree (VM, LXC, ISO, CTTemplate);
+- surfaces **unsupported PVE configuration explicitly** (a `gap` line per
+  live key pveconform does not model; `INCOMPLETE` for generated manifests
+  missing a value PVE cannot re-report, e.g. the LXC `ostemplate`);
+- prints the exact `resources.yaml` lines to add. It does NOT modify
+  `clusters/<cluster>/resources.yaml` — listing the generated files is a
+  deliberate, reviewable operator step.
+
+The M8 acceptance round-trip is:
+
+```
+PVE -> adopt -> YAML -> clusters/<cluster>/resources.yaml -> pveconform diff
+     -> zero unexpected drift (for everything pveconform models)
+```
+
+Live-only disk anomalies are preserved: adopt interrogates the PVE /config
+report, so a fixture like the conformance-dev VM 9101 live-only `scsi1` is
+represented in the adopted manifest rather than silently dropped. See
+docs/GAPS.md for the seeded gap backlog (the source of new entries is exactly
+this adopt report).
+
+### Future: per-cluster secrets (SOPS)
+
+`clusters/<cluster>/config.yaml` is the documented home for cluster-specific
+configuration. The intended future shape:
+
+```
+clusters/<cluster>/config.yaml       # cluster-specific non-secret config
+clusters/<cluster>/secrets.sops.yaml # SOPS-encrypted per-cluster credentials
+                                     # (decrypted at runtime; NEVER committed
+                                     #                              in cleartext)
+```
+
+M8 does NOT implement SOPS: credentials remain shared across clusters in the
+process environment (`PVECONFORM_PVE_TOKEN*`). The composition model already
+expects one named cluster = one endpoint = one secret set.
 
 ## Runbook (typical incident)
 

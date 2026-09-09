@@ -1,0 +1,32 @@
+# pveconform composition for the "example" cluster (M8 GitOps model).
+#
+# This is NOT a Kustomization — pveconform does not use Kustomize. It is an
+# explicit, per-cluster list of the resource definitions the "example"
+# cluster consumes. Paths are relative to this directory.
+#
+# The "example" cluster consumes:
+#   - a reusable BASE ISO + BASE CTTemplate (live under iso/base/ and
+#     ctt/base/; any other cluster could list the very same files in its own
+#     clusters/<other>/resources.yaml — base resources are shared by
+#     reference, not owned),
+#   - cluster-specific VMs + an LXC (live under vm/example/ and
+#     lxc/example/; only this cluster lists them).
+#
+# To run the example tree against a PVE cluster:
+#  1. mirror the structure under <kind>/example/ + <kind>/base/ in your own
+#     git work tree,
+#  2. keep exactly one cluster (here: "example") declared in both
+#     clusters/example/ (this file lists its resources) AND
+#     pve.clusters (in your pveconform config, with its endpoint + node
+#     allowlist),
+#  3. point pveconform at the tree: pveconform diff --config ./.config.yaml
+#
+# Do not add another clusters/ dir until you also add that cluster to
+# pve.clusters — a composition with no configured endpoint fails closed
+# (and a configured endpoint with no composition fails closed too).
+resources:
+  - ../../ctt/base/golden-base.yaml
+  - ../../iso/base/base-iso.yaml
+  - ../../lxc/example/cache-01.yaml
+  - ../../vm/example/app-vm.yaml
+  - ../../vm/example/talos-worker-01.yaml

@@ -26,6 +26,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/GizzmoShifu/proxmox-operator/internal/composition"
 	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
 )
 
@@ -254,6 +255,149 @@ func (idx *Index) Files() []string {
 
 // Root returns the index root directory.
 func (idx *Index) Root() string { return idx.root }
+
+// --- M8 multi-cluster GitOps model ---
+//
+// A repository is parsed PER CLUSTER: each cluster's composition
+// (clusters/<name>/resources.yaml) lists the exact resource files that
+// cluster consumes, and the cluster's desired Index is built from just
+// those files. The cluster boundary is the safety feature:
+//
+//   - a resource may only be reconciled against the cluster whose
+//     composition explicitly includes it (unknown composition entries fail
+//     closed);
+//   - the same VMID / name may coexist on different clusters — collision
+//     checks are scoped to the single cluster's file set;
+//   - a cluster with zero declared resources is valid (empty Index; the
+//     planner's empty-desired anomaly guard still suppresses prunes).
+//
+// BuildIndex (whole-tree walk) remains for the non-cluster test paths
+// (examples, gitx harness) — M8 runtime parsing always goes through
+// BuildClusterIndex.
+
+// CompositionNames returns the discovered cluster composition names in
+// deterministic order.
+type CompositionNames struct {
+	Names []string
+}
+
+// BuildClusterIndex builds the cluster-specific desired state for one named
+// cluster.
+//
+// Steps (fail-closed at every stage):
+//  1. the cluster name must be a valid composition identity AND present in
+//     configuredClusters (pve.clusters) — an unknown cluster name can never
+//     produce PVE actions;
+//  2. the repository shape is validated: clusters/<cluster>/resources.yaml
+//     exists and every configured cluster has a composition; legacy
+//     top-level resources (<kind>/foo.yaml) are rejected;
+//  3. the cluster's declared resource files are parsed and validated
+//     exactly as BuildIndex would, but scoped to that cluster's file set;
+//     duplicate resources and intra-cluster PVE-id collisions are
+//     rejected; structured dependencies must resolve within the cluster
+//     (there is no cross-cluster dependency — a VM referencing an ISO that
+//     another cluster lists is a parse error, by construction, because the
+//     ISO is not part of this cluster's index).
+func BuildClusterIndex(root string, cluster string, configuredClusters []string) (*Index, error) {
+	if !composition.ValidClusterName(cluster) {
+		return nil, fmt.Errorf("cluster name %q is not a valid composition identity (lowercase alnum + '-')", cluster)
+	}
+	configured := map[string]bool{}
+	for _, c := range configuredClusters {
+		configured[c] = true
+	}
+	if !configured[cluster] {
+		return nil, fmt.Errorf("cluster %q is not present in pve.clusters; unknown cluster names fail closed", cluster)
+	}
+	comps, err := composition.AllCompositions(root, configuredClusters)
+	if err != nil {
+		return nil, err
+	}
+	comp, ok := comps[cluster]
+	if !ok {
+		return nil, fmt.Errorf("no composition found for cluster %q", cluster)
+	}
+	return BuildIndexFromFiles(root, comp.SortedFiles())
+}
+
+// BuildIndexFromFiles builds and validates an Index from an explicit
+// relative-file list (the composition's resource set). Files are read in
+// lexicographic order for deterministic parse output.
+//
+// Every referenced file is a valid resource AND its path is under one of
+// the recognised kind roots (vm/, lxc/, iso/, ctt/) — a manifest placed
+// elsewhere is malformed and fails closed.
+func BuildIndexFromFiles(root string, relPaths []string) (*Index, error) {
+	files := make([]string, 0, len(relPaths))
+	seen := map[string]bool{}
+	for _, p := range relPaths {
+		rel := filepath.ToSlash(strings.TrimPrefix(filepath.Clean("/"+p), "/"))
+		if rel == "" || strings.HasPrefix(rel, "../") {
+			return nil, fmt.Errorf("malformed resource path %q", p)
+		}
+		if seen[rel] {
+			return nil, fmt.Errorf("duplicate resource path %q in composition", rel)
+		}
+		seen[rel] = true
+		abs := filepath.Join(root, filepath.FromSlash(rel))
+		st, err := os.Stat(abs)
+		if err != nil {
+			return nil, fmt.Errorf("resource %s: %w", rel, err)
+		}
+		if st.IsDir() {
+			return nil, fmt.Errorf("resource %s is a directory, not a manifest", rel)
+		}
+		if composition.KindForPath(rel) == "" {
+			return nil, fmt.Errorf("resource %s is not under a recognised kind root (vm/, lxc/, iso/, ctt/)", rel)
+		}
+		files = append(files, rel)
+	}
+	sortStrings(files)
+
+	byRef := map[schema.Ref]schema.Resource{}
+	seenID := map[string]schema.Ref{} // "node:vmid" for PVE id-space collisions
+	var order []schema.Ref
+
+	for _, rel := range files {
+		docs, err := readDocs(filepath.Join(root, rel))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rel, err)
+		}
+		for i, doc := range docs {
+			res, err := newResource(doc)
+			if err != nil {
+				return nil, fmt.Errorf("%s (document %d): %w", rel, i, err)
+			}
+			if err := res.Validate(); err != nil {
+				return nil, fmt.Errorf("%s (document %d): %w", rel, i, err)
+			}
+			ref := res.Ref()
+			if dup, ok := byRef[ref]; ok {
+				return nil, fmt.Errorf("%s (document %d): duplicate resource %s (%s also defines it)", rel, i, ref, kindName(dup))
+			}
+			// PVE id space: VMs and LXCs share one numeric id per node.
+			// Cluster-scoped by construction: the file set is this
+			// cluster's, so the same vmid on another cluster never
+			// collides here.
+			if id := res.ID(); id > 0 {
+				key := res.Node() + ":" + itoa(id)
+				if owner, dup := seenID[key]; dup {
+					return nil, fmt.Errorf("%s (document %d): PVE id %d on node %q is claimed by both %s and %s",
+						rel, i, id, res.Node(), owner, ref)
+				}
+				seenID[key] = ref
+			}
+			byRef[ref] = res
+			order = append(order, ref)
+		}
+	}
+
+	idx := &Index{byRef: byRef, order: order, files: files, root: root}
+	if err := idx.checkDeps(); err != nil {
+		return nil, err
+	}
+	return idx, nil
+}
 
 // --- walk + decode ---
 

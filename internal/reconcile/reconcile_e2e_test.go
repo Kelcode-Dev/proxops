@@ -15,15 +15,21 @@
 package reconcile_test
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"gopkg.in/yaml.v3"
 
 	"github.com/GizzmoShifu/proxmox-operator/internal/exec"
 	"github.com/GizzmoShifu/proxmox-operator/internal/gitx"
@@ -35,17 +41,30 @@ import (
 	"github.com/GizzmoShifu/proxmox-operator/internal/statusx"
 )
 
-// node is the PVE node name used throughout (mock is a single-node cluster in
-// these tests).
-const node = "pve01"
-
-// apiToken is the accepted PVEAPIToken value.
-const apiToken = "root@pam!pveconform=deadbeef"
+const e2eCluster = "default"
 
 // newGitRepo initialises a git work-tree at dir with the supplied files
 // committed on branch main, and returns the dir path.
+//
+// M8: fixtures written in the legacy "vm.yaml"-style top level are
+// relocated to the multi-cluster layout (<kind>/default/... plus
+// clusters/default/resources.yaml) so the reconciler's BuildClusterIndex
+// path is exercised. Files already under a directory (clusters/...,
+// vm/..., ...) are written through verbatim.
 func newGitRepo(t *testing.T, dir string, files map[string]string) {
 	t.Helper()
+	// If the caller already built an M8 multi-cluster tree (any key under
+	// "clusters/"), write it verbatim: no relocation.
+	hasClusters := false
+	for k := range files {
+		if strings.HasPrefix(k, "clusters/") {
+			hasClusters = true
+			break
+		}
+	}
+	if !hasClusters {
+		files = relocateForM8(t, files, e2eCluster)
+	}
 	rep, err := git.PlainInit(dir, false)
 	if err != nil {
 		t.Fatalf("git init: %v", err)
@@ -65,7 +84,7 @@ func newGitRepo(t *testing.T, dir string, files map[string]string) {
 		t.Fatalf("worktree: %v", werr)
 	}
 	for name, content := range keepMap {
-		p := filepath.Join(dir, name)
+		p := filepath.Join(dir, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -86,6 +105,142 @@ func newGitRepo(t *testing.T, dir string, files map[string]string) {
 		t.Fatalf("git checkout main: %v", err)
 	}
 }
+
+// relocateForM8 rewrites legacy top-level manifest fixtures into the M8
+// multi-cluster layout for the harness cluster. Top-level .yaml files that
+// hold one or more pveconform manifests become <kind>/<cluster>/<name>.yaml
+// files; a clusters/<cluster>/resources.yaml listing the result is emitted.
+// Non-manifest files (.keep, README) and already-structured paths pass
+// through unchanged.
+func relocateForM8(t *testing.T, files map[string]string, cluster string) map[string]string {
+	t.Helper()
+	out := map[string]string{
+		fmt.Sprintf("clusters/%s/resources.yaml", cluster): "", // filled below
+	}
+	var rels []string
+	kindDir := map[schema.Kind]string{
+		schema.KindVM:         "vm",
+		schema.KindLXC:        "lxc",
+		schema.KindISO:        "iso",
+		schema.KindCTTemplate: "ctt",
+	}
+	used := map[string]bool{}
+
+	for key, content := range files {
+		if strings.Contains(key, "/") || !strings.HasSuffix(key, ".yaml") && !strings.HasSuffix(key, ".yml") {
+			out[key] = content
+			continue
+		}
+		docs, derr := splitDocs(content)
+		if derr != nil {
+			out[key] = content
+			continue
+		}
+		for i, doc := range docs {
+			apiVer := yamlString(doc, "apiVersion")
+			if apiVer != schema.APIVersion {
+				continue
+			}
+			kindStr := yamlString(doc, "kind")
+			kind, kerr := schema.ParseKind(kindStr)
+			if kerr != nil {
+				out[key] = content
+				continue
+			}
+			name := yamlString(doc["metadata"].(map[string]any), "name")
+			if strings.TrimSpace(name) == "" {
+				name = strings.TrimSuffix(key, filepath.Ext(key))
+			}
+			name = m8Sanitize(name)
+			path := kindDir[kind] + "/" + cluster + "/" + name + ".yaml"
+			for used[path] {
+				name = name + "-x"
+				path = kindDir[kind] + "/" + cluster + "/" + name + ".yaml"
+			}
+			used[path] = true
+			_ = i
+			yb, merr := yaml.Marshal(doc)
+			if merr != nil {
+				t.Fatalf("marshal relocated doc: %v", merr)
+			}
+			out[path] = string(yb)
+			rels = append(rels, "../../"+path)
+		}
+	}
+	sort.Strings(rels)
+	var b bytes.Buffer
+	b.WriteString("resources:\n")
+	if len(rels) == 0 {
+		b.WriteString("  []\n")
+	} else {
+		for _, r := range rels {
+			fmt.Fprintf(&b, "  - %s\n", r)
+		}
+	}
+	out[fmt.Sprintf("clusters/%s/resources.yaml", cluster)] = b.String()
+	return out
+}
+
+func yamlString(v any, key string) string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if s, ok := m[key].(string); ok {
+		return s
+	}
+	return ""
+}
+
+// splitDocs decodes a multi-document YAML string into raw maps.
+func splitDocs(content string) ([]map[string]any, error) {
+	var docs []map[string]any
+	dec := yaml.NewDecoder(strings.NewReader(content))
+	for {
+		var doc map[string]any
+		err := dec.Decode(&doc)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if doc == nil {
+			continue
+		}
+		docs = append(docs, doc)
+	}
+	return docs, nil
+}
+
+// m8Sanitize collapses a name to a lowercase alnum + '-' dns label.
+func m8Sanitize(s string) string {
+	var b strings.Builder
+	prevDash := true
+	for _, c := range strings.ToLower(s) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			b.WriteByte(byte(c))
+			prevDash = false
+			continue
+		}
+		if !prevDash && b.Len() > 0 {
+			b.WriteByte('-')
+		}
+		prevDash = true
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		out = "unnamed"
+	}
+	return out
+}
+
+// node is the PVE node name used throughout (mock is a single-node cluster in
+// these tests).
+const node = "pve01"
+
+// apiToken is the accepted PVEAPIToken value.
+const apiToken = "root@pam!pveconform=deadbeef"
 
 // harness wires gitx(local) + mock PVE into a Reconciler.
 type harness struct {
@@ -158,24 +313,30 @@ func newHarness(t *testing.T, gitFiles map[string]string, budget int) *harness {
 
 	store := statusx.New()
 
+	executor := exec.New(pve, 30*time.Second, 2*time.Millisecond, store, log)
+	executor.SetCluster(e2eCluster)
 	rec, err := reconcile.New(reconcile.Options{
-		PVE:      pve,
-		Fetcher:  src,
-		Store:    store,
-		Budget:   plan.Budget{Prune: budget},
-		Executor: exec.New(pve, 30*time.Second, 2*time.Millisecond, store, log),
-		Log:      log,
+		PVE:                pve,
+		Fetcher:            src,
+		Store:              store,
+		Budget:             plan.Budget{Prune: budget},
+		Executor:           executor,
+		Cluster:            e2eCluster,
+		ConfiguredClusters: []string{e2eCluster},
+		Log:                log,
 	})
 	if err != nil {
 		t.Fatalf("reconcile.New(apply): %v", err)
 	}
 	dry, err := reconcile.New(reconcile.Options{
-		PVE:      pve,
-		Fetcher:  src,
-		Store:    store,
-		Budget:   plan.Budget{Prune: budget},
-		Executor: nil, // read-only
-		Log:      log,
+		PVE:                pve,
+		Fetcher:            src,
+		Store:              store,
+		Budget:             plan.Budget{Prune: budget},
+		Executor:           nil, // read-only
+		Cluster:            e2eCluster,
+		ConfiguredClusters: []string{e2eCluster},
+		Log:                log,
 	})
 	if err != nil {
 		t.Fatalf("reconcile.New(dry): %v", err)

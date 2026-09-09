@@ -47,13 +47,23 @@ type Reconciler struct {
 	Fetcher Fetcher
 	Budget  plan.Budget
 	Store   *statusx.Store
+	// Cluster is the pveconform cluster name this reconciler owns. It is
+	// part of every statusx.Object written so a multi-cluster agent keeps
+	// per-cluster records in one store.
+	Cluster string
 	// NodeAllowlist, when non-empty, restricts which PVE node names the
 	// agent will reconcile against. A manifest whose spec.node is not in
 	// this list aborts the cycle (fail-closed) with a clear message.
-	// This is the runtime enforcement of the pve.nodes config item —
-	// config.Validate() checks the shape only.
+	// This is the runtime enforcement of the per-cluster node boundary —
+	// config.Validate() checks the shape only. Every planner decision
+	// (read, write, prune candidate) is scoped to this allowlist.
 	NodeAllowlist []string
-	log           *slog.Logger
+	// ConfiguredClusters is the full set of cluster names present in
+	// pve.clusters of the validated config. Needed by BuildClusterIndex
+	// to cross-check the composition against the endpoint list (a
+	// composition with no configured endpoint fails closed).
+	ConfiguredClusters []string
+	log                *slog.Logger
 
 	exec         *exec.Executor // nil ⇒ dry-run
 	lastGood     *parse.Index
@@ -68,8 +78,12 @@ type Options struct {
 	Store         *statusx.Store
 	Budget        plan.Budget
 	Executor      *exec.Executor // nil = dry-run
+	Cluster       string
 	NodeAllowlist []string
-	Log           *slog.Logger
+	// ConfiguredClusters is the full pve.clusters key set (for the
+	// BuildClusterIndex cross-check).
+	ConfiguredClusters []string
+	Log                *slog.Logger
 }
 
 // New builds a Reconciler.
@@ -83,14 +97,25 @@ func New(o Options) (*Reconciler, error) {
 	if o.Log == nil {
 		o.Log = slog.Default()
 	}
+	if o.Cluster == "" {
+		// Legacy single-cluster test harnesses construct a reconciler
+		// without a cluster name; pin a valid identity so
+		// BuildClusterIndex (and the composition cross-check) work.
+		o.Cluster = "default"
+		if len(o.ConfiguredClusters) == 0 {
+			o.ConfiguredClusters = []string{"default"}
+		}
+	}
 	return &Reconciler{
-		PVE:           o.PVE,
-		Fetcher:       o.Fetcher,
-		Budget:        o.Budget,
-		Store:         o.Store,
-		NodeAllowlist: o.NodeAllowlist,
-		exec:          o.Executor,
-		log:           o.Log,
+		PVE:                o.PVE,
+		Fetcher:            o.Fetcher,
+		Budget:             o.Budget,
+		Store:              o.Store,
+		Cluster:            o.Cluster,
+		NodeAllowlist:      o.NodeAllowlist,
+		ConfiguredClusters: o.ConfiguredClusters,
+		exec:               o.Executor,
+		log:                o.Log,
 	}, nil
 }
 
@@ -152,9 +177,11 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 	res.Commit = r.Fetcher.RevString()
 	r.Store.BeginCycle(res.Commit, res.DesiredStale, r.exec == nil)
 
-	// (2) parse + validate. Parse errors are fail-closed for the whole cycle
-	// (a half-valid desired set could prune against missing objects).
-	idx, err := parse.BuildIndex(r.Fetcher.WorkDir())
+	// (2) parse + validate the cluster's composition. Parse errors are
+	// fail-closed for this cluster's cycle (a half-valid desired set could
+	// prune against missing objects on this cluster). Other clusters' cycles
+	// are independent: they parse their own compositions.
+	idx, err := parse.BuildClusterIndex(r.Fetcher.WorkDir(), r.Cluster, r.ConfiguredClusters)
 	if err != nil {
 		res.Aborted = true
 		res.AbortReason = "manifest parse error: " + err.Error()
@@ -182,8 +209,10 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 		return res, nil, nil
 	}
 
-	// (3) load live PVE inventory + ISO presence.
-	live, err := plan.LoadLive(ctx, r.PVE, idx.List())
+	// (3) load live PVE inventory + ISO presence. scoped to this cluster's
+	// node allowlist: objects on other nodes are not read, not counted,
+	// and never become prune candidates for THIS cluster.
+	live, err := plan.LoadLive(ctx, r.PVE, idx.List(), r.NodeAllowlist)
 	if err != nil {
 		res.Aborted = true
 		res.AbortReason = "pve inventory read failed: " + err.Error()
@@ -197,14 +226,15 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 	// (4) plan (pure).
 	levels := idx.Levels()
 	pl, err := plan.PlanActions(ctx, idx.List(), live, plan.PlanOptions{
-		Budget: r.Budget,
-		Levels: func(ref schema.Ref) int {
+		Budget:        r.Budget,
+		Levels:        func(ref schema.Ref) int {
 			if lvl, ok := levels[ref]; ok {
 				return lvl
 			}
 			return 0
 		},
-		Edges: idx.EdgesFor,
+		Edges:         idx.EdgesFor,
+		NodeAllowlist: r.NodeAllowlist,
 	})
 	if err != nil {
 		res.Aborted = true
@@ -253,12 +283,12 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 			if !kindNodeID[key] {
 				// No planned write -> already converged (or will confirm soon).
 				r.Store.SetObject(&statusx.Object{
-					Kind: d.Ref().Kind, Name: name, Node: d.Node(), ID: d.ID(),
+					Cluster: r.Cluster, Kind: d.Ref().Kind, Name: name, Node: d.Node(), ID: d.ID(),
 					State: statusx.Converged,
 				})
 			} else {
 				r.Store.SetObject(&statusx.Object{
-					Kind: d.Ref().Kind, Name: name, Node: d.Node(), ID: d.ID(),
+					Cluster: r.Cluster, Kind: d.Ref().Kind, Name: name, Node: d.Node(), ID: d.ID(),
 					State: statusx.Drift,
 				})
 			}
@@ -271,7 +301,7 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 		metrics.AnomaliesTotal.WithLabelValues("live_only_slot").Inc()
 		r.Store.BumpAnomaly()
 		r.Store.SetObject(&statusx.Object{
-			Kind: an.Kind, Name: an.Name, Node: an.Node, ID: an.ID,
+			Cluster: r.Cluster, Kind: an.Kind, Name: an.Name, Node: an.Node, ID: an.ID,
 			State: statusx.Anomalous, LastAction: string(an.What),
 			LastError: an.Reason,
 		})
@@ -375,8 +405,8 @@ func (r *Reconciler) checkNodeAllowlist(resources []schema.Resource) error {
 	for _, res := range resources {
 		for _, node := range res.Nodes() {
 			if node != "" && !allowed[node] {
-				return fmt.Errorf("%s references node %q which is not in pve.nodes (allowed: %v)",
-					res.Ref().String(), node, r.NodeAllowlist)
+				return fmt.Errorf("%s references node %q which is not in pve.clusters.%s.nodes (allowed: %v)",
+					res.Ref().String(), node, r.Cluster, r.NodeAllowlist)
 			}
 		}
 	}

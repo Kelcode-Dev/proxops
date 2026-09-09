@@ -52,16 +52,20 @@ func newAllowlistHarness(t *testing.T, manifest string, allowlist []string) *rec
 		t.Fatal(err)
 	}
 	store := statusx.New()
+	executor := exec.New(pve, 5*time.Second, 2*time.Millisecond, store, log)
+	executor.SetCluster(e2eCluster)
 	// Apply-mode so the executor runs; we only care about the abort
 	// reason, which happens before any action.
 	r, err := reconcile.New(reconcile.Options{
-		PVE:           pve,
-		Fetcher:       src,
-		Store:         store,
-		Budget:        plan.Budget{Prune: 3},
-		Executor:      exec.New(pve, 5*time.Second, 2*time.Millisecond, store, log),
-		NodeAllowlist: allowlist,
-		Log:           log,
+		PVE:                pve,
+		Fetcher:            src,
+		Store:              store,
+		Budget:             plan.Budget{Prune: 3},
+		Executor:           executor,
+		Cluster:            e2eCluster,
+		NodeAllowlist:      allowlist,
+		ConfiguredClusters: []string{e2eCluster},
+		Log:                log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -99,8 +103,8 @@ spec:
 	if !res.Aborted {
 		t.Fatalf("expected Aborted=true")
 	}
-	if !containsStr(res.AbortReason, "not-in-list") || !containsStr(res.AbortReason, "pve.nodes") {
-		t.Fatalf("AbortReason = %q; want it to name the unknown node and pve.nodes", res.AbortReason)
+	if !containsStr(res.AbortReason, "not-in-list") || !containsStr(res.AbortReason, "pve.clusters.") {
+		t.Fatalf("AbortReason = %q; want it to name the unknown node and pve.clusters.<name>.nodes", res.AbortReason)
 	}
 }
 

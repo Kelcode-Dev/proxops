@@ -1,25 +1,39 @@
-# pveconform — GitOps reconciler for Proxmox VE
+# pveconform — multi-cluster GitOps reconciler for Proxmox VE
 
-`pveconform` continuously reconciles a group of Proxmox VE nodes to the state
-declared in a git repository. **Git is the source of truth**: the agent polls
-(or is pointed at) a git work tree, parses pveconform manifests, diffs them
-against the live PVE API, and converges PVE to the desired state — idempotently,
-serially, and with explicit safety rails on deletion.
+`pveconform` continuously reconciles one or more Proxmox VE clusters to the
+state declared in a git repository. **Git is the source of truth**: the agent
+polls (or is pointed at) a git work tree, discovers every
+`clusters/<name>/resources.yaml` composition, parses that cluster's pveconform
+manifests, diffs them against the live PVE API on that cluster's own endpoint,
+and converges PVE to the desired state — idempotently, serially per cluster,
+and with explicit safety rails on deletion.
 
-> Not a Kubernetes operator. One agent process ("cluster-wide") talks to the
-> PVE API over HTTPS; each manifest pins the target node with `spec.node`.
-> No Terraform, no state files: the live PVE cluster IS the state, re-read
-> every cycle.
+> Not a Kubernetes operator, not Kustomize. One agent process reconciles
+> multiple PVE clusters; each cluster has its own PVE endpoint + node
+> allowlist, and each manifest is owned by exactly the cluster(s) whose
+> `resources.yaml` lists its file. No Terraform, no state files: the live
+> PVE cluster IS the state, re-read every cycle.
 
-## MVP resource kinds
+## Resource kinds
 
 | Kind | PVE object | Identity | Notes |
 |---|---|---|---|
-| `VM` | qemu VM | `(node, vmid)` | pinned `spec.vmid`; disks, networks, CPU, memory, power state |
-| `LXC` | container | `(node, vmid)` | pinned `spec.vmid`; root FS, networks, power state |
-| `CTTemplate` | template CT | `(node, vmid)` | created by PVE clone from `spec.source` + mark-template; re-templates on drift |
-| `ISO` | ISO on storage | `(node, storage, filename)` | PVE-side download from `spec.url`; no PVE id; never pruned in MVP |
+| `VM` | qemu VM | `(node, vmid)` | Fixed `spec.vmid`; disks, networks, CPU, memory, hardware (bios/machine/EFI/cloud-init/TPM/serial/dcdrom), options, power state |
+| `LXC` | container | `(node, vmid)` | Fixed `spec.vmid`; root FS (`spec.root`), optional mount points (`mp*`), template ref (`spec.template`), networks, power state |
+| `CTTemplate` | downloadable PVE vztmpl pool file | no PVE id; PVE identity `(node, storage, filename)` | ISO- and template-like: PVE storage artifact pveconform DOWNLOADS from `spec.url` when missing on a node. Never pruned. |
+| `ISO` | ISO on ISO storage pool | no PVE id; PVE identity `(node, storage, filename)` | Same artifact shape as CTTemplate but content=`iso`. Never pruned. |
 
+Since M8 the manifest tree is a multi-cluster GitOps repository
+(see SCHEMA.md § M8 repository layout):
+
+```
+clusters/<cluster>/resources.yaml   # what <cluster> consumes (explicit list)
+<kind>/{base|<cluster>}/...yaml     # resource definitions (kind ∈ vm, lxc, iso, ctt)
+```
+
+A resource file is reconciled by exactly the cluster(s) whose composition
+lists it. Bases are shared by reference; cluster-specific files live under
+`<kind>/<cluster>/`.
 ## Core guarantees
 
 - **Safe deletion** — the agent only deletes PVE objects tagged `pveconform`
@@ -34,13 +48,26 @@ serially, and with explicit safety rails on deletion.
   (last-good tree kept for reads); PVE inventory read failures abort the
   cycle; ISO downloads are skipped when presence is unreadable; the agent
   never force-destroys a running object (stop first).
-- **Explicit** — `diff` / `--dry-run` report the full would-be plan,
-  including would-be deletes, without writing anything. `adopt` scaffolds
-  manifests for existing PVE objects instead of delete-then-create.- **One PVE endpoint** — a single `pve.base-url` (e.g.
-  `https://pve-dev-01.example.invalid:8006`) serves every request. Because PVE
-  exposes its full API on each node, the PVE node name (e.g. `pve-dev-01` in
-  `spec.node`) is carried only in the request path, never in the host. This
-  works even when a node name is not a resolvable DNS hostname.
+- **Explicit** — `diff` / `--dry-run` report the full would-be plan per
+  cluster, including would-be deletes, without writing anything.
+- **Multi-cluster fail-closed** — every cluster has its own PVE endpoint and
+  its own node allowlist (config `pve.clusters.<name>`). The allowlist is
+  the cluster boundary: a resource's `spec.node` must be in the list for
+  its composition, otherwise the cluster's cycle aborts before any PVE
+  call. Unknown cluster names (in git but not in config, or the reverse)
+  fail closed. Prune candidates are limited to the cluster's allowlist,
+  so one cluster can never delete another's objects.
+- **One PVE endpoint per cluster** — a cluster's `base-url` serves every
+  PVE request *for that cluster*. Because PVE exposes its full API on
+  each node in a cluster, the PVE node name (e.g. `pve-dev-01` in
+  `spec.node`) is carried only in the request path, never in the host.
+  This works even when a node name is not a resolvable DNS hostname.
+  (Two clusters sharing one endpoint is refused at config validation.)
+- **Adopt = PVE → YAML (read-only)** — `pveconform adopt --cluster
+  <name>` reverse-engineers live PVE objects into pveconform manifests
+  under `<kind>/<cluster>/`, without ever calling POST/PUT/DELETE on PVE
+  (the run asserts zero PVE writes). Unsupported PVE config is surfaced
+  as explicit `gap`/`INCOMPLETE` entries; see docs/GAPS.md.
 ## Layout
 
 ```
@@ -59,7 +86,11 @@ internal/exec/         serial executor: applies actions, awaits task UPIDs,
 internal/statusx/      convergence store (exposed on /status)
 internal/server/       /healthz /metrics /status
 internal/reconcile/    one cycle: git fetch -> parse -> load live -> plan -> execute
-internal/app/          composition root; watch loop; dry/apply dual reconcilers
+internal/adopt/        PVE -> pveconform YAML (read-only; cluster-scoped;
+                       gap reporting)
+internal/composition/  M8 GitOps boundary: discover + validate
+                       clusters/*/resources.yaml
+internal/app/          composition root; watch loop; dry/apply per cluster
 internal/config/       YAML config + env-var credential overlay
 docs/                  ARCHITECTURE, SCHEMA, OPERATIONS
 examples/              ready-to-adapt manifest sets
@@ -81,9 +112,17 @@ go build -o pveconform ./cmd/pveconform
 # 4. convergence table
 ./pveconform status --config config/pveconform.yaml
 
-# 5. daemon mode (continuous watch)
+# 5. daemon mode (continuous watch — all clusters in sorted-name order)
 ./pveconform run --config config/pveconform.yaml
+
+# 6. reverse-engineer live PVE objects into pveconform YAML (read-only)
+./pveconform adopt --cluster conformance-dev --config config/pveconform.yaml
 ```
+
+`config/pveconform.yaml` carries **one or more named PVE clusters**
+(`pve.clusters.<name>.{base-url,nodes}`). Every command above processes all
+clusters in deterministic order, except `adopt` which requires one explicit
+`--cluster`.
 
 Credentials (PVE API token, PVE password, git token) are read **only from the
 environment** — never store them in YAML or pass them on the command line:
@@ -111,3 +150,5 @@ on your ISO storage for the ISO kind), then set
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — deployment (systemd),
   observability (/healthz /metrics /status), operations (adopt, prune budget,
   anomaly handling, air-gapped local mode)
+- [docs/GAPS.md](docs/GAPS.md) — living compatibility backlog: PVE config
+  pveconform does not model, with status/priority/notes per entry

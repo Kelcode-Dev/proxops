@@ -10,24 +10,52 @@ A small, realistic stack to try against a development PVE cluster
 3. Point pveconform at the repo (see `../config/pveconform.yaml`), then
    `pveconform diff` → `pveconform apply`.
 
-Files:
+The examples are arranged in pveconform's M8 multi-cluster GitOps shape:
 
-- `golden-base.ctt.yaml` — CTTemplate: a PVE `vztmpl` **storage artifact**
-  (downloaded from `spec.url` into `spec.filename` on every `spec.nodes`
-  pair). No numeric PVE id, no clone, no mark-template step. New LXCs are
-  bootstrapped from this file by PVE itself at create time (`ostemplate`);
-  pveconform owns only the storage artifact, never the LXC.
-- `base-iso.yaml` — ISO: ensures the Talos installer image is present on
-  `local` storage on every declared node, downloading from `spec.url` if it
-  is not. No numeric PVE id.
-- `cache-vm.yaml` — VM: Talos worker with pinned hardware, options, and the
-  three-state CD/DVD documented in its `hardware:` comment (unmanaged by
-  default so no ISO is required to create this VM).
-- `cache-ct.yaml` — LXC: cache container pinned to `pve01`. References
-  `golden-base` via `spec.template` — a structured `LXC → CTTemplate`
-  dependency is inferred; the planner downloads the file first.
-- `app-vm.depends-on.yaml` — VM: shows the optional `proxops/depends-on`
-  annotation escape hatch combined with a structured `cdrom.iso` reference.
+```
+clusters/
+  example/
+    resources.yaml      # the "example" cluster's composition (NOT a
+                        # Kustomization — pveconform has no Kustomize
+                        # semantics)
+iso/
+  base/
+    base-iso.yaml       # reusable BASE ISO: a PVE `iso` storage artifact
+ctt/
+  base/
+    golden-base.yaml    # reusable BASE CTTemplate: a PVE `vztmpl` storage
+                        # artifact (downloadable, no numeric PVE id, no
+                        # clone, no mark-template step; LXCs are
+                        # bootstrapped from it by PVE at create time via
+                        # `ostemplate`)
+vm/
+  example/
+    talos-worker-01.yaml  # cluster-specific VM: Talos worker with pinned
+                          # hardware, options, and the three-state CD/DVD
+                          # documented in its `hardware:` comment
+    app-vm.yaml           # cluster-specific VM: shows the optional
+                          # `proxops/depends-on` annotation escape
+                          # hatch combined with a structured `cdrom.iso`
+                          # reference
+lxc/
+  example/
+    cache-01.yaml         # cluster-specific LXC: cache container pinned to
+                          # pve01; references `golden-base` via
+                          # `spec.template` — a structured `LXC → CTTemplate`
+                          # dependency is inferred; the planner downloads the
+                          # file first
+```
+
+- **base resources** under `<kind>/base/` are reusable: any cluster may list
+  the very same file in its `clusters/<cluster>/resources.yaml`, and the
+  file is not owned by any single cluster.
+- **cluster-specific resources** under `<kind>/<cluster>/` belong to that
+  cluster's composition; another cluster can only reference them if it lists
+  them explicitly.
+- **The cluster's config** lives at `clusters/<cluster>/config.yaml`; in M8
+  the pveconform process reads its PVE endpoints + credentials from the root
+  `.config.yaml` (see `config/pveconform.yaml` for the template). The GitOps
+  composition file `resources.yaml` is the per-cluster Git boundary.
   The parser merges both edge sets before the planner schedules creates.
 
 PVE id-space note: the kinds that DO carry a numeric PVE id (VM, LXC) share

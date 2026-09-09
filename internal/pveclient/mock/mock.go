@@ -51,6 +51,15 @@ type Server struct {
 	objs      map[string]map[int]VM                 // node -> id -> record
 	isos      map[string]map[string]map[string]bool // node -> storage -> filename
 	templates map[string]map[string]map[string]bool // node -> storage -> filename (vztmpl pool)
+	// lvmVols: node -> storage -> volid ("local-lvm:vm-100-disk-0") -> PVE
+	// data volume (size + PVE `content` label). Surfaces in the bare
+	// storage content listing, mirroring PVE's LVM content pool; adopt
+	// resolves LXC rootfs/mp sizes from it.
+	lvmVols map[string]map[string]map[string]lvmVol
+	// clusterNodes: pinned /cluster/nodes list (SetClusterNodes). When nil,
+	// the mock derives the list from object placements (clusterNodesAuto).
+	clusterNodes     []string
+	clusterNodesAuto []string
 	tasks     map[string]*task
 	taskSeq   int
 
@@ -66,6 +75,12 @@ type Server struct {
 
 type task struct{ ticks int }
 
+// lvmVol is one PVE data volume on a storage pool.
+type lvmVol struct {
+	Size    int64
+	Content string // PVE `content` label: rootdir | images | ...
+}
+
 // New starts the mock and returns it.
 func New(cfg Config) *Server {
 	if cfg.TaskTicks <= 0 {
@@ -77,6 +92,7 @@ func New(cfg Config) *Server {
 		objs:      map[string]map[int]VM{},
 		isos:      map[string]map[string]map[string]bool{},
 		templates: map[string]map[string]map[string]bool{},
+		lvmVols:   map[string]map[string]map[string]lvmVol{},
 		tasks:     map[string]*task{},
 	}
 	s.ts = httptest.NewServer(http.HandlerFunc(s.serve))
@@ -125,10 +141,61 @@ func (s *Server) PreloadCTTemplate(node string, cid int, cfg map[string]string) 
 	s.set(node, cid, "lxc", cfg, "stopped")
 }
 
+// PreloadLVMVolume records a PVE data volume (LVM CT rootfs/mp or generic
+// disk) on a node storage, so its size + PVE `content` label appear in the
+// bare storage content listing. Mirrors PVE's local-lvm content pool shape.
+func (s *Server) PreloadLVMVolume(node, storage, volid string, sizeBytes int64, content string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if content == "" {
+		content = "rootdir"
+	}
+	if s.lvmVols[node] == nil {
+		s.lvmVols[node] = map[string]map[string]lvmVol{}
+	}
+	if s.lvmVols[node][storage] == nil {
+		s.lvmVols[node][storage] = map[string]lvmVol{}
+	}
+	s.lvmVols[node][storage][volid] = lvmVol{Size: sizeBytes, Content: content}
+	s.addNodeLocked(node)
+}
+
+// SetClusterNodes pins the /cluster/nodes list served by the mock. When
+// unset, the mock derives the list from object placements.
+func (s *Server) SetClusterNodes(nodes ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clusterNodes = append([]string{}, nodes...)
+}
+
+// addNodeLocked records a node for the auto-derived /cluster/nodes list
+// (used only when SetClusterNodes has not pinned one). Caller holds lock.
+func (s *Server) addNodeLocked(node string) {
+	if s.clusterNodes != nil {
+		return
+	}
+	for _, n := range s.clusterNodesAuto {
+		if n == node {
+			return
+		}
+	}
+	s.clusterNodesAuto = append(s.clusterNodesAuto, node)
+}
+
+// nodeClusterNamesLocked returns the effective /cluster/nodes list.
+// Caller holds lock.
+func (s *Server) nodeClusterNamesLocked() []string {
+	if s.clusterNodes != nil {
+		return s.clusterNodes
+	}
+	return s.clusterNodesAuto
+}
+
 // PreloadISO adds an already-present ISO on a storage.
 func (s *Server) PreloadISO(node, storage, filename string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.addNodeLocked(node)
 	if s.isos[node] == nil {
 		s.isos[node] = map[string]map[string]bool{}
 	}
@@ -142,6 +209,7 @@ func (s *Server) PreloadISO(node, storage, filename string) {
 func (s *Server) PreloadTemplate(node, storage, filename string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.addNodeLocked(node)
 	if s.templates[node] == nil {
 		s.templates[node] = map[string]map[string]bool{}
 	}
@@ -160,6 +228,7 @@ func (s *Server) set(node string, id int, kind string, cfg map[string]string, st
 	if s.objs[node] == nil {
 		s.objs[node] = map[int]VM{}
 	}
+	s.addNodeLocked(node)
 	s.objs[node][id] = VM{ID: id, Kind: kind, Config: cfg, Status: status}
 }
 
@@ -268,6 +337,20 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case "version":
 		writeOK(w, map[string]any{"version": "8.2", "release": "mock"})
 		return
+	case "cluster/nodes":
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.mu.Lock()
+		names := s.nodeClusterNamesLocked()
+		s.mu.Unlock()
+		out := make([]map[string]any, 0, len(names))
+		for _, n := range names {
+			out = append(out, map[string]any{"node": n, "status": "online"})
+		}
+		writeOK(w, out)
+		return
 	}
 
 	if !s.authorized(r) {
@@ -291,6 +374,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		switch kind {
 		case "qemu", "lxc":
+			// Bare listing: GET /nodes/{n}/qemu or /nodes/{n}/lxc.
+			// PVE's node object listing carries the object id under
+			// `vmid` for both kinds (confirmed on PVE 9.2 /nodes/{n}/lxc;
+			// the per-node id space is shared). adopt consumes it.
+			if rest2 == "" && r.Method == http.MethodGet {
+				s.handleObjectListing(w, node, kind)
+				return
+			}
 			s.objectRoute(w, r, node, kind, rest2)
 		case "tasks":
 			s.taskRoute(w, r, node, rest2)
@@ -381,6 +472,66 @@ func (s *Server) handleClusterResources(w http.ResponseWriter, r *http.Request) 
 			"status": rw.v.Status,
 			"name":   rw.v.Config["name"],
 			"tags":   rw.v.Config["tags"],
+		})
+	}
+	writeOK(w, out)
+}
+
+// handleObjectListing serves GET /nodes/{n}/qemu and GET /nodes/{n}/lxc.
+// Rows carry vmid/name/status/tags (PVE shape); sorted by vmid for stable
+// tests + adopt.
+func (s *Server) handleObjectListing(w http.ResponseWriter, node, kind string) {
+	s.mu.Lock()
+	ids := make([]int, 0, len(s.objs[node]))
+	for id, v := range s.objs[node] {
+		if v.Kind == kind {
+			ids = append(ids, id)
+		}
+	}
+	sort.Ints(ids)
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		v := s.objs[node][id]
+		out = append(out, map[string]any{
+			"vmid":   id,
+			"name":   v.Config["name"],
+			"status": v.Status,
+			"tags":   v.Config["tags"],
+		})
+	}
+	s.mu.Unlock()
+	writeOK(w, out)
+}
+
+// handleNodeStorageListings serves GET /nodes/{n}/storage (PVE's storage
+// backend listing keyed on `storage`, not `id`). Seed set: local +
+// local-lvm (standard PVE install), plus any storage ids artifacts,
+// templates, or LVM volumes have been preloaded on for that node.
+func (s *Server) handleNodeStorageListings(w http.ResponseWriter, node string) {
+	s.mu.Lock()
+	ids := map[string]bool{"local": true, "local-lvm": true}
+	for st := range s.isos[node] {
+		ids[st] = true
+	}
+	for st := range s.templates[node] {
+		ids[st] = true
+	}
+	for st := range s.lvmVols[node] {
+		ids[st] = true
+	}
+	s.mu.Unlock()
+	idList := make([]string, 0, len(ids))
+	for id := range ids {
+		idList = append(idList, id)
+	}
+	sort.Strings(idList)
+	out := make([]map[string]any, 0, len(idList))
+	for _, id := range idList {
+		out = append(out, map[string]any{
+			"storage": id,
+			"type":    "dir",
+			"status":  "ok",
+			"content": "iso,vztmpl,rootdir,images,backup",
 		})
 	}
 	writeOK(w, out)
@@ -744,6 +895,15 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, node string, id 
 //     PVE 8-era path;
 //     renamed upstream)
 func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest string) {
+	// GET /nodes/{n}/storage (no backend id) -> storage backend listing.
+	// This arrives when serve()'s split() finds no second segment, in which
+	// case rest == "" is handled there; the `after == "storage"` case
+	// covers requests of the form /nodes/{n}/storage that the serve()
+	// switch misclassifies.
+	if rest == "storage" && r.Method == http.MethodGet {
+		s.handleNodeStorageListings(w, node)
+		return
+	}
 	parts := strings.Split(rest, "/")
 	if len(parts) < 2 || parts[0] != "storage" {
 		writeErr(w, http.StatusNotFound, "expected /storage/{id}/...")
@@ -790,7 +950,26 @@ func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest
 				})
 			}
 		}
+		// LVM/disk volumes: PVE lists these under LVM storage with
+		// `content` of "rootdir" (CT allocation) or "images" (VM disks).
+		// adopt uses these to recover CT rootfs/mp sizes.
+		if vols := s.lvmVols[node][sid]; vols != nil {
+			for vid, v := range vols {
+				out = append(out, map[string]any{
+					"volid":   vid,
+					"content": v.Content,
+					"format":  "raw",
+					"size":    v.Size,
+				})
+			}
+		}
 		s.mu.Unlock()
+		// Deterministic order for content listings.
+		sort.Slice(out, func(i, j int) bool {
+			vi, _ := out[i]["volid"].(string)
+			vj, _ := out[j]["volid"].(string)
+			return vi < vj
+		})
 		writeOK(w, out)
 
 	// PVE 9.2 contract (probed live on conformance-dev): the artifact

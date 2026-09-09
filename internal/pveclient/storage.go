@@ -29,7 +29,9 @@ type ContentEntry struct {
 	Content string `json:"content"` // "iso" | "vztmpl" | "backup" | ...
 	Format  string `json:"format"`  // "iso" | "tzst" | "dir" | ...
 	Size    int64  `json:"size"`
-	CTime   int64  `json:"ctime"`
+	// Note: PVE also reports `ctime`, but its JSON type varies across PVE
+	// builds (string on some, number on others), and pveconform never uses
+	// it — omit it so the decode stays robust across PVE builds.
 }
 
 // HasISO is a backward-compat convenience that uses the bare content listing
@@ -103,10 +105,11 @@ func (s *Storage) Download(ctx context.Context, node, storage, downloadURL, file
 	return s.c.Do(ctx, http.MethodPost, node, path, p, nil)
 }
 
-// volidFilename extracts the filename from a PVE content volid.
-// Forms: "<storage>:iso/<filename>", "<storage>:vztmpl/<filename>",
-// "<storage>:backup/<path>", etc.
-func volidFilename(volid, content string) string {
+// VolidFilename extracts the filename from a PVE content volid. Forms:
+// "<storage>:iso/<filename>", "<storage>:vztmpl/<filename>",
+// "<storage>:backup/<path>", etc. Exported so adopt can reuse it when
+// reverse-engineering storage listings into pveconform artifact manifests.
+func VolidFilename(volid, content string) string {
 	if content != "" {
 		probe := ":" + content + "/"
 		if i := strings.Index(volid, probe); i >= 0 {
@@ -119,3 +122,6 @@ func volidFilename(volid, content string) string {
 	}
 	return volid
 }
+
+// volidFilename delegates to VolidFilename (in-package call sites).
+func volidFilename(volid, content string) string { return VolidFilename(volid, content) }

@@ -1,7 +1,22 @@
 # pveconform manifest schema
 
-Manifests are YAML documents, one or more per file; files may be grouped
-however you like (`*.yaml` / `*.yml` anywhere under the work tree).
+Manifests are YAML documents, one or more per file.
+
+## M8 repository layout
+
+Since M8 the manifest tree is organised around the **GitOps composition
+model** (see ARCHITECTURE.md → "Multi-cluster composition"):
+
+```
+clusters/<cluster>/resources.yaml   # what <cluster> consumes (explicit list)
+<kind>/{base|<cluster>}/....yaml    # resource definitions, kind in vm, lxc, iso, ctt
+```
+
+A manifest file is only reconciled if some cluster's
+`clusters/<cluster>/resources.yaml` lists it; the cluster boundary is the
+safety model. Resources placed directly under a kind root (the pre-M8
+`vm/foo.yaml` layout) are a **validation error** — pveconform never invents
+a default cluster.
 
 Every manifest has this envelope:
 
@@ -53,7 +68,13 @@ creates topologically so prerequisites finish **before** their dependants:
 Behaviour:
 
 - **Unknown references fail closed** — a `cdrom.iso`, `template`, or
-  `depends-on` target that is not defined in the tree aborts the whole cycle.
+  `depends-on` target that is not defined *in the cluster's own
+  composition* aborts that cluster's cycle. There is **no cross-cluster
+  dependency resolution**: a VM in cluster `A` referencing an ISO that
+  only cluster `B` lists is a parse error for `A`. (A dependency becomes
+  valid only when the target is in the referencing cluster's index — which
+  is always the case for a shared base, since both clusters list the same
+  file.)
 - **Cycles fail closed** — a dependency cycle aborts the whole cycle.
 - **Deterministic order** — creates are ordered by topological *level*
   (artifacts at level 0, the VM/LXC that reference them at level 1, and so
