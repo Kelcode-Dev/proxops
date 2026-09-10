@@ -298,21 +298,161 @@ represented in the adopted manifest rather than silently dropped. See
 docs/GAPS.md for the seeded gap backlog (the source of new entries is exactly
 this adopt report).
 
-### Future: per-cluster secrets (SOPS)
+### Per-cluster SOPS secrets (M9)
 
-`clusters/<cluster>/config.yaml` is the documented home for cluster-specific
-configuration. The intended future shape:
+`clusters/<cluster>/` carries this cluster's pveconform configuration AND its
+encrypted credentials:
 
 ```
-clusters/<cluster>/config.yaml       # cluster-specific non-secret config
-clusters/<cluster>/secrets.sops.yaml # SOPS-encrypted per-cluster credentials
-                                     # (decrypted at runtime; NEVER committed
-                                     #                              in cleartext)
+clusters/<cluster>/config.yaml        # cluster-local pveconform config (the
+                                      #   --config argument)
+clusters/<cluster>/secrets.sops.yaml  # SOPS/age-encrypted PVE + git creds
+clusters/<cluster>/resources.yaml     # M8 resource composition
 ```
 
-M8 does NOT implement SOPS: credentials remain shared across clusters in the
-process environment (`PVECONFORM_PVE_TOKEN*`). The composition model already
-expects one named cluster = one endpoint = one secret set.
+**Why SOPS + age?** Mozilla SOPS with the `age` backend encrypts each scalar
+individually and records the public age recipient inside the file's `sops:`
+metadata — so the *public* key is safe to commit, while the *private* key
+stays outside the repository. pveconform shells out to the `sops`
+executable (age backend) rather than linking the SOPS Go module: the module
+would pull ~160 transitive dependencies (multi-cloud KMS backends, gRPC,
+Azure/GCP/Ali/Huawei SDKs) into a standalone single-binary tool; the `sops`
+executable the operator already has for encrypting secrets is the deliberate,
+justified choice (task §16). A run that configures NO `secrets-file`
+never invokes sops at all.
+
+**age key handling (bootstrap, task §7/§8).** The private age key MUST live
+outside the GitOps repository. pveconform spawns `sops --decrypt` inheriting
+its own environment, so the operator supplies the key via the standard SOPS
+age identity mechanism:
+
+```sh
+export SOPS_AGE_KEY_FILE=$HOME/.local/share/pveconform/conformance-dev.age
+# SOPS_AGE_KEY / AGE_KEY_FILE work too; whatever sops' age backend reads.
+```
+
+Generate a disposable key (development only):
+
+```sh
+age-keygen -o ~/.local/share/pveconform/conformance-dev.age
+# the private key now lives ONLY in that file. Never commit it, never echo it.
+```
+
+**The encrypted repository must not contain the private decryption
+identity.** It may contain the public age recipient — inside
+`secrets.sops.yaml`'s `sops:` metadata. That is how authorized operators are
+added without re-encrypting. pveconform never reads, writes, or manages the
+private key; it only sets `sops`'s environment to what the operator already
+has.
+
+**Credentials precedence (per cluster, highest first, task §6):**
+
+```
+SOPS-decrypted value referenced by pve.clusters.<c>.secrets   (explicit cluster secret)
+  > PVECONFORM_PVE_* / PVECONFORM_GIT_TOKEN environment vars  (bootstrap)
+  > global pve.* fields in config.yaml                        (bootstrap)
+```
+
+When a cluster's `secrets-file` is configured, pveconform requires every
+field referenced under that cluster's `secrets:` block to be present and
+non-empty in the decrypted document — it does NOT silently fall back to
+env/YAML for that field (fail closed; an empty/missing SOPS secret cannot
+result in an unintended credential being used). For `pve.auth=token`, a
+SOPS cluster additionally suppresses `pve.token-value` for that cluster's
+PVE params (see the PVEParams precedence in ARCHITECTURE.md): a global
+pre-composed `PVECONFORM_PVE_TOKEN_VALUE` must never shadow a cluster's SOPS
+reference. Clusters with no `secrets-file` keep the M8 env/YAML behaviour
+exactly.
+
+**Create/update the conformance-dev secret** (the plaintext value must only
+exist in your editor + this shell session):
+
+```sh
+AGE_KEY=~/.local/share/pveconform/conformance-dev.age
+PUB=$(grep 'public key:' "$AGE_KEY" | cut -d' ' -f6)   # e.g. age1...
+# 1) write the PLAINTEXT into a scratch file OUTSIDE the git worktree:
+cat > /tmp/conformance-dev-secrets-plain.yaml <<'EOF'
+secrets:
+  pveconform-user: root@pam
+  pveconform-token-id: pveconform
+  pveconform-token: <PASTE PVE token uuid>
+  pveconform-password: ""
+  pve-git-token: <PASTE git fetch token>
+EOF
+# 2) encrypt against the public recipient (age backend only):
+sops --encrypt --age "$PUB" --input-type yaml --output-type yaml \
+  /tmp/conformance-dev-secrets-plain.yaml > \
+  clusters/conformance-dev/secrets.sops.yaml
+# 3) shred the plaintext and verify no cleartext leaked into the worktree:
+shred -u /tmp/conformance-dev-secrets-plain.yaml
+grep -Rn "<PASTE" clusters/ && echo "LEAK: plaintext still in worktree"
+git add clusters/conformance-dev/secrets.sops.yaml && git commit
+```
+
+For a production cluster / multi-operator: add each operator's public age
+key to the recipient list (`sops --encrypt --age "PUB1,PUB2"`). Rotating
+an operator = drop their key from the list, re-encrypt, commit. pveconform
+has no auto-rotation: re-encryption is the operator's step.
+
+**Run pveconform against the cluster-local config:**
+
+```sh
+git clone <gitops repo> && cd <gitops repo>
+export SOPS_AGE_KEY_FILE=~/.local/share/pveconform/conformance-dev.age   # outside the repo
+pveconform diff   --config clusters/conformance-dev/config.yaml
+pveconform apply  --config clusters/conformance-dev/config.yaml
+pveconform status --config clusters/conformance-dev/config.yaml
+pveconform run    --config clusters/conformance-dev/config.yaml   # daemon
+```
+
+`git.path: "."` in `config.yaml` means "the git worktree containing this
+config file": pveconform resolves it by walking up from the config path to
+the nearest `.git` marker. It never guesses; if the config file is copied
+out of a worktree it fails at Load with a clear error (task §5 "no implicit
+magic").
+
+**Security guarantees:**
+
+- Decryption happens in memory only: `sops --decrypt` stdout → parsed into
+  the in-memory `Config.SopsResolved` map → applied to PVE auth + git fetch
+  headers. pveconform writes no decrypted file to disk, ever.
+- Decrypted values appear in NONE of: `diff` / `apply` / `status` / `run`
+  stdout, the `/status` JSON, the `/metrics` labels or log output, error
+  messages, or the `Agent.Config()` accessor. (The in-memory SopsResolved
+  map is deliberately `json:"-" yaml:"-"`.)
+- Unencrypted `secrets.sops.yaml` (no sops metadata) → refused before any
+  PVE call. Malformed SOPS document, missing age identity, wrong age
+  identity → refused, with a clear message that names the *class* of
+  failure (and only the file path, never the secret).
+- The private age key file MUST live outside the git worktree.
+- The SOPS binary is only located/inherited when a cluster actually names a
+  `secrets-file` (task §16: a plain env-credential deployment never invokes
+  sops).
+
+**Limitations (deliberate, task §20):**
+
+- No automatic key or secret rotation: re-encryption is the operator's
+  step on key change (a recipient can be added and the SOPS file re-encrypted
+  without rotating the secret values, as long as the values haven't changed).
+- One SOPS file per cluster: `clusters/<cluster>/secrets-file` is a
+  path-resolved relative path from the config file's directory. Two
+  clusters can point at the same file if they genuinely share secrets;
+  pveconform will decrypt each reference exactly once per cluster.
+- The SOPS document is only read at agent startup; pveconform does not watch
+  the file for changes or poll it (re-reconcile = re-load the config with
+  `systemctl restart pveconform` or a new invocation). The same applies to
+  env credentials.
+- SOPS supports KMS/PGP/GCP/Azure/Huawei/Ali backends; pveconform uses
+  `age` only (task §2). The operator is responsible for keeping the age
+  key file available before the pveconform process starts.
+- No in-band audit log of SOPS decryption events (task §20 explicitly
+  excludes this). A pveconform log line will say "resolve SOPS for cluster
+  X" — that's all.
+
+**M8 compatibility:** configurations without `secrets-file` are byte-
+identical to M8 (env-over-YAML-over-defaults); pveconform does not even
+locate the sops binary during `Load` or `Validate` — only during
+`ResolveSOPS` at agent construction, and only for SOPS-referenced clusters.
 
 ## Runbook (typical incident)
 

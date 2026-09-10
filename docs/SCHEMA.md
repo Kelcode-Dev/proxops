@@ -12,6 +12,27 @@ clusters/<cluster>/resources.yaml   # what <cluster> consumes (explicit list)
 <kind>/{base|<cluster>}/....yaml    # resource definitions, kind in vm, lxc, iso, ctt
 ```
 
+Since M9 the cluster's pveconform **configuration** and **credentials**
+are committed cluster-locally in the same directory (see
+ARCHITECTURE.md → "M9 (SOPS-backed cluster configuration)"):
+
+```
+clusters/<cluster>/
+  config.yaml         # pveconform --config for THIS cluster (full app config
+                      #   scoped to one pve.clusters.<name> entry + SOPS
+                      #   reference). git.path: "." resolves to the worktree
+                      #   that contains this file.
+  secrets.sops.yaml   # SOPS/age-encrypted PVE + git credentials. Public age
+                      #   recipient in sops: metadata; private key OUTSIDE
+                      #   the repo (see OPERATIONS.md → "Per-cluster SOPS
+                      #   secrets (M9)").
+  resources.yaml      # M8 composition (unchanged)
+```
+
+Resource manifests (under `vm/`, `lxc/`, `iso/`, `ctt/`) do NOT carry
+credentials — a secret is never a spec field on a resource (task §14 "do
+not add secrets to VM/LXC/ISO/CTTemplate resource schemas").
+
 A manifest file is only reconciled if some cluster's
 `clusters/<cluster>/resources.yaml` lists it; the cluster boundary is the
 safety model. Resources placed directly under a kind root (the pre-M8

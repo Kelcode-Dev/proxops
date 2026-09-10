@@ -118,3 +118,74 @@ considered:
   Status: `deliberate`.
 - **HA resources, pools, users, roles, SDN**: out of the GitOps model. Status:
   `deliberate`.
+
+## M9 (SOPS-backed cluster configuration) — new gaps / deliberate limitations
+
+Entries added during the M9 implementation pass:
+
+- **External `sops` binary dependency (`internal/secrets`)**
+  - **Resource/area**: configuration layer
+  - **PVE configuration/API field**: n/a
+  - **Status**: `deliberate`
+  - **What is unsupported**: pveconform shells out to `sops --decrypt`
+    (age backend); it does NOT link the SOPS Go module. When a cluster
+    references `secrets-file`, `sops` + `age` MUST be on PATH on the host
+    pveconform runs on; otherwise `ErrSOPSBinaryMissing` is surfaced at
+    agent construction. No KMS or GCP/Azure/Ali/Huawei/PGP backends are
+    supported — only `age`.
+  - **Discovery source**: M9 design decision (task §16). The Go module
+    `github.com/getsops/sops/v3` would pull ~160 transitive deps; the SOPS
+    CLI is already mandatory on any host where SOPS-encrypted secrets are
+    managed (the operator encrypts with it). Documented in
+    `docs/OPERATIONS.md` § "Per-cluster SOPS secrets (M9)".
+
+- **SOPS identity (age private key) lifecycle / rotation**
+  - **Resource/area**: credentials
+  - **Status**: `planned` (out of M9 scope, task §20 "automatic key rotation"
+    and "automatic secret rotation" explicitly excluded)
+  - **What is unsupported**: pveconform does NOT rotate SOPS recipients.
+    Rotation is an operator workflow: add new recipient to SOPS command
+    line, re-encrypt the file, commit both. The private age key has no
+    built-in "grace period / revoke" — it is whatever the operator's
+    SOPS_AGE_KEY_FILE points at.
+  - **Discovery source**: task §16 "do not add automatic key rotation"
+    and task §20 (SCOPE CONTROL).
+
+- **No SOPS file watching / hot reload of credentials**
+  - **Resource/area**: runtime
+  - **Status**: `planned`
+  - **What is unsupported**: SOPS decryption happens once at agent
+    construction. A rotated PVE token in the SOPS file is not picked up
+    without a process restart. Same as M8 env-var credentials: the
+    operator's job is to `systemctl restart pveconform` after rotating.
+    `poll-interval` re-diffs git + PVE but does NOT re-decrypt secrets.
+  - **Discovery source**: M9 design decision; no reason to watch a
+    SOPS file during a reconcile cycle when the same behaviour applies
+    to env vars.
+
+- **SOPS `git-token` conflict handling**
+  - **Resource/area**: git source
+  - **Status**: `investigated`
+  - **What is unsupported**: If TWO cluster SOPS files both name
+    `git.token` keys that resolve to DIFFERENT values, pveconform fails
+    closed with "git token conflict" at agent construction. This is
+    deliberate: the pveconform git source is single, one worktree, one
+    fetch token — two different values would mean "clone two different
+    git repos" which is out of scope. When two clusters share the same
+    git token value, that value is used for all.
+  - **Discovery source**: M9 implementation of `app.EffectiveGitToken`.
+
+- **No per-cluster CA pinning via SOPS**
+  - **Resource/area**: TLS
+  - **Status**: `deliberate`
+  - **What is unsupported**: `pve.ca-file` is a per-pve level setting,
+    shared across clusters. To pin a different CA per cluster, the
+    operator must use M8 style (a global config that does not reference
+    SOPS for that cluster). SOPS does not (today) have a "ca-file"
+    credential field. If multi-CA pinning becomes necessary, add a
+    `PVECredentialKeys.CAFile` + SOPS `pve-ca-file` entry and resolve it
+    alongside the user/token fields.
+  - **Discovery source**: M9 design decision; task §20 "PVE Storage
+    resources (out of scope)" implies CA pinning is a TLS concern, not
+    a PVE API concern, and the M8 global CA is sufficient for most
+    deployments.

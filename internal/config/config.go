@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/GizzmoShifu/proxmox-operator/internal/secrets"
 )
 
 // AuthMethod selects how the agent authenticates against the PVE API.
@@ -39,6 +41,13 @@ type LogConfig struct {
 // The cluster NAME is the stable identifier shared by GitOps composition
 // (the clusters/<name>/ directory) and this configuration. It is NOT a PVE
 // node name — a cluster can span many PVE nodes (its Nodes allowlist).
+//
+// M9 (SOPS-backed cluster config): a cluster may declare a secrets-file
+// reference — a pointer at a SOPS/age-encrypted file that supplies THIS
+// cluster's PVE credentials. The decrypted values live in memory only
+// (see Config.SopsResolved), are never serialized, and never reach logs /
+// status / diff / metrics / errors (task §2). See PVECredentialReferences
+// for the task §3 "small, explicit" reference block.
 type PVECluster struct {
 	// BaseURL is the PVE API endpoint (scheme://host[:port]) the agent talks
 	// to for this cluster. PVE exposes the entire API on every node, so one
@@ -51,6 +60,86 @@ type PVECluster struct {
 	// closed before any PVE call — this is the per-cluster node boundary.
 	// When empty, no allowlist check is performed for that cluster.
 	Nodes []string `yaml:"nodes"`
+	// SecretsFile is the path to this cluster's SOPS-encrypted secret file.
+	// A relative path resolves against the DIRECTORY OF THE PVECONFORM
+	// CONFIG FILE, not the CWD (task §5 — same config works from any CWD).
+	// Empty means "this cluster does not use SOPS": the shared pve.-level
+	// bootstrap credentials + env overlay apply, as they did in M8.
+	//
+	// The SOPS file shape is flat under a top-level `secrets:` mapping:
+	//
+	//	secrets:
+	//	  pveconform-user: root@pam
+	//	  pveconform-token-id: pveconform
+	//	  pveconform-token: <the PVE API token value>
+	//	  pveconform-password: <only when the cluster's pve.auth=ticket>
+	//	  pveconform-git-token: <the git fetch token, if git.mode=url>
+	//
+	// The age recipient (public key) is recorded in the SOPS file's `sops:`
+	// metadata and may be committed (task §7 "the repository may contain the
+	// public age recipient configuration required to encrypt secrets");
+	// the age identity (PRIVATE key) MUST come from OUTSIDE the encrypted
+	// repository — the standard SOPS age identity mechanism on the
+	// pveconform host's process environment
+	// (SOPS_AGE_KEY_FILE / SOPS_AGE_KEY / AGE_KEY_FILE — task §7, §8).
+	// pveconform decrypts into memory only and never writes the plaintext
+	// to disk (task §2, §13).
+	SecretsFile string `yaml:"secrets-file"`
+	// Secrets references which decrypted SOPS keys carry which pveconform
+	// credential fields for this cluster. The reference shape is the
+	// "small, explicit" block (task §3 "a configuration concept such as...
+	// may be appropriate"):
+	//
+	//	secrets-file: secrets.sops.yaml
+	//	secrets:
+	//	  pve:
+	//	    user: pveconform-user
+	//	    token-id: pveconform-token-id
+	//	    token: pveconform-token
+	//	  git:
+	//	    token: pveconform-git-token
+	//
+	// When SecretsFile is set but the reference is missing for a field,
+	// pveconform falls back to the shared pve.-level bootstrap YAML/env
+	// value for that field. A field that IS referenced but has a
+	// missing/empty value in the SOPS file FAILS CLOSED — pveconform never
+	// silently substitutes a lower-precedence source for a field the
+	// operator asked SOPS to carry (task §6 "do not allow an empty/missing
+	// SOPS secret to silently result in an unintended credential being
+	// used").
+	Secrets PVECredRefs `yaml:"secrets"`
+}
+
+// PVECredRefs is the per-cluster reference block: which SOPS file keys
+// supply which pveconform credential fields. The shape is closed and
+// explicit (task §3, §14 "small, explicit secret format" — no template
+// language, no glob, no interpolation).
+type PVECredRefs struct {
+	// PVE names which decrypted SOPS keys carry which PVE credential
+	PVE PVESecretRefs `yaml:"pve"`
+	// Git names which decrypted SOPS key carries the git fetch token
+	Git GitSecretRefs `yaml:"git"`
+}
+
+// PVESecretRefs names the SOPS key for each PVE credential field. All
+// fields are optional; an empty string = "no SOPS reference for this
+// field, use bootstrap pve-level YAML/env value".
+type PVESecretRefs struct {
+	// User names the SOPS key for the PVE user id (token owner).
+	User string `yaml:"user"`
+	// TokenID names the SOPS key for the PVE API token id.
+	TokenID string `yaml:"token-id"`
+	// Token names the SOPS key for the PVE API token value (uuid).
+	Token string `yaml:"token"`
+	// Password names the SOPS key for the PVE user password
+	// (ticket auth only).
+	Password string `yaml:"password"`
+}
+
+// GitSecretRefs names the SOPS key for the git fetch token. Empty means
+// "no SOPS reference; use the shared git-level YAML/env value" (M8).
+type GitSecretRefs struct {
+	Token string `yaml:"token"`
 }
 
 // PVEConfig holds Proxmox connection settings.
@@ -144,6 +233,33 @@ type Config struct {
 	Rec     ReconcileConfig `yaml:"reconcile"`
 	Listen  string          `yaml:"listen"`   // HTTP endpoint for /healthz /metrics /status
 	DataDir string          `yaml:"data-dir"` // git cache, CA pinning; default ~/.local/share/pveconform
+
+	// SopsResolved holds the IN-MEMORY, decrypted SOPS secret values for
+	// every cluster that declared a SOPS reference. It is populated by
+	// Config.ResolveSOPS and consumed by PVEParamsFrom + the git source
+	// (in internal/app). It is intentionally tagged `json:"-"`: the
+	// values must never round-trip through JSON/YAML status surfaces (task
+	// §12 "plaintext secrets do not appear in status / metrics / normal
+	// CLI output"). Cluster isolation: cluster A's entry never affects
+	// cluster B's effective credentials (task §12). The values live only
+	// for the lifetime of this Config object: never written to disk, never
+	// logged (task §2).
+	SopsResolved map[string]SopsClusterSecrets `json:"-" yaml:"-"`
+}
+
+// SopsClusterSecrets holds the decrypted, in-memory PVE credentials for one
+// cluster, keyed by the PVE credential fields pveconform needs. The git
+// fetch token is shared (not per-cluster) because pveconform has a single
+// git source (URL mode) that serves every cluster.
+type SopsClusterSecrets struct {
+	User     string
+	TokenID  string
+	Token    string
+	Password string
+	GitToken string
+	// SourceFile records the SOPS file that produced these values. It is
+	// an on-disk path, not secret material. Used in error text only.
+	SourceFile string
 }
 
 // Defaults returns a Config with sensible default values. PVE cluster
@@ -162,11 +278,44 @@ func Defaults() *Config {
 
 // Load reads a YAML config file (optional) and merges it over defaults.
 // An empty path returns Defaults().
+//
+// Path resolution (M9):
+//   - relative `pve.clusters.<name>.secrets-file` paths resolve against
+//     the DIRECTORY OF THE PVECONFORM CONFIG FILE, not the CWD. Same
+//     cluster-local config → same SOPS file, regardless of where
+//     pveconform is invoked from (task §5, §18).
+//   - `git.path: "."` is a sentinel that resolves to the nearest `.git`
+//     ancestor of the config file's directory; the config path itself is
+//     canonicalised to absolute first so that CWD-relative `--config
+//     clusters/<name>/config.yaml` works. If no `.git` ancestor is found,
+//     Load fails closed: pveconform does not guess the git tree
+//     (task §5 "no implicit magic").
+//
+// Load does NOT decrypt anything. SOPS happens in Config.ResolveSOPS
+// (called by app.New after Load + OverlayFromEnv), so that hosts running
+// pveconform without SOPS credentials never invoke the sops binary
+// (task §16).
 func Load(path string) (*Config, error) {
 	c := Defaults()
 	if path == "" {
 		return c, nil
 	}
+
+	// M9: canonicalise the config path to absolute. This matters when
+	// `--config` is a CWD-relative path like
+	// `clusters/conformance-dev/config.yaml` from the repo root: otherwise
+	// the git.path "." walk-up + SOPS-file resolution operate on relative
+	// dirs and composition path checks (which compare absolute against
+	// absolute) misfire. The operator's CWD is the correct reference for a
+	// relative config path, so Abs() it once up front and keep going.
+	if !filepath.IsAbs(path) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve config path %s: %w", path, err)
+		}
+		path = abs
+	}
+
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -180,7 +329,150 @@ func Load(path string) (*Config, error) {
 	// `./~` directory under $PWD.
 	c.DataDir = expandTilde(c.DataDir)
 	c.PVE.CAFile = expandTilde(c.PVE.CAFile)
+
+	// M9: resolve per-cluster secrets-file paths. Relative paths are
+	// resolved against the DIRECTORY OF THE PVECONFORM CONFIG FILE. This
+	// keeps the GitOps layout self-contained: clusters/<name>/config.yaml
+	// + clusters/<name>/secrets.sops.yaml live side by side, and the
+	// agent's SOPS call is independent of process CWD.
+	if base := filepath.Dir(path); base != "" && base != "." {
+		for name, cl := range c.PVE.Clusters {
+			if cl.SecretsFile == "" {
+				continue
+			}
+			if !filepath.IsAbs(cl.SecretsFile) {
+				cl.SecretsFile = filepath.Join(base, filepath.Clean("./"+cl.SecretsFile))
+			}
+			c.PVE.Clusters[name] = cl
+		}
+	}
+
+	// M9: the git.path sentinel. "git.path: ." means "this pveconform config
+	// lives inside the GitOps repo; use the repo that contains this config
+	// file as the git work tree". Load walks upward from the config file's
+	// directory to the nearest .git marker. If no such ancestor exists, Load
+	// fails closed with a clear error: pveconform never silently picks a git
+	// tree for the operator (task §5: no implicit magic, no silent
+	// selection).
+	if c.Git.Path == "." {
+		if root := walkUpForGitRoot(filepath.Dir(path)); root != "" {
+			c.Git.Path = root
+		} else {
+			return nil, fmt.Errorf("git.path: \".\" was set in %s but no .git worktree was found in any ancestor directory; pveconform will not guess the git tree — cd into the GitOps repository and retry, or set an explicit git.path", path)
+		}
+	}
 	return c, nil
+}
+
+// walkUpForGitRoot finds the root of the git worktree that contains dir, by
+// walking upward until a `.git` entry (file or dir) appears. Returns "" when
+// no such root exists in any ancestor up to the filesystem root. The `.git`
+// marker is the standard git checkout indicator; a `.git` FILE is what git
+// submodules and clones-in-monorepos use, so both shapes are accepted.
+func walkUpForGitRoot(dir string) string {
+	if dir == "" || dir == "." {
+		return ""
+	}
+	cur := dir
+	for {
+		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+			return cur
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return ""
+		}
+		cur = parent
+	}
+}
+
+// ResolveSOPS decrypts every cluster's SOPS file (in memory) and stores the
+// values in c.SopsResolved. It is called by the CLI (buildAgent) and by
+// app.New AFTER config.Load, and BEFORE config.Validate (which needs to see
+// the resolved SOPS fields) — see the precedence documentation. The values
+// are never written to disk and never logged (task §2, §13).
+//
+// Behaviour (fail closed, task §6):
+//   - A cluster with no SecretsFile is skipped (bootstrap credentials
+//     apply; M8 behaviour).
+//   - A cluster whose named SOPS key is missing/empty in the decrypted
+//     file errors (pveconform never silently substitutes a lower-
+//     precedence source for a field the operator asked SOPS to carry).
+//   - An unencrypted/invalid SOPS file errors (secrets.ErrUnencryptedSecrets /
+//     secrets.ErrMalformedDocument).
+//   - A wrong/absent age identity errors (secrets.ErrNoIdentity / secrets.
+//     ErrIdentityMismatch).
+//
+// The SOPS age identity (private key) comes from OUTSIDE the encrypted
+// repository — the operator's process environment (SOPS_AGE_KEY_FILE / SOPS_
+// AGE_KEY / AGE_KEY_FILE). pveconform never sets or reads it itself
+// (task §8).
+func (c *Config) ResolveSOPS() error {
+	c.SopsResolved = map[string]SopsClusterSecrets{}
+	// Deterministic order: clusters sorted by name.
+	for _, name := range c.PVE.ClusterNames() {
+		cl := c.PVE.Clusters[name]
+		if cl.SecretsFile == "" {
+			continue
+		}
+		val, err := secrets.DecryptFile(cl.SecretsFile)
+		if err != nil {
+			return fmt.Errorf("cluster %s: SOPS decrypt %s: %w", name, cl.SecretsFile, err)
+		}
+		sc := SopsClusterSecrets{SourceFile: cl.SecretsFile}
+		if ref := cl.Secrets.PVE.User; ref != "" {
+			v, ok := val.Get(ref)
+			if !ok {
+				return sopsKeyMissingErr(name, cl.SecretsFile, ref, "pve.user")
+			}
+			sc.User = v
+		}
+		if ref := cl.Secrets.PVE.TokenID; ref != "" {
+			v, ok := val.Get(ref)
+			if !ok {
+				return sopsKeyMissingErr(name, cl.SecretsFile, ref, "pve.token-id")
+			}
+			sc.TokenID = v
+		}
+		if ref := cl.Secrets.PVE.Token; ref != "" {
+			v, ok := val.Get(ref)
+			if !ok {
+				return sopsKeyMissingErr(name, cl.SecretsFile, ref, "pve.token")
+			}
+			sc.Token = v
+		}
+		if ref := cl.Secrets.PVE.Password; ref != "" {
+			v, ok := val.Get(ref)
+			if !ok {
+				return sopsKeyMissingErr(name, cl.SecretsFile, ref, "pve.password")
+			}
+			sc.Password = v
+		}
+		if ref := cl.Secrets.Git.Token; ref != "" {
+			v, ok := val.Get(ref)
+			if !ok {
+				return sopsKeyMissingErr(name, cl.SecretsFile, ref, "git token")
+			}
+			sc.GitToken = v
+		}
+		c.SopsResolved[name] = sc
+	}
+	return nil
+}
+
+func sopsKeyMissingErr(cluster, file, key, field string) error {
+	return fmt.Errorf("cluster %s: SOPS file %s declares key %q for %s, but that key is missing or empty in the decrypted SOPS document; pveconform fails closed rather than falling back to a bootstrap credential for that field — add the key to the encrypted file or drop the reference from config.yaml",
+		cluster, shortenPath(file), key, field)
+}
+
+// shortenPath bounds a filesystem path to 80 chars for use in error text.
+// (config.go does not need full path truncation elsewhere; this helper
+// is deliberately local to keep error messages stable and scannable.)
+func shortenPath(p string) string {
+	if len(p) > 80 {
+		return p[:79] + "…"
+	}
+	return p
 }
 
 // OverlayFromEnv applies pveconform's credential-override env vars onto a
@@ -220,20 +512,37 @@ func OverlayFromEnv(c *Config) {
 
 // Validate checks the configuration for internal consistency and required
 // fields, reporting all problems at once.
+//
+// M9 (SOPS-aware): when a cluster supplies its PVE credentials via
+// SopsResolved (see Config.ResolveSOPS), the global pve.user + pve.token-id +
+// pve.token triple is NOT required in the YAML/env for that cluster. The
+// per-cluster effective-credential check happens at PVEParamsFrom time:
+// every constructed pveclient params MUST carry a composed credential,
+// which ValidateCreds (below) enforces for each cluster after resolution.
+// This is what lets the cluster-local GitOps config carry credentials that
+// have been encrypted with SOPS without ever appearing in the config YAML.
 func (c *Config) Validate() error {
 	var errs []string
 
 	switch c.PVE.Auth {
 	case AuthToken:
-		if c.PVE.User == "" {
-			errs = append(errs, "pve.user is required for token auth")
-		}
-		if c.PVE.TokenValue == "" {
-			if c.PVE.TokenID == "" {
-				errs = append(errs, "pve.token-id missing")
+		// Global pve.user/token-id/token are the BOOTSTRAP credentials.
+		// If at least one cluster resolves SOPS credentials, the bootstrap
+		// triple may be empty, but at least some cluster-level SOPS override
+		// must cover each of user/token-id/token — checked below.
+		// If NO cluster has SOPS, the M8 behaviour applies: bootstrap creds
+		// MUST be present.
+		if !c.sopsCoversCreds() {
+			if c.PVE.User == "" {
+				errs = append(errs, "pve.user is required for token auth")
 			}
-			if c.PVE.Token == "" {
-				errs = append(errs, "pve.token missing (set PVECONFORM_PVE_TOKEN)")
+			if c.PVE.TokenValue == "" {
+				if c.PVE.TokenID == "" {
+					errs = append(errs, "pve.token-id missing")
+				}
+				if c.PVE.Token == "" {
+					errs = append(errs, "pve.token missing (set PVECONFORM_PVE_TOKEN)")
+				}
 			}
 		}
 		if c.PVE.Password != "" {
@@ -241,14 +550,66 @@ func (c *Config) Validate() error {
 		}
 		c.PVE.Password = "" // never carry the unused secret
 	case AuthTicket:
-		if c.PVE.User == "" {
-			errs = append(errs, "pve.user is required for ticket auth")
-		}
-		if c.PVE.Password == "" {
-			errs = append(errs, "pve.password missing (set PVECONFORM_PVE_PASSWORD)")
+		if !c.sopsCoversCreds() {
+			if c.PVE.User == "" {
+				errs = append(errs, "pve.user is required for ticket auth")
+			}
+			if c.PVE.Password == "" {
+				errs = append(errs, "pve.password missing (set PVECONFORM_PVE_PASSWORD)")
+			}
 		}
 	default:
 		errs = append(errs, fmt.Sprintf("pve.auth must be %q or %q, got %q", AuthToken, AuthTicket, c.PVE.Auth))
+	}
+
+	// M9: per-cluster credential coverage, mirroring PVEParamsFrom exactly
+	// (so Validate rejects every shape that would build a PVE client without
+	// a usable credential). The "effective" credential for a cluster is:
+	//   - if ANY SOPS field resolved for it (hasSops): the global
+	//     TokenValue is DROPPED (never let a global composed credential
+	//     shadow a SOPS cluster), and user/token-id/token/password are
+	//     each the SOPS value when SOPS named one, else the global value;
+	//   - else (bootstrap cluster): the global user/token-id/token/password
+	//     + global TokenValue, exactly as M8.
+	for _, name := range c.PVE.ClusterNames() {
+		sc := c.SopsResolved[name]
+		hasSops := sc.User != "" || sc.TokenID != "" || sc.Token != "" || sc.Password != ""
+		eUser := c.PVE.User
+		if sc.User != "" {
+			eUser = sc.User
+		}
+		eTokID := c.PVE.TokenID
+		if sc.TokenID != "" {
+			eTokID = sc.TokenID
+		}
+		eTok := c.PVE.Token
+		if sc.Token != "" {
+			eTok = sc.Token
+		}
+		ePsw := c.PVE.Password
+		if sc.Password != "" {
+			ePsw = sc.Password
+		}
+		eVal := c.PVE.TokenValue
+		if hasSops {
+			eVal = ""
+		}
+		switch c.PVE.Auth {
+		case AuthToken:
+			if eUser == "" {
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE user after credential resolution (SOPS user reference + pve.user + PVECONFORM_PVE_USER all empty); pveconform fails closed", name))
+			}
+			if eVal == "" && (eTokID == "" || eTok == "") {
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE token after credential resolution (need a SOPS pve token reference, or pve.token-id+pve.token, or PVECONFORM_PVE_TOKEN_VALUE); pveconform fails closed", name))
+			}
+		case AuthTicket:
+			if eUser == "" {
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE user for ticket auth; pveconform fails closed", name))
+			}
+			if ePsw == "" {
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE password for ticket auth (SOPS pve.password reference or PVECONFORM_PVE_PASSWORD required); pveconform fails closed", name))
+			}
+		}
 	}
 
 	// Named PVE clusters (M8 multi-cluster model). At least one cluster is
@@ -330,6 +691,20 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid configuration: %s", joinErrs(errs))
 	}
 	return nil
+}
+
+// sopsCoversCreds reports whether at least one cluster has SOPS-resolved
+// PVE credentials available. Used by Validate to allow SOPS-using
+// deployments to run without the global pve-level bootstrap credentials
+// (the SOPS file in the GitOps worktree supplies them per-cluster).
+func (c *Config) sopsCoversCreds() bool {
+	for name, sc := range c.SopsResolved {
+		_ = name
+		if sc.User != "" || sc.TokenID != "" || sc.Token != "" || sc.Password != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // GitCacheDir returns the directory the go-git clone cache lives in.

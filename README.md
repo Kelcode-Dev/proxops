@@ -31,9 +31,53 @@ clusters/<cluster>/resources.yaml   # what <cluster> consumes (explicit list)
 <kind>/{base|<cluster>}/...yaml     # resource definitions (kind ∈ vm, lxc, iso, ctt)
 ```
 
+Since M9, the cluster's OWN pveconform configuration + credentials also live
+in the GitOps repository, cluster-local and SOPS-encrypted:
+
+```
+clusters/<cluster>/
+  config.yaml         # pveconform config for THIS cluster: pve endpoint,
+                      #   node allowlist, SOPS secrets-file reference,
+                      #   git source, reconcile knobs. The `--config` arg.
+  secrets.sops.yaml   # SOPS-encrypted PVE + git credentials for THIS
+                      #   cluster. The public age recipient is in the
+                      #   file's sops: metadata; the PRIVATE age key lives
+                      #   OUTSIDE this repo (task §7/§8 — see OPERATIONS.md).
+  resources.yaml      # M8 resource composition (unchanged by M9)
+```
+
 A resource file is reconciled by exactly the cluster(s) whose composition
 lists it. Bases are shared by reference; cluster-specific files live under
 `<kind>/<cluster>/`.
+
+## Secrets (M9)
+
+PVE & git credentials for a cluster are kept OUT of the global pveconform
+config. Each cluster declares:
+
+- `pve.clusters.<name>.secrets-file` — the path to its SOPS-encrypted file
+  (relative to `clusters/<name>/`, resolved at Load time to the worktree
+  root), and
+- `pve.clusters.<name>.secrets` — the per-cluster reference block naming
+  which SOPS top-level keys in the decrypted file supply which PVE fields
+  (`user`, `token-id`, `token`, `password`) and which SOPS key supplies
+  the git token (`git.token`).
+
+The SOPS file is encrypted with Mozilla SOPS, age backend; one SOPS key =
+one age identity. pveconform decrypts each SOPS file ONCE at agent
+construction into a per-cluster in-memory `Config.SopsResolved` map.
+Precedence for a cluster's PVE credentials: SOPS-resolved value >
+`PVECONFORM_PVE_*` env > global YAML. The SOPS-resolved value is NEVER
+serialized into `diff` / `apply` / `status` / `/metrics` / `/status` /
+log lines / error text (task §2; §12), and pveconform never writes the
+decrypted value to disk (only sops itself prints to stdout, which
+pveconform's Decrypter reads into a memory map and discards).
+
+Unencrypted SOPS files (no `sops:` metadata in the committed file) are
+refused with `ErrUnencryptedSecrets`. A wrong/absent age identity is
+refused with `ErrNoIdentity`/`ErrIdentityMismatch`. A sops binary that
+disappears from PATH is refused with `ErrSOPSBinaryMissing`. These are the
+"fail closed where credentials are required" guarantees (task §6).
 ## Core guarantees
 
 - **Safe deletion** — the agent only deletes PVE objects tagged `pveconform`
@@ -91,7 +135,13 @@ internal/adopt/        PVE -> pveconform YAML (read-only; cluster-scoped;
 internal/composition/  M8 GitOps boundary: discover + validate
                        clusters/*/resources.yaml
 internal/app/          composition root; watch loop; dry/apply per cluster
-internal/config/       YAML config + env-var credential overlay
+internal/config/       YAML config + M9 cluster-local SOPS credential
+                       resolution + env-var bootstrap overlay
+internal/secrets/      M9 SOPS age-file decryption, in-memory only (task 2,
+                       task 13): never writes plaintext to disk, never logs
+                       values, distinct error classes for missing sops
+                       binary / unencrypted file / missing / wrong age
+                       identity / malformed document
 docs/                  ARCHITECTURE, SCHEMA, OPERATIONS
 examples/              ready-to-adapt manifest sets
 config/                pveconform.yaml + systemd unit templates
@@ -99,47 +149,76 @@ config/                pveconform.yaml + systemd unit templates
 
 ## Quick start
 
+`pveconform` supports two credential styles. Choose the one that fits
+your GitOps layout:
+
+### Style 1 (M9, recommended): cluster-local SOPS config
+
+Clone your GitOps repo, point pveconform at the cluster's local config, and
+provide your SOPS age key out-of-band (see [docs/OPERATIONS.md](docs/OPERATIONS.md
+#per-cluster-sops-secrets-m9) for the full workflow):
+
 ```sh
-# 1. build
-go build -o pveconform ./cmd/pveconform
-
-# 2. inspect drift without touching anything
-./pveconform diff --config config/pveconform.yaml
-
-# 3. one convergence cycle (apply)
-./pveconform apply --config config/pveconform.yaml
-
-# 4. convergence table
-./pveconform status --config config/pveconform.yaml
-
-# 5. daemon mode (continuous watch — all clusters in sorted-name order)
-./pveconform run --config config/pveconform.yaml
-
-# 6. reverse-engineer live PVE objects into pveconform YAML (read-only)
-./pveconform adopt --cluster conformance-dev --config config/pveconform.yaml
+git clone https://git.example/your/gitops-repo && cd gitops-repo
+export SOPS_AGE_KEY_FILE=$HOME/.local/share/pveconform/conformance-dev.age
+# age key file lives OUTSIDE the git repo (never committed).
+./pveconform diff --config clusters/conformance-dev/config.yaml
+./pveconform apply --config clusters/conformance-dev/config.yaml
+./pveconform status --config clusters/conformance-dev/config.yaml
+./pveconform run --config clusters/conformance-dev/config.yaml
+./pveconform adopt --cluster conformance-dev \
+                   --config clusters/conformance-dev/config.yaml
 ```
 
-`config/pveconform.yaml` carries **one or more named PVE clusters**
-(`pve.clusters.<name>.{base-url,nodes}`). Every command above processes all
+`clusters/conformance-dev/config.yaml` is a full pveconform config (log, pve,
+git, reconcile, listen, data-dir) scoped to exactly ONE cluster:
+`conformance-dev`. `clusters/conformance-dev/secrets.sops.yaml` sits next
+to it and carries this cluster's PVE token / git token, encrypted via
+Mozilla SOPS (age backend). **Private age key never in the repo.**
+
+### Style 2 (M8 bootstrap, legacy): global config + env creds
+
+Use the shared `config/pveconform.yaml` + environment variables:
+
+```sh
+export PVECONFORM_PVE_TOKEN_VALUE="root@pam!pveconform=<uuid>"
+export PVECONFORM_GIT_TOKEN="ghp_..."
+./pveconform diff --config config/pveconform.yaml
+```
+
+Style 2 still works; a repository that has not declared a
+`clusters/<name>/secrets-file` for any cluster will not require sops to be
+installed on the host (task 16).
+
+`config/pveconform.yaml` (style 2) carries **one or more named PVE clusters**
+(`pve.clusters.<name>.{base-url,nodes}`); `clusters/<name>/config.yaml`
+(style 1) carries exactly one. Every command above processes all named
 clusters in deterministic order, except `adopt` which requires one explicit
 `--cluster`.
 
-Credentials (PVE API token, PVE password, git token) are read **only from the
-environment** — never store them in YAML or pass them on the command line:
+### Credentials & precedence
 
-| Env var | Purpose |
-|---|---|
-| `PVECONFORM_PVE_TOKEN` | PVE API token UUID |
-| `PVECONFORM_PVE_TOKEN_VALUE` | fully-composed credential `user@realm!tokenid=uuid` |
-| `PVECONFORM_PVE_PASSWORD` | password for ticket auth |
-| `PVECONFORM_PVE_USER` | PVE user id (ticket auth convenience) |
-| `PVECONFORM_GIT_TOKEN` | git HTTPS token |
+| Env var | Purpose | Precedence (M9) |
+|---|---|---|
+| `SOPS_AGE_KEY_FILE` | age private key file path for SOPS decryption | highest, in the SOPS cluster |
+| `PVECONFORM_PVE_TOKEN` | PVE API token UUID | bootstrap; overridden by SOPS in a SOPS cluster |
+| `PVECONFORM_PVE_TOKEN_VALUE` | fully-composed `user@realm!tokenid=uuid` | bootstrap; overridden by SOPS in a SOPS cluster |
+| `PVECONFORM_PVE_PASSWORD` | password for ticket auth | bootstrap; overridden by SOPS in a SOPS cluster |
+| `PVECONFORM_PVE_USER` | PVE user id (ticket auth convenience) | bootstrap; overridden by SOPS in a SOPS cluster |
+| `PVECONFORM_GIT_TOKEN` | git HTTPS token | bootstrap; overridden by SOPS in SOPS clusters that reference `git.token` |
 
-For a PVE API token: create `root@pam!pveconform` with the `Permissions` role
-(`VM.Allocate`, `VM.Configure`, `VM.Create`, `VM.Delete`, `VM.PowerMgmt`,
+A config that declares **no** `pve.clusters.<name>.secrets-file` keeps the
+M8 env-over-YAML-over-defaults chain exactly. A config that **does** declare
+SOPS for a cluster uses, for that cluster only, the SOPS-decrypted value.
+The two are never mixed across clusters: cluster A's SOPS token cannot end
+up on cluster B's PVE credentials (task 12).
+
+When creating the SOPS file (Style 1), use the `Permissions` role:
+`VM.Allocate`, `VM.Configure`, `VM.Create`, `VM.Delete`, `VM.PowerMgmt`,
 `VZ.*` equivalents, `Sys.Audit`, and `Datastore.Use`/`Datastore.AllocateSpace`
-on your ISO storage for the ISO kind), then set
-`PVECONFORM_PVE_TOKEN_VALUE="root@pam!pveconform=<uuid>"`.
+on your ISO storage. The PVE user (typically `root@pam` or a dedicated
+`proxops@pam`) owns the token. The git token (for URL-mode worktrees) should
+have read access to the manifest repo.
 
 ## Documentation
 

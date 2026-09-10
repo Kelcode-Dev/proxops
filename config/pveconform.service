@@ -17,12 +17,29 @@ Restart=on-failure
 RestartSec=5s
 
 # Secrets come only from the environment (see docs/OPERATIONS.md).
+#
+# M8 bootstrap (env credentials):
 # Option A: an env file (root-only 0600):
 EnvironmentFile=-/etc/pveconform/pveconform.env
+# /etc/pveconform/pveconform.env (0600 root:pveconform), e.g.:
+#   PVECONFORM_PVE_TOKEN_VALUE=root@pam!pveconform=<uuid>
+#   PVECONFORM_GIT_TOKEN=<ghp_...>
 # Option B: an inline drop-in:
 #   echo 'Environment="PVECONFORM_PVE_TOKEN_VALUE=root@pam!pveconform=..."' > \
 #         /etc/systemd/system/pveconform.service.d/cred.conf
 #   echo 'Environment="PVECONFORM_GIT_TOKEN=..."' >> same file
+#
+# M9 (SOPS-backed cluster-local config, recommended):
+# point ExecStart at the cluster-local config inside the GitOps checkout,
+# and supply the private age key by path (OUTSIDE the repository):
+#   ExecStart=/usr/local/bin/pveconform run \
+#     --config /var/lib/pveconform/gitops/clusters/conformance-dev/config.yaml
+#   /var/lib/pveconform/age/conformance-dev.age (0600 pveconform:pveconform)
+#   Environment=SOPS_AGE_KEY_FILE=/var/lib/pveconform/age/conformance-dev.age
+# The repo's clusters/<name>/secrets.sops.yaml carries only the ENCRYPTED
+# values + the public age recipient (sops metadata) — never the private key.
+# Requires sops + age on PATH (see docs/OPERATIONS.md → "Per-cluster SOPS
+# secrets (M9)").
 
 # Hardening
 NoNewPrivileges=true
@@ -37,7 +54,3 @@ ReadWritePaths=/home/pveconform/.local/share/pveconform
 
 [Install]
 WantedBy=multi-user.target
-
-# /etc/pveconform/pveconform.env (0600 root:pveconform), e.g.:
-#   PVECONFORM_PVE_TOKEN_VALUE=root@pam!pveconform=<uuid>
-#   PVECONFORM_GIT_TOKEN=<ghp_...>

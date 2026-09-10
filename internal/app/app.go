@@ -46,8 +46,20 @@ import (
 // unit-tested without constructing a full Agent (which would trigger a git
 // fetch).
 //
-// It is a pure copy with no defaults: auth/user/token shared at the pve
-// level; endpoint + node allowlist per cluster.
+// M9 credential precedence (task §6), per cluster, highest to lowest:
+//
+//  1. cfg.SopsResolved[cluster] — the cluster's SOPS-decrypted credentials
+//     (the explicit cluster secret). A SOPS-resolved field ALWAYS beats every
+//     bootstrap source for that cluster's pveclient.
+//  2. cfg.PVE.{User,TokenID,Token,Password} — the pve-level bootstrap
+//     credentials: YAML + env overlay (the M8 compatibility path). These
+//     fill any field the SOPS block does not name for that cluster.
+//  3. cfg.PVE.TokenValue — a global composed token credential. It is
+//     honoured ONLY when the cluster has no SOPS-resolved PVE credentials
+//     at all: a global composed value must never shadow a cluster's
+//     explicit SOPS secret, and it must never reach a cluster that a
+//     sibling SOPS cluster's secrets are meant to serve in isolation
+//     (task §12: cluster A cannot consume cluster B's secret config).
 func PVEParamsFrom(cfg *config.Config, cluster string) pveclient.PVEParams {
 	c, ok := cfg.PVE.Cluster(cluster)
 	if !ok {
@@ -55,17 +67,68 @@ func PVEParamsFrom(cfg *config.Config, cluster string) pveclient.PVEParams {
 		// client, no endpoint, no actions.
 		return pveclient.PVEParams{}
 	}
-	return pveclient.PVEParams{
-		User:     cfg.PVE.User,
-		Auth:     string(cfg.PVE.Auth),
-		TokenID:  cfg.PVE.TokenID,
-		Token:    cfg.PVE.Token,
-		TokenValue: cfg.PVE.TokenValue,
-		Password: cfg.PVE.Password,
-		BaseURL:  c.BaseURL,
-		Nodes:    c.Nodes,
-		CAFile:   cfg.PVE.CAFile,
+	sops := cfg.SopsResolved[cluster]
+	hasSops := sops.User != "" || sops.TokenID != "" || sops.Token != "" || sops.Password != ""
+	user := cfg.PVE.User
+	if sops.User != "" {
+		user = sops.User
 	}
+	tokenID := cfg.PVE.TokenID
+	if sops.TokenID != "" {
+		tokenID = sops.TokenID
+	}
+	token := cfg.PVE.Token
+	if sops.Token != "" {
+		token = sops.Token
+	}
+	psw := cfg.PVE.Password
+	if sops.Password != "" {
+		psw = sops.Password
+	}
+	tokenValue := cfg.PVE.TokenValue
+	if hasSops {
+		tokenValue = "" // never let a global composed credential shadow an explicit cluster SOPS secret
+	}
+	return pveclient.PVEParams{
+		User:       user,
+		Auth:       string(cfg.PVE.Auth),
+		TokenID:    tokenID,
+		Token:      token,
+		TokenValue: tokenValue,
+		Password:   psw,
+		BaseURL:    c.BaseURL,
+		Nodes:      c.Nodes,
+		CAFile:     cfg.PVE.CAFile,
+	}
+}
+
+// EffectiveGitToken returns the git fetch token the shared git source should
+// use, applying the M9 SOPS precedence: any cluster's SOPS-resolved
+// git-token beats the bootstrap git.token (YAML + PVECONFORM_GIT_TOKEN).
+// The pveconform git source is single (one tree serves every cluster), so
+// the effective token must be unique: if two clusters resolve DIFFERENT
+// non-empty SOPS git tokens, the caller must fail closed.
+//
+// Returns the effective token and an error describing the conflict.
+func EffectiveGitToken(cfg *config.Config) (string, error) {
+	firstSopsToken := ""
+	firstSopsCluster := ""
+	for _, name := range cfg.PVE.ClusterNames() {
+		sc := cfg.SopsResolved[name]
+		if sc.GitToken == "" {
+			continue
+		}
+		if firstSopsToken == "" {
+			firstSopsToken = sc.GitToken
+			firstSopsCluster = name
+		} else if firstSopsToken != sc.GitToken {
+			return "", fmt.Errorf("git token conflict: clusters %q and %q resolve DIFFERENT SOPS git tokens; pveconform has a single shared git source, so all SOPS-resolved git tokens must be equal (edit the SOPS files or the key references in config.yaml)", firstSopsCluster, name)
+		}
+	}
+	if firstSopsToken != "" {
+		return firstSopsToken, nil
+	}
+	return cfg.Git.Token, nil
 }
 
 // clusterAgent is one pveconform cluster: PVE client + dry/apply reconcilers
@@ -115,9 +178,31 @@ func (e *AbortError) Is(target error) bool { return target == ErrAborted }
 // per-cluster pveclient pairs, one git Source, one status store, per-cluster
 // dry/apply reconcilers, and the HTTP server (not started yet — Start does
 // that).
+//
+// M9 SOPS-aware build steps:
+//
+//  1. cfg.ResolveSOPS(): if any cluster declares a secrets-file, decrypt it
+//     into cfg.SopsResolved. The age identity is in the operator's env
+//     (SOPS_AGE_KEY_FILE / SOPS_AGE_KEY / AGE_KEY_FILE — task §8: it MUST
+//     come from outside the encrypted repo). Fail-closed errors surface
+//     here, before any PVE client is built. The sops binary is invoked
+//     ONLY when a secrets-file is configured (task §16: a SOPS-less run
+//     needs no sops tooling).
+//  2. cfg.Validate(): shape checks + M8/M9 credential-coverage checks
+//     (SOPS-resolved values count toward covering each SOPS-using cluster).
+//  3. EffectiveGitToken: pick the single git fetch token, SOPS-over-env-
+//     over-YAML, rejecting conflicting per-cluster SOPS git tokens.
+//  4. Construct per-cluster pveclient with PVEParamsFrom (SOPS-resolved
+//     credentials win over global pve-level bootstrap for that cluster).
 func New(cfg *config.Config, log *slog.Logger, registry *prometheus.Registry, version string) (*Agent, error) {
 	if registry == nil {
 		registry = metrics.Register()
+	}
+	// M9: SOPS decryption (in-memory only). Runs BEFORE cfg.Validate() so
+	// the per-cluster credential-coverage check in Validate sees the
+	// resolved values. No secrets-file configured → no-op → no sops call.
+	if err := cfg.ResolveSOPS(); err != nil {
+		return nil, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -126,9 +211,13 @@ func New(cfg *config.Config, log *slog.Logger, registry *prometheus.Registry, ve
 
 	// Git Source (single shared tree for all clusters: the composition is
 	// cluster-scoped at parse time, not at fetch time).
+	gitToken, gitErr := EffectiveGitToken(cfg)
+	if gitErr != nil {
+		return nil, gitErr
+	}
 	gitOpts := gitx.Options{
 		Branch: cfg.Git.Branch,
-		Token:  cfg.Git.Token,
+		Token:  gitToken,
 	}
 	if cfg.Git.URL != "" {
 		gitOpts.URL = cfg.Git.URL

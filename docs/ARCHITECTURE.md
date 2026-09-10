@@ -77,12 +77,92 @@ PVE resource        ->  only objects on those nodes are ever read/written/pruned
   two clusters sharing one endpoint -- prune scoping is endpoint-based, and
   merging inventories would be a footgun.)
 
-The root config file (`.config.yaml` / `config/pveconform.yaml`) remains the
-bootstrap/configuration entry point in M8. `clusters/<cluster>/config.yaml`
-exists as the documented home for future cluster-specific configuration
-(and eventually SOPS-resolved credentials); the process configuration
-format is not redesigned around it in M8. See "Future: per-cluster secrets
-(SOPS)" in OPERATIONS.md.
+**M9 (SOPS-backed cluster configuration):** the pveconform process
+configuration moves INTO the GitOps repository, per cluster:
+
+```
+clusters/<cluster>/config.yaml        # the pveconform --config for this cluster
+clusters/<cluster>/secrets.sops.yaml  # SOPS/age-encrypted PVE + git creds
+clusters/<cluster>/resources.yaml     # M8 composition (unchanged)
+```
+
+A cluster-local `config.yaml` is a *complete* pveconform config: it carries
+the shared application fields (`log`, `git`, `reconcile`, `listen`,
+`data-dir`) PLUS one entry in `pve.clusters` for that cluster (its
+`base-url`, `nodes` allowlist, and — M9 — `secrets-file` + `secrets`) .
+The M8 root-level `config/pveconform.yaml` (bootstrap, multi-cluster,
+env credentials) remains valid for hosts that have not adopted the
+GitOps-local config. pveconform no longer requires a PVE credential in the
+process environment when a cluster references one via SOPS.
+
+Layer behaviour (M9):
+- **config.Load** resolves `secrets-file` relative to the config file's
+  own directory, so the same cluster-local config works from any CWD
+  (no silent CWD dependence; task §5 "no implicit magic, no cluster
+  guessing").
+- **`git.path: "."`** is a sentinel meaning "reconcile from the git
+  worktree that contains this config file". Load canonicalises the
+  `--config` path to absolute first, then walks up from the config
+  file's own directory to the nearest `.git` marker; an absolute
+  `git.path` still works for mount / rsync setups (task §18 "fresh
+  checkout + external identity → pveconform → decrypt in memory →
+  conformance-dev"). The walk-up is config-anchored, not
+  CWD-anchored: the same cluster-local config behaves identically no
+  matter what directory pveconform is launched from.
+- **`pve.clusters.<name>.secrets`** is a closed reference block:
+  `pve.{user,token-id,token,password}` and `git.token`, each naming one
+  top-level key under the decrypted SOPS document's `secrets:` mapping.
+  It is NOT a templating language (task §3); every referenced key must
+  exist non-empty in the SOPS file or pveconform fails closed.
+- **Config.ResolveSOPS** (in `internal/app.New`) decrypts every SOPS
+  cluster's file, in memory, at startup, and populates
+  `c.SopsResolved[<cluster>]` with the PVE user / token-id / token /
+  password + the git token. Decryption happens BEFORE
+  `cfg.Validate()`, so the SOPS-aware credential-coverage check sees
+  the resolved values (a SOPS-only config passes; a SOPS-declared cluster
+  whose SOPS call failed still fails the check).
+- **PVEParamsFrom** merges per-cluster SOPS values OVER the global pve
+  shared creds. `pve.token-value` (typically the env composed
+  credential `user@realm!tokenid=uuid`) is SUPPRESSED for any SOPS
+  cluster — the SOPS-resolved trio is authoritative. One PVE user +
+  token can serve multiple SOPS clusters, but the SOPS values are
+  per-cluster (task §12 "cluster A cannot accidentally consume
+  cluster B's secret configuration").
+- **EffectiveGitToken** picks the single git fetch token the shared
+  `gitx.Source` uses: SOPS-resolved first; env / YAML otherwise. Two
+  different SOPS-resolved git tokens fail closed with a "git token
+  conflict" error.
+- **`internal/secrets`** (M9-new) owns the SOPS age-identity + binary
+  call. It invokes the external `sops` (age backend) binary via
+  `exec.LookPath("sops")` in a 30s-budgeted `exec.CommandContext`. The
+  command runs with a copy of the operator's `os.Environ()` so
+  `SOPS_AGE_KEY_FILE` / `SOPS_AGE_KEY` / `AGE_KEY_FILE` reach sops' age
+  backend untouched. pveconform never sets or inspects those variables
+  itself (task §8). The sops child process's STDOUT (the decrypted
+  YAML) goes through a JSON parse into a
+  `map[string]string` — the in-memory `Config.SopsResolved` map is
+  populated from that and is tagged `json:"-" yaml:"-"` so no
+  serialisation surface can emit it. Errors from sops are classified
+  into a fixed sentinel set: `ErrSOPSBinaryMissing`,
+  `ErrUnencryptedSecrets`, `ErrNoIdentity`, `ErrIdentityMismatch`,
+  `ErrMalformedDocument` + a redacted exit-code + hint for anything
+  else. sops's OWN stderr is NOT re-emitted verbatim (only a <= 120-char,
+  token-redacted hint) — defense against a sops version / hostile
+  document leaking secret material into pveconform's error text
+  (task §13 "error messages identify the problem without printing
+  secret contents").
+- **The gitx source** is built AFTER SOPS resolution, so its
+  `gitx.Options.Token` carries the SOPS-resolved git token
+  (when one was referenced).
+
+The M8 root `.config.yaml` / `config/pveconform.yaml` bootstrap shape is
+unchanged: `pve.{auth,user,token-id,token,token-value,password,ca-file}`
++ `pve.clusters.<name>.{base-url,nodes}`. A cluster that sets
+`secrets-file` adds the M9 shape but does NOT re-declare the shared
+`pve.user` / `pve.token-id` / `pve.token` in the SOPS reference — the
+SOPS document supplies them via the `secrets:` block. The shared `pve.*`
+fields still act as bootstrap credentials for any SOPS-less cluster in
+the same config.
 
 ## The layers
 

@@ -142,9 +142,12 @@ func buildAgent(gf *globalFlags, log *slog.Logger, persistent, local *pflag.Flag
 	// single config.OverlayFromEnv path.
 	config.OverlayFromEnv(cfg)
 
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
+	// M9: do NOT call cfg.Validate() here. app.New is responsible for
+	// calling ResolveSOPS() (per-cluster SOPS decryption) BEFORE its
+	// internal Validate() pass. Validating in buildAgent would run
+	// Validate() with empty SopsResolved, causing SOPS configs that have
+	// no global pve.user/token triple (which is correct — SOPS supplies
+	// them) to fail validation prematurely.
 	return app.New(cfg, log, metrics.Register(), version)
 }
 
