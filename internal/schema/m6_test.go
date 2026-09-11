@@ -8,6 +8,7 @@
 package schema_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
@@ -454,6 +455,14 @@ spec:
 }
 
 // TestLXCOptionsWire + LXC dep: container-side options and template ref.
+//
+// PVE 9.2 wire grammar (probe-verified on conformance-dev 2026-09-10):
+//   - create-time top-level keys accepted: unprivileged, protection,
+//     onboot, console, features (composite).
+//   - nesting is NOT a create-time top-level key (400); it rides inside the
+//     `features=nesting=<0|1>` composite.
+//   - keyctl / fuse have NO PVE 9.x LXC create form (403/400); a manifest
+//     that enables them fails closed at create-params.
 func TestLXCOptionsWire(t *testing.T) {
 	lxcRaw := `apiVersion: ` + schema.APIVersion + `
 kind: LXC
@@ -470,9 +479,10 @@ spec:
     unprivileged: true
     protection: true
     nesting: true
-    keyctl: true
-    fuse: true
+    keyctl: false
+    fuse: false
     onboot: true
+    console: true
     startup: "order=20"
 `
 	lxc := schema.NewLXC()
@@ -483,10 +493,25 @@ spec:
 	if err != nil {
 		t.Fatalf("ToCreateParams: %v", err)
 	}
-	for _, k := range []string{"unprivileged", "protection", "nesting", "keyctl", "fuse", "onboot"} {
+	for _, k := range []string{"unprivileged", "protection", "onboot", "console"} {
 		if got, _ := p[k]; got != "1" {
 			t.Errorf("%s = %v, want 1", k, got)
 		}
+	}
+	// nesting is the composite-features create wire, NOT a top-level key.
+	if got, _ := p["features"]; got != "nesting=1" {
+		t.Errorf(`features = %v, want "nesting=1" (PVE 9.x create-time nesting form)`, got)
+	}
+	if _, ok := p["nesting"]; ok {
+		t.Errorf("top-level nesting create key must NOT be emitted (PVE 9.2 rejects it with 400)")
+	}
+	// keyctl / fuse set to false = PVE default; pveconform omits them at
+	// create.
+	if _, ok := p["keyctl"]; ok {
+		t.Errorf("keyctl=false must be omitted (PVE default; PVE has no off-create form anyway)")
+	}
+	if _, ok := p["fuse"]; ok {
+		t.Errorf("fuse=false must be omitted (PVE default; PVE has no off-create form anyway)")
 	}
 	if got, _ := p["startup"].(string); got != "order=20" {
 		t.Errorf("startup = %q, want order=20", got)
@@ -495,6 +520,29 @@ spec:
 	deps := lxc.Deps()
 	if len(deps) != 1 || deps[0].Kind != schema.KindCTTemplate || deps[0].Name != "base-ctt" {
 		t.Errorf("Deps() = %v, want [CTTemplate/base-ctt]", deps)
+	}
+}
+
+// TestLXCOptionsWire_KeyctlFuseTrueFailClosed pins that a manifest that
+// ENABLES keyctl or fuse cannot be created on PVE 9.x (no accepted wire
+// form: top-level 403, features composite unknown token → 403).
+// pveconform fails closed at create-params rather than submitting a
+// request PVE would reject. The options are adoptable (the live report
+// carries them) so a human can still record the intent, but applying it to
+// a NEW container requires an out-of-band PVE step.
+func TestLXCOptionsWire_KeyctlFuseTrueFailClosed(t *testing.T) {
+	for _, field := range []string{"keyctl", "fuse"} {
+		lxcRaw := "apiVersion: " + schema.APIVersion + "\n" +
+			"kind: LXC\nmetadata:\n  name: lxc-" + field + "\nspec:\n  node: pve01\n  vmid: 9102\n  memory: 1GiB\n  cpu: {cores: 1}\n  template: base-ctt\n  root: {storage: local, size: 4GiB}\n  options:\n    " + field + ": true\n"
+		lxc := schema.NewLXC()
+		if err := schema.YAMLTo(lxcRaw, lxc); err != nil {
+			t.Fatalf("YAMLTo LXC (%s): %v", field, err)
+		}
+		if _, err := lxc.ToCreateParams(); err == nil {
+			t.Errorf("%s=true: ToCreateParams must fail closed (PVE 9.x has no LXC create form for the token), got nil", field)
+		} else if !strings.Contains(err.Error(), field) {
+			t.Errorf("%s=true: error must name the blocked option: %v", field, err)
+		}
 	}
 }
 

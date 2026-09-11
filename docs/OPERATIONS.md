@@ -265,38 +265,92 @@ drift, not state-machine confusion.
 
 ### Adopting existing PVE objects
 
-`pveconform adopt` (M8) reverse-engineers live PVE objects into pveconform
-YAML. It is READ-ONLY with respect to PVE (it asserts zero PVE writes) and
-requires an explicit cluster:
+`pveconform adopt` (M8; production-hardened in M10) reverse-engineers live
+PVE objects into pveconform YAML. It is READ-ONLY with respect to PVE —
+it performs only GET requests and asserts zero PVE writes at the end of
+the run — and requires an explicit cluster:
 
 ```sh
-pveconform adopt --cluster conformance-dev --config .config.yaml
+# In the GitOps work tree, with the operator's age identity exported:
+export SOPS_AGE_KEY_FILE=~/.local/share/pveconform/<cluster>.age   # outside the repo
+pveconform adopt --cluster conformance-dev --config clusters/conformance-dev/config.yaml
 ```
 
 What it does:
 
-- uses that cluster's configured endpoint + node allowlist;
-- writes one manifest per live object under `<kind>/<conformance-dev>/` in
-  the git work tree (VM, LXC, ISO, CTTemplate);
+- uses that cluster's configured endpoint + node allowlist (or, without an
+  allowlist, PVE's `/cluster/nodes` listing); only allowlisted nodes are
+  ever read — this is the cluster-isolation guarantee;
+- writes one manifest per live object under `<kind>/<cluster>/` in the git
+  work tree (VM, LXC, ISO, CTTemplate);
 - surfaces **unsupported PVE configuration explicitly** (a `gap` line per
   live key pveconform does not model; `INCOMPLETE` for generated manifests
-  missing a value PVE cannot re-report, e.g. the LXC `ostemplate`);
+  missing a value PVE cannot re-report, e.g. the LXC `ostemplate`;
+  `SKIPPED` for objects pveconform deliberately does not generate — PVE
+  *template* VMs, which a pveconform-managed manifest would wrongly claim
+  ownership of);
+- **redacts sensitive PVE fields** in the gap report: `sshkeys` and
+  `cipassword` values are emitted as `<redacted>` (the field name still
+  reports, so the operator knows pveconform does not model it);
 - prints the exact `resources.yaml` lines to add. It does NOT modify
   `clusters/<cluster>/resources.yaml` — listing the generated files is a
   deliberate, reviewable operator step.
 
-The M8 acceptance round-trip is:
+#### Determinism (M10)
+
+Two `adopt` runs against an unchanged PVE produce **byte-identical**
+manifests and gap reports: the manifest set, filenames, field ordering,
+gap ordering, and the INCOMPLETE/SKIPPED lists are all total-ordered. No
+timestamps, no PVE-assigned randomness, no credentials appear in the
+output. A second run therefore produces no meaningless git diff.
+
+#### Production safety expectations
+
+When the adopted cluster is a production PVE:
+
+- `adopt` is the **only** pveconform command safe to run against it
+  unattended: it issues GETs to `/cluster/nodes`,
+  `/nodes/{n}/{qemu,lxc}`, `/nodes/{n}/storage`,
+  `/nodes/{n}/storage/{s}/content`, `/nodes/{n}/qemu/{v}/config`,
+  `/nodes/{n}/lxc/{c}/config` — and nothing else. Post-run, the client's
+  write counter must read 0 or the run aborts.
+- **Do NOT run `apply` / `run` / a normal reconcile cycle against a
+  freshly adopted production cluster.** Adoption output is reviewed,
+  completed (INCOMPLETE resources), and composed into
+  `resources.yaml` by a human first; only then is `diff` used to verify
+  zero unexpected drift.
+- The generated manifests are stripped of pveconform's ownership tag from
+  `spec.tags` (adopt never invents tags); the tag is re-appended at create
+  time, and on the first reconcile pveconform claims the live object by
+  adding that tag. Untagged live objects are never modified or deleted.
+
+#### Round-trip verification
+
+The acceptance round-trip is:
 
 ```
-PVE -> adopt -> YAML -> clusters/<cluster>/resources.yaml -> pveconform diff
-     -> zero unexpected drift (for everything pveconform models)
+PVE -> adopt -> YAML -> (human review) -> clusters/<cluster>/resources.yaml
+     -> pveconform diff -> zero unexpected drift
 ```
 
-Live-only disk anomalies are preserved: adopt interrogates the PVE /config
-report, so a fixture like the conformance-dev VM 9101 live-only `scsi1` is
-represented in the adopted manifest rather than silently dropped. See
-docs/GAPS.md for the seeded gap backlog (the source of new entries is exactly
-this adopt report).
+Every remaining drift line must map to a documented M10 expectation:
+
+- `update ... config drift` on every adopted VM: the ownership-tag claim
+  (PVE objects carry no `pveconform` tag; pveconform adds one when it
+  manages an object). This is expected and is the first write the operator
+  consciously approves — it is not applied by `diff`.
+- `anomaly ... live-only disk slot scsiN=...-cloudinit,media=cdrom` on VMs
+  whose cloud-init volume sits on a non-IDE slot (PVE 9.x places cloud-init
+  on `scsi1` when `ide2` is not used): pveconform does not own non-IDE
+  cdrom slots; adopt documents them as a gap and leaves them PVE-managed.
+- `skipped (no pveconform tag)` for objects not yet composed
+  (INCOMPLETE LXC resources, PVE template VMs).
+
+Live-only data disks are preserved: adopt interrogates the PVE /config
+report, so a live second data disk is represented in the adopted manifest
+rather than silently dropped. PVE cloud-init volumes on non-IDE slots, by
+contrast, are PVE-owned and are explicitly reported. See docs/GAPS.md for
+the gap backlog (the source of new entries is exactly this adopt report).
 
 ### Per-cluster SOPS secrets (M9)
 

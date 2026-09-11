@@ -60,15 +60,38 @@ type Result struct {
 	// the whole cluster cycle (fail-closed), so an incomplete manifest
 	// silently listed would take the cluster down.
 	Incomplete []string
+	// Skipped is one census entry per live PVE object that adopt DELIBERATELY
+	// did not generate a manifest for (template VMs / LXC templates).
+	// Presence here means "we saw it, we are not covering it, and here is
+	// why" — the audit stays complete.
+	Skipped []SkippedObject
 }
 
 // WroteManifest is one generated file.
 type WroteManifest struct {
-	Cluster   string
-	Kind      schema.Kind
-	Path      string // relative to git root, e.g. "vm/conformance-dev/existing-vm.yaml"
-	Content   string
-	LiveOnly  []string // PVE keys not modeled in the generated manifest
+	Cluster  string
+	Kind     schema.Kind
+	Path     string // relative to git root, e.g. "vm/conformance-dev/existing-vm.yaml"
+	Content  string
+	LiveOnly []string // PVE keys not modeled in the generated manifest
+}
+
+// SkippedObject is one live PVE object that adopt DELIBERATELY did not turn
+// into a manifest (template VMs / LXC templates: pveconform has no
+// template-VM resource kind and must not claim ownership of a clone
+// source). The census stays complete: a skipped object is reported, not
+// silently dropped.
+type SkippedObject struct {
+	Kind   schema.Kind
+	Node   string
+	ID     int
+	Name   string
+	Reason string
+}
+
+// String renders one SkippedObject for summary / audit lines.
+func (s SkippedObject) String() string {
+	return fmt.Sprintf("%s %s#%d (%q): %s", kindLabel(s.Kind), s.Node, s.ID, s.Name, s.Reason)
 }
 
 // Gap is one "supported live config pveconform does not model" finding.
@@ -118,6 +141,13 @@ func (r Result) Summary() string {
 		b.WriteString("adopt: INCOMPLETE MESSAGES (do NOT list in resources.yaml until reviewed):\n")
 		for _, line := range r.Incomplete {
 			b.WriteString("  - " + line + "\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(r.Skipped) > 0 {
+		b.WriteString("adopt: SKIPPED LIVE OBJECTS (deliberately not adopted — no manifest generated):\n")
+		for _, s := range r.Skipped {
+			b.WriteString("  - " + s.String() + "\n")
 		}
 		b.WriteString("\n")
 	}
@@ -204,7 +234,11 @@ func itoa(n int) string {
 	return string(buf[pos:])
 }
 
-// dedupGaps orders + dedupes gaps by key.
+// dedupGaps orders + dedupes gaps by key. Ordering is a TOTAL order
+// (kind, node, id, field, value) so two adopt runs against an unchanged
+// PVE always produce byte-identical gap reports — critical for
+// idempotency (a human diffing two consecutive adopt logs must not see
+// any re-shuffling for reasons other than PVE actually changing).
 func dedupGaps(in []Gap) []Gap {
 	seen := map[string]Gap{}
 	for _, g := range in {
@@ -215,10 +249,17 @@ func dedupGaps(in []Gap) []Gap {
 		out = append(out, g)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].kindKey() != out[j].kindKey() {
-			return out[i].kindKey() < out[j].kindKey()
+		a, b := &out[i], &out[j]
+		if a.kindKey() != b.kindKey() {
+			return a.kindKey() < b.kindKey()
 		}
-		return out[i].Node < out[j].Node
+		if a.Node != b.Node {
+			return a.Node < b.Node
+		}
+		if a.Field != b.Field {
+			return a.Field < b.Field
+		}
+		return a.Value < b.Value
 	})
 	return out
 }

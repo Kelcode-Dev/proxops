@@ -58,9 +58,9 @@ func PveDisksFromPVE(current map[string]any) ([]Disk, bool) {
 			continue
 		}
 		d := Disk{
-			Slot:       k,
-			Storage:    info.pool,
-			IOThread:   info.iothread,
+			Slot:     k,
+			Storage:  info.pool,
+			IOThread: info.iothread,
 		}
 		if info.sizeSet {
 			if s, ok := HumanFromBytes(info.sizeBytes); ok {
@@ -108,18 +108,42 @@ func PveNICsFromPVE(current map[string]any) ([]NIC, bool) {
 			continue
 		}
 		n := NIC{
-			Slot:     k,
-			Model:    f.model,
-			Bridge:   f.bridge,
-			VLAN:     f.vlan,
+			Slot:      k,
+			Model:     f.model,
+			Bridge:    f.bridge,
+			VLAN:      f.vlan,
 			RateLimit: f.rate,
-			Firewall: f.firewall,
+			Firewall:  f.firewall,
 		}
 		// adopt does not pin PVE's auto-assigned MAC; leave MAC empty.
 		out = append(out, n)
 	}
 	sort.Slice(out, func(i, j int) bool { return slotSortKey(out[i].Slot) < slotSortKey(out[j].Slot) })
 	return out, len(out) > 0
+}
+
+// PveDiskMedia inspects one PVE disk-slot report value and returns the
+// "media" token if PVE reports one, else "". Adopt uses this to detect
+// PVE's cloud-init volume on non-IDE slots (probe-verified on
+// prod-a: "vm-NNN-cloudinit,media=cdrom" on scsi1 of every VM that
+// was provisioned with qm cloud-init) which pveconform does not own in its
+// schema (cloud-init attaches to ide2/ide3 only).
+func PveDiskMedia(vmid int, current map[string]any, slot string) string {
+	_ = vmid
+	raw := pveStr(current[slot])
+	for _, tok := range strings.Split(raw, ",") {
+		tok = strings.TrimSpace(tok)
+		if strings.HasPrefix(tok, "media=") {
+			return strings.TrimPrefix(tok, "media=")
+		}
+	}
+	// The PVE cloud-init volume naming convention also applies when no
+	// media token is present: a slot whose PVE-assigned volume name
+	// carries "-cloudinit" is a PVE-owned cdrom.
+	if strings.Contains(raw, "-cloudinit") {
+		return "cdrom"
+	}
+	return ""
 }
 
 // PveCDROMFromPVE examines the VM's cdrom IDE slot (ide2/ide3 depending on
@@ -160,18 +184,18 @@ func PveCpuCores(current map[string]any) int { return pveInt(current["cores"]) }
 //
 // Returns:
 //
-//	- onboot (bool, ok)
-//	- protection (bool, ok)
-//	- agent (bool, ok)
-//	- acpi (bool, ok)
-//	- tablet (bool, ok)
-//	- nestedvirt (bool, ok)
-//	- hidden (bool, ok)
-//	- startup (string, ok)
-//	- hotplug ([]string, ok)
-//	- boot-order ([]string, ok) — parsed from PVE's "order=scsi0;ide2;net0"
-//	- numa (bool, ok)
-//	- sockets (int, ok)
+//   - onboot (bool, ok)
+//   - protection (bool, ok)
+//   - agent (bool, ok)
+//   - acpi (bool, ok)
+//   - tablet (bool, ok)
+//   - nestedvirt (bool, ok)
+//   - hidden (bool, ok)
+//   - startup (string, ok)
+//   - hotplug ([]string, ok)
+//   - boot-order ([]string, ok) — parsed from PVE's "order=scsi0;ide2;net0"
+//   - numa (bool, ok)
+//   - sockets (int, ok)
 func PveVMOptionsFromPVE(current map[string]any) VMOpts {
 	o := VMOpts{}
 	if b, ok := pveBool(current["onboot"]); ok {
@@ -266,7 +290,24 @@ func PveVMHardwareFromPVE(current map[string]any) VMHardware {
 func PveLXCMemoryToHuman(v any) (string, bool) { return PveMemoryToHuman(v) }
 func PveLXCSwapToHuman(v any) (string, bool)   { return PveMemoryToHuman(v) }
 
+// LXC mount shapes pveconform's adopt knows about.
+type LXCDiskShape struct {
+	Root    LXCRoot
+	Mounts  []LXCMount
+	HasRoot bool
+	// BindMountSlots are mp slots PVE reports as host-path bind mounts
+	// ("mp0=/mnt/host-share:/srv/data"). pveconform does not model bind
+	// mountpoints (GAPS.md: LXC bind mounts); adopt reports them so the
+	// operator sees them as explicit Gaps, not silently dropped. Each
+	// entry carries the slot + PVE wire value for the gap text.
+	BindMountSlots []LXCBindMount
+}
 
+// LXCBindMount is one PVE LXC host-path bind mount (mpN=<host>:<guest>).
+type LXCBindMount struct {
+	Slot string
+	Raw  string // PVE wire value, e.g. "/mnt/host-share:/srv/data"
+}
 
 // PveLXCDisksFromPVE parses PVE's LXC /config report into rootfs + additional
 // mount points.
@@ -285,17 +326,32 @@ func PveLXCSwapToHuman(v any) (string, bool)   { return PveMemoryToHuman(v) }
 // the caller (adopt) should fall back to a PVE storage-list lookup keyed on
 // the volid.
 func PveLXCDisksFromPVE(current map[string]any) (root LXCRoot, mps []LXCMount, ok bool, rootVolid string, volidHasSize bool) {
-	root, mps = LXCRoot{}, nil
-	rootVolid = ""
-	volidHasSize = false
+	return pveLXCDisksFromPVEInternal(current).unpack()
+}
+
+type lxcDiskShapeInternal struct {
+	LXCDiskShape
+	rootVolid    string
+	volidHasSize bool
+}
+
+func (s lxcDiskShapeInternal) unpack() (LXCRoot, []LXCMount, bool, string, bool) {
+	return s.Root, s.Mounts, s.HasRoot || len(s.Mounts) > 0, s.rootVolid, s.volidHasSize
+}
+
+func pveLXCDisksFromPVEInternal(current map[string]any) lxcDiskShapeInternal {
+	out := lxcDiskShapeInternal{}
+	rootVolid := ""
+	volidHasSize := false
 	if s := pveStr(current["rootfs"]); s != "" && !isNewStorageSlot(s) {
 		if info := parseDiskInfo(s); info.pool != "" {
-			root.Storage = info.pool
+			out.Root.Storage = info.pool
+			out.HasRoot = true
 			rootVolid = s
 			if info.sizeSet {
 				volidHasSize = true
 				if str, okH := HumanFromBytes(info.sizeBytes); okH {
-					root.Size = str
+					out.Root.Size = str
 				}
 			}
 		}
@@ -306,6 +362,14 @@ func PveLXCDisksFromPVE(current map[string]any) (root LXCRoot, mps []LXCMount, o
 		}
 		raw := pveStr(v)
 		if isNewStorageSlot(raw) {
+			continue
+		}
+		// Host-path bind mount ("mp0=/mnt/host-share:/srv/data"): the value
+		// starts with a host path, not a "pool:" storage token. pveconform
+		// does not model bind mounts (docs/GAPS.md: LXC bind-mount mpN) —
+		// report it, never drop it.
+		if isLXCBindMount(raw) {
+			out.BindMountSlots = append(out.BindMountSlots, LXCBindMount{Slot: k, Raw: raw})
 			continue
 		}
 		info := parseDiskInfo(raw)
@@ -328,11 +392,61 @@ func PveLXCDisksFromPVE(current map[string]any) (root LXCRoot, mps []LXCMount, o
 				mp.Size = str
 			}
 		}
-		mps = append(mps, mp)
+		out.Mounts = append(out.Mounts, mp)
 	}
-	sort.Slice(mps, func(i, j int) bool { return slotSortKey(mps[i].Slot) < slotSortKey(mps[j].Slot) })
-	ok = root.Storage != "" || len(mps) > 0
-	return root, mps, ok, rootVolid, volidHasSize
+	sort.Slice(out.Mounts, func(i, j int) bool { return slotSortKey(out.Mounts[i].Slot) < slotSortKey(out.Mounts[j].Slot) })
+	sort.Slice(out.BindMountSlots, func(i, j int) bool {
+		return slotSortKey(out.BindMountSlots[i].Slot) < slotSortKey(out.BindMountSlots[j].Slot)
+	})
+	out.rootVolid = rootVolid
+	out.volidHasSize = volidHasSize
+	return out
+}
+
+// isLXCBindMount reports whether PVE's LXC mp* report value is a host-path
+// bind mount ("mpN=<hostpath>:<guestpath>[,ro]") rather than an allocated
+// storage volume ("mpN=<pool>:<volid>[,mp=<guestpath>]"). The discriminator
+// is that the storage form's first token contains a colon AND has a valid
+// storage-id prefix before it; the host-path form is either a bare path or a
+// "<path>:<path>" pair. pveconform's owned LXC mpN shape is allocated
+// volumes only (docs/GAPS.md); bind mounts are reported by adopt, not owned.
+func isLXCBindMount(raw string) bool {
+	trim := strings.TrimSpace(raw)
+	// Allocated-volume form always starts with a storage id:
+	// "pool:..." where pool is an alpha/dash storage id. But host paths CAN
+	// contain colons (e.g. "/mnt/a:b:/srv" — rare in practice). The PVE
+	// storage-id grammar is [a-zA-Z0-9_-]+; a host path starts with '/'.
+	if strings.HasPrefix(trim, "/") {
+		return true
+	}
+	pool, _, found := strings.Cut(trim, ":")
+	if !found {
+		// No "pool:" at all. PVE allocated volumes always carry one.
+		return false
+	}
+	pool = strings.TrimSpace(pool)
+	if pool == "" || strings.Contains(pool, "/") {
+		// Storage ids never contain '/'. Pool-with-slash means this is a
+		// host path with a slash in it — a bind mount.
+		return true
+	}
+	// A pool token is [A-Za-z0-9_-]+. If the pool part is anything else
+	// (e.g. contains '.' like a hostname, or is just a number), we treat
+	// it as a host path and thus a bind mount.
+	for _, c := range pool {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+			continue
+		default:
+			// Not a storage-id character → the token is not a pool. PVE
+			// reports a host path like "mnt/share:/srv/data" (no leading
+			// '/'). Treat as a bind mount.
+			return true
+		}
+	}
+	// A colon-lead "pool:<volid>" form with a valid pool and PVE-style
+	// volume token is an allocated volume → not a bind mount.
+	return false
 }
 
 // PveLXCNetworksFromPVE parses PVE's LXC /config report into pveconform LXC
@@ -355,10 +469,47 @@ func PveLXCNetworksFromPVE(current map[string]any) ([]LXCNetwork, bool) {
 		if f.iface != "" && f.iface != k {
 			n.Iface = f.iface
 		}
+		// ip=/gw= are user-set static addressing PVE reports back when a
+		// container has them (probe-verified on prod-a LXC 110/111:
+		// net0=...,ip=192.168.192.110/18,gw=192.168.192.5, type=veth).
+		// They are OWNED by pveconform — PVE does not auto-assign them — so
+		// adopt captures them faithfully.
+		if f.ip != "" {
+			n.Ip = f.ip
+		}
+		if f.gw != "" {
+			n.Gw = f.gw
+		}
 		out = append(out, n)
 	}
 	sort.Slice(out, func(i, j int) bool { return slotSortKey(out[i].Slot) < slotSortKey(out[j].Slot) })
 	return out, len(out) > 0
+}
+
+// parseLXCFeaturesNesting detects PVE 9.x's composite features= form for
+// `nesting=1`. PVE 8.x reported nesting as a top-level key; 9.x moved it
+// into a single `features=` property with a comma-separated `k=v` body.
+// Probe source: prod-a LXC 203 /config reports `features = nesting=1`.
+//
+// PVE /config PUT accepts `features=nesting=1` to update it (probe-verified
+// on conformance-dev 2026-09-10), but the top-level `nesting=` form is
+// rejected there with "property is not defined in schema". So pveconform's
+// LXC.Drift must also emit `features=` (handled separately).
+func parseLXCFeaturesNesting(current map[string]any) bool {
+	s := pveStr(current["features"])
+	if s == "" {
+		return false
+	}
+	for _, tok := range strings.Split(s, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if k, v, found := strings.Cut(tok, "="); found && k == "nesting" && v == "1" {
+			return true
+		}
+	}
+	return false
 }
 
 // PveLXCDNSFromPVE extracts LXC DNS + hostname from PVE's /config.
@@ -384,25 +535,45 @@ func PveLXCDNSFromPVE(current map[string]any) (LXCDNS, bool) {
 }
 
 // PveLXCOptionsFromPVE extracts the owned LXC options PVE reports.
+//
+// Every boolean is a tri-state pointer: PVE's /config report only carries
+// keys the operator actually set (PVE omits `protection=0` etc.), so a
+// `0` report value is meaningful (an explicit unset) and must be captured.
+// The PVE 9.x composite `features=` form also lands here: `nesting=1`
+// appears inside features= on PVE 9.x reports (top-level `nesting=` was
+// moved into the composite in PVE 9.x).
 func PveLXCOptionsFromPVE(current map[string]any) LXCOptions {
 	o := LXCOptions{}
-	if b, ok := pveBool(current["unprivileged"]); ok {
-		o.Unprivileged = b
+	// Tri-state capture: PVE only reports keys the operator actually set,
+	// so every observed value — INCLUDING an explicit "0" — is owned
+	// (pointer-bool) and must round-trip. Absent keys stay nil
+	// ("PVE decides") so adopt never invents a value PVE did not report.
+	// Order is deterministic (PVE's /config report ordering is not stable
+	// across nodes; the captured values are scalars, so the resulting
+	// LXCOptions is independent of observation order).
+	setField := func(v **bool, key string) {
+		if b, ok := pveBool(current[key]); ok {
+			pb := b
+			*v = &pb
+		}
 	}
-	if b, ok := pveBool(current["protection"]); ok {
-		o.Protection = b
-	}
+	setField(&o.Unprivileged, "unprivileged")
+	setField(&o.Protection, "protection")
+	setField(&o.KeyCtl, "keyctl")
+	setField(&o.Fuse, "fuse")
+	setField(&o.OnBoot, "onboot")
+	setField(&o.Console, "console")
+	// nesting: PVE 8.x reports a top-level `nesting=` key; PVE 9.x moved
+	// it into the composite `features=` property (`features=nesting=1`,
+	// probe-verified on prod-a LXC 203). A `features=` key present
+	// at all means nesting has an explicit (possibly off) value; capture
+	// it. Neither key present → nil ("PVE decides").
 	if b, ok := pveBool(current["nesting"]); ok {
-		o.Nesting = b
-	}
-	if b, ok := pveBool(current["keyctl"]); ok {
-		o.KeyCtl = b
-	}
-	if b, ok := pveBool(current["fuse"]); ok {
-		o.Fuse = b
-	}
-	if b, ok := pveBool(current["onboot"]); ok {
-		o.OnBoot = b
+		pb := b
+		o.Nesting = &pb
+	} else if pveStr(current["features"]) != "" {
+		pb := parseLXCFeaturesNesting(current)
+		o.Nesting = &pb
 	}
 	if s := pveStr(current["startup"]); s != "" {
 		o.Startup = s
@@ -544,10 +715,12 @@ func HumanFromBytes(b int64) (string, bool) {
 	if b <= 0 {
 		return "", false
 	}
-	const (kib = int64(1) << 10
+	const (
+		kib = int64(1) << 10
 		mib = int64(1) << 20
 		gib = int64(1) << 30
-		tib = int64(1) << 40)
+		tib = int64(1) << 40
+	)
 	switch {
 	case b%tib == 0:
 		return strconv.FormatInt(b/tib, 10) + "TiB", true

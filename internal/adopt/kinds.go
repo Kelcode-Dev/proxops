@@ -3,6 +3,7 @@ package adopt
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
@@ -75,24 +76,36 @@ func VMKeyIsDynamic(k string) bool {
 
 // LXCKeysOwned lists every PVE /lxc/{id}/config key that pveconform's LXC
 // schema models. mpN (dynamic) and netN are handled by LXCKeyIsDynamic.
+//
+// M10 additions (prod-a live-verified):
+//   - `console`: PVE 9.x top-level LXC console enable, captured in
+//     LXCOptions.Console (tri-state *bool).
+//   - `features`: PVE 9.x composite token ("features=nesting=1,..."); the
+//     `nesting` value inside is captured in LXCOptions.Nesting. The legacy
+//     top-level `nesting` key is also accepted.
 var LXCKeysOwned = map[string]bool{
-	"cores":        true,
-	"memory":       true,
-	"swap":         true,
-	"arch":         true,
-	"hostname":     true,
-	"nameserver":   true,
-	"searchdomain": true,
-	"description":  true,
-	"tags":         true,
-	"rootfs":       true,
-	"unprivileged": true,
-	"protection":   true,
-	"nesting":      true,
-	"keyctl":       true,
-	"fuse":         true,
-	"onboot":       true,
-	"startup":      true,
+	"cores":         true,
+	"memory":        true,
+	"swap":          true,
+	"arch":          true,
+	"hostname":      true,
+	"nameserver":    true,
+	"searchdomain":  true,
+	"search-domain": true,
+	"description":   true,
+	"tags":          true,
+	"rootfs":        true,
+	"unprivileged":  true,
+	"protection":    true,
+	"nesting":       true,
+	"keyctl":        true,
+	"fuse":          true,
+	"onboot":        true,
+	"startup":       true,
+	"console":       true,
+	"features":      true,
+	// note: `ostype` stays in PVEBookkeepingKeys (PVE-inferred from the
+	// ostemplate; never a create form-value, and never a gap).
 }
 
 // LXCKeyIsDynamic reports whether a PVE LXC /config key is a dynamic device
@@ -114,7 +127,7 @@ func isMPSlotKey(k string) bool {
 }
 
 func isNICSlotKey(k string) bool {
-	if !strings.HasPrefix(k, "net") || len(k)==3 {
+	if !strings.HasPrefix(k, "net") || len(k) == 3 {
 		return false
 	}
 	for _, c := range k[3:] {
@@ -128,6 +141,12 @@ func isNICSlotKey(k string) bool {
 // adoptVM reads one VM's /config and writes a single pveconform manifest
 // under vm/<cluster>/. Returns nil on success; an error when PVE's /config
 // could not be read.
+//
+// PVE template VMs (raw "template" == 1) are NEVER adopted as manifests:
+// pveconform has no template-VM resource kind and the VM's disks are the
+// clone source data that a pveconform-managed manifest would wrongly
+// claim ownership of. The template VM is recorded on Result.Skipped so the
+// fleet census stays complete.
 func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VMListEntry) error {
 	cfg, gErr := ac.pve.VM().Get(ctx, node, e.VMID)
 	if gErr != nil {
@@ -136,6 +155,26 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 	raw := map[string]any{}
 	for k, v := range cfg {
 		raw[k] = v
+	}
+
+	if pveTemplateValue(raw["template"]) {
+		rawName, _ := raw["name"].(string)
+		ac.res.Skipped = append(ac.res.Skipped, SkippedObject{
+			Kind:   schema.KindVM,
+			Node:   node,
+			ID:     e.VMID,
+			Name:   rawName,
+			Reason: "PVE template VM (template=1); pveconform has no template-VM resource kind and must not claim ownership of a clone source",
+		})
+		ac.res.Gaps = append(ac.res.Gaps, Gap{
+			Kind:  schema.KindVM,
+			Node:  node,
+			ID:    e.VMID,
+			Field: "template",
+			Value: "1",
+			Note:  "PVE template VMs are out of scope for pveconform adoption; no manifest generated (recorded in Skipped)",
+		})
+		return nil
 	}
 
 	vm := schema.NewVM()
@@ -157,9 +196,36 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 		vm.Spec.CPU.Cores = cores
 	}
 
-	// disks.
-	if disks, ok := schema.PveDisksFromPVE(raw); ok {
-		vm.Spec.Disks = disks
+	// disks. PVE's cloud-init volume on non-IDE slots (probe-verified on
+	// prod-a: "vm-999-cloudinit,media=cdrom" on scsi1 on every VM
+	// with cloud-init configured via qm) is a PVE-managed cdrom that
+	// pveconform does not own in its schema (cloud-init attaches to
+	// ide2/ide3 only). Excluding it from spec.disks keeps the manifest
+	// valid without pretending pveconform owns a volume it cannot
+	// recreate. The exclusion is recorded below if PVE reported one.
+	rawDisks, ok := schema.PveDisksFromPVE(raw)
+	if ok {
+		kept := rawDisks[:0]
+		for _, d := range rawDisks {
+			if schema.PveDiskMedia(vm.Spec.VMID, raw, d.Slot) == "cdrom" {
+				// Recorded in gaps below.
+				continue
+			}
+			kept = append(kept, d)
+		}
+		vm.Spec.Disks = kept
+	}
+	for _, d := range rawDisks {
+		if schema.PveDiskMedia(vm.Spec.VMID, raw, d.Slot) == "cdrom" {
+			ac.res.Gaps = append(ac.res.Gaps, Gap{
+				Kind:  schema.KindVM,
+				Node:  node,
+				ID:    e.VMID,
+				Field: d.Slot,
+				Value: pveStr(raw[d.Slot]),
+				Note:  "PVE reports a cloud-init / cdrom-style volume on a pveconform non-owned slot (" + d.Slot + "). pveconform does not own non-IDE cdrom slots; this disk is excluded from spec.disks. Review whether it matters for your workload — if PVE's cloud-init is on IDE (ide2/ide3), it is owned via spec.hardware.cloud-init and no action is needed.",
+			})
+		}
 	}
 
 	// networks.
@@ -235,7 +301,7 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 		if VMKeyIsDynamic(k) {
 			continue
 		}
-		gap := Gap{Kind: schema.KindVM, Node: node, ID: e.VMID, Field: k, Value: pveStr(raw[k]), Note: "live PVE config pveconform does not model for VMs; not represented in the generated manifest"}
+		gap := Gap{Kind: schema.KindVM, Node: node, ID: e.VMID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE config pveconform does not model for VMs; not represented in the generated manifest")}
 		gaps = append(gaps, gap)
 	}
 	ac.res.Gaps = append(ac.res.Gaps, gaps...)
@@ -376,6 +442,22 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 		}
 	}
 	lxc.Spec.MountPoints = mps
+	// Bind mounts: PVE reports host-path bind mp's ("mpN=/host:path") that
+	// pveconform does not model (docs/GAPS.md: LXC bind-mount mpN). They
+	// never appear in spec.mount-points, so surface them explicitly as a
+	// gap (the LXCKeyIsDynamic check would otherwise silently drop them).
+	for _, slot := range mpslots(raw) {
+		if v, ok := raw[slot].(string); ok && strings.HasPrefix(strings.TrimSpace(v), "/") {
+			ac.res.Gaps = append(ac.res.Gaps, Gap{
+				Kind:  schema.KindLXC,
+				Node:  node,
+				ID:    e.CID,
+				Field: slot,
+				Value: redactGapValue(slot, v),
+				Note:  "LXC mount-point is a host-path bind mount; pveconform does not model bind mpN (docs/GAPS.md). Remove/re-host this bind on PVE before listing the LXC in resources.yaml, or add an explicit bind-mount shape to the schema.",
+			})
+		}
+	}
 
 	// networks.
 	if nets, ok := schema.PveLXCNetworksFromPVE(raw); ok {
@@ -461,11 +543,33 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 		if LXCKeyIsDynamic(k) {
 			continue
 		}
-		gap := Gap{Kind: schema.KindLXC, Node: node, ID: e.CID, Field: k, Value: pveStr(raw[k]), Note: "live PVE LXC config pveconform does not model; not represented in the generated manifest"}
+		gap := Gap{Kind: schema.KindLXC, Node: node, ID: e.CID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE LXC config pveconform does not model; not represented in the generated manifest")}
 		gaps = append(gaps, gap)
 	}
 	ac.res.Gaps = append(ac.res.Gaps, gaps...)
 	return nil
+}
+
+// mpslots returns the mp* slot keys present in a PVE LXC /config report,
+// in deterministic (slot-sort) order.
+func mpslots(raw map[string]any) []string {
+	out := []string{}
+	for k := range raw {
+		if len(k) > 2 && k[:2] == "mp" {
+			isSlot := true
+			for _, c := range k[2:] {
+				if c < '0' || c > '9' {
+					isSlot = false
+					break
+				}
+			}
+			if isSlot {
+				out = append(out, k)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // pveStatusToState maps PVE's live power state to pveconform's desired-state

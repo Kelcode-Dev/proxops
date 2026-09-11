@@ -60,8 +60,8 @@ type Server struct {
 	// the mock derives the list from object placements (clusterNodesAuto).
 	clusterNodes     []string
 	clusterNodesAuto []string
-	tasks     map[string]*task
-	taskSeq   int
+	tasks            map[string]*task
+	taskSeq          int
 
 	created, updated, deleted, cloned, tpl, untpl, isl, tdl int
 
@@ -69,6 +69,12 @@ type Server struct {
 	// can exercise the executor's in-cycle dependency deferral (failed
 	// prerequisite → dependant deferred). Set via SetDownloadFail.
 	downloadFail bool
+
+	// seenMethods records every HTTP method the mock served, in order. Used
+	// by tests to independently prove that a caller (adopt) issued zero
+	// writes (POST/PUT/DELETE) — defense-in-depth on top of the
+	// pveclient.Client.WritesPerformed counter.
+	seenMethods []string
 
 	ts *httptest.Server
 }
@@ -101,6 +107,30 @@ func New(cfg Config) *Server {
 
 // URL returns the mock root ("http://127.0.0.1:PORT").
 func (s *Server) URL() string { return s.ts.URL }
+
+// WritesObserved returns the number of POST/PUT/DELETE requests the mock
+// has served since construction. A caller that is expected to be read-only
+// (adopt, dry-plan, verification paths) MUST observe 0; tests asserting
+// this are double-proofing on top of pveclient.Client.WritesPerformed.
+func (s *Server) WritesObserved() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, m := range s.seenMethods {
+		if m == http.MethodPost || m == http.MethodPut || m == http.MethodDelete {
+			n++
+		}
+	}
+	return n
+}
+
+// Methods returns a copy of every HTTP method the mock served, in order
+// (GET, POST, ...). Adopt must see GET-only.
+func (s *Server) Methods() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string{}, s.seenMethods...)
+}
 
 // Close stops the mock.
 func (s *Server) Close() { s.ts.Close() }
@@ -329,6 +359,12 @@ func (s *Server) split(s2 string) (h, t string, ok bool) {
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api2/json/")
+
+	// Record the method so tests can independently prove zero writes
+	// (defense-in-depth on top of the pveclient counter).
+	s.mu.Lock()
+	s.seenMethods = append(s.seenMethods, r.Method)
+	s.mu.Unlock()
 
 	switch rest {
 	case "access/ticket":

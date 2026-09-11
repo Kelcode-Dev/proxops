@@ -189,3 +189,228 @@ Entries added during the M9 implementation pass:
     resources (out of scope)" implies CA pinning is a TLS concern, not
     a PVE API concern, and the M8 global CA is sufficient for most
     deployments.
+
+## M10 (real prod-a adoption) — new gaps / PVE-9.2 wire findings
+
+Entries discovered while reverse-engineering the **production** prod-a
+PVE cluster (2026-09-10, PVE 9.2.2 on node `pve01`). Probe work happened on
+the disposable conformance-dev cluster (never on prod-a, which is a
+read-only target for adoption).
+
+- **LXC: `keyctl` / `fuse` are adoptable but NOT convergable on PVE 9.x**
+  - **Resource/area**: LXC options (`spec.options.keyctl`, `spec.options.fuse`)
+  - **PVE configuration/API field**: `keyctl`, `fuse`
+  - **Status**: `investigated`
+  - **Priority**: low
+  - **What is unsupported**: PVE 9.2's LXC create AND /config-PUT schema both
+    REJECT `keyctl=` and `fuse=` as top-level form-values (HTTP 400/403,
+    "property is not defined in schema"), and the PVE 9.x `features` composite
+    only recognizes a `nesting=<0|1>` token — `features=keyctl=1` /
+    `features=fuse=1` are 403. Yet PVE's /config report CAN carry these keys
+    (a container created via pct/webUI sets them). pveconform therefore
+    **adopts** `keyctl`/`fuse` into `spec.options` (faithful capture) but
+    **cannot converge** a desired=on onto a live=off container — Drift
+    surfaces a non-destructive anomaly instead of submitting a 400-guaranteed
+    write.
+  - **Impact/risk**: none today (the option is not written back). An adopted
+    LXC that has keyctl/fuse on PVE is represented; a manifest that asks to
+    enable them on a new container fails closed at create-params
+    (`ToCreateParams` error names the blocked option).
+  - **Discovery source**: M10 probe (disposable CTs 9881/9882 on conformance-dev,
+    both destroyed; 403 at create). Pinned: `internal/schema/lxc_wire_regressions_test.go`
+    (`TestLXCToCreateParams_KeyctlTrueBlocks`,
+    `TestLXCDrift_KeyctlTrueLiveOffIsAnomalyNoWrite`).
+  - **Notes**: closing this requires a PVE-side `pct set` step (out of
+    pveconform's API surface). If PVE ever adds a wire form, drop the
+    fail-closed + anomaly and wire the token through ToCreateParams/Drift.
+
+- **LXC: `unprivileged` is create-only on PVE 9.x**
+  - **Resource/area**: LXC options (`spec.options.unprivileged`)
+  - **PVE configuration/API field**: `unprivileged`
+  - **Status**: `investigated`
+  - **Priority**: low
+  - **What is unsupported**: PVE 9.2's /config-PUT returns HTTP 500 when
+    given `unprivileged=0` or `=1` (probe: conformance-dev CT 9200). The
+    flag is LXC-create-time-only. pveconform adopts it faithfully
+    (`*bool`; an explicit 0 is owned, not dropped) but Drift cannot flip it —
+    a divergent `unprivileged` surfaces as a non-destructive anomaly that
+    names "a recreate is required to converge".
+  - **Impact/risk**: none today (never written back). Adoption output is
+    faithful; only a recreate path would ever change it.
+  - **Discovery source**: M10 probe (PUT /lxc/9200/config unprivileged=0 → 500).
+    Pinned: `TestLXCDrift_UnprivilegedTrueLiveOffIsAnomalyNoWrite`.
+  - **Notes**: prod-a LXC 111 (nfs-server) reports `unprivileged=0` —
+    the adopted manifest pins it via pointer-bool; Drift will not touch it
+    (untagged until the operator lists it, and even then the anomaly is
+    non-destructive).
+
+- **LXC: `nesting` rides the PVE 9.x `features=` composite (not a top-level key)**
+  - **Resource/area**: LXC options (`spec.options.nesting`)
+  - **PVE configuration/API field**: `nesting` (PVE 8.x) / `features=nesting=0|1` (PVE 9.x)
+  - **Status**: `investigated`
+  - **Priority**: low
+  - **What is unsupported (as a top-level wire token)**: PVE 9.2 rejects
+    top-level `nesting=` on both /lxc create (400) and /config-PUT (400). The
+    accepted form is the composite `features=nesting=<0|1>` (probe: create
+    with `features=nesting=1` → 200 + report re-echoes the token; PUT
+    `features=nesting=0` → 200). pveconform's owned `spec.options.nesting`
+    maps to that composite on both the create and drift paths; top-level
+    `nesting=` is NEVER emitted.
+  - **Impact/risk**: none today (converged through the composite). prod-a
+    LXC 203 (seaweedfs-01) reports `features=nesting=1` — adopted faithfully.
+  - **Discovery source**: M10 probe (disposable CT 9880, destroyed; conformance-dev
+    CT 9200 PUT probe). Pinned: `TestLXCToCreateParams_NestingAsComposite`,
+    `TestLXCDrift_NestingEmitsFeaturesNotTopLevel`.
+  - **Notes**: the PVE 9.x `features` composite today carries only `nesting`
+    in pveconform's known grammar (keyctl/fuse tokens → 403, see first M10
+    entry). If PVE adds new feature tokens, `Drift` would need to merge
+    them (a bare `features=nesting=X` write today cannot clobber anything
+    because no other PVE-owned feature token is known).
+
+- **VM: cloud-init volume on a non-IDE slot is PVE-owned, not a pveconform disk**
+  - **Resource/area**: VM disks
+  - **PVE configuration/API field**: `<slot>=...-cloudinit,media=cdrom` where
+    `<slot>` is `scsi*`/`virtio*`/`sata*`
+  - **Status**: `investigated`
+  - **Priority**: medium
+  - **What is unsupported**: pveconform's cloud-init model is IDE-only
+    (`spec.hardware.cloud-init` → `ide2`/`ide3`). PVE 9.2 can place a
+    cloud-init cdrom volume on a data-slot bus instead — every
+    prod-a k8s VM (100/101/102/120) + the template VM (999) report
+    `scsi1=vm_disks:vm-NNN-cloudinit,media=cdrom,size=4M` on top of
+    `scsi0=...-disk-1` (the root disk). pveconform cannot recreate such a
+    slot (its create-time cloud-init form goes to ide2), so adoption
+    **excludes** `media=cdrom`-shuffled slots from `spec.disks` and reports
+    each one as a gap (`PveDiskMedia` detection is slot-agnostic:
+    `media=cdrom` or a `*-cloudinit` PVE-assigned volume name).
+  - **Impact/risk**: none today (the slot is never written; Drift surfaces it
+    as a non-destructive live-only anomaly, matching the M7 live-only-disk
+    guard). An adopted manifest is *disk-faithful* except for the PVE-owned
+    cloud-init slot (which is documented in the gap report + GAPS.md).
+  - **Discovery source**: M10 live prod-a `/qemu/{id}/config` (VM 100 –
+    "app-prod-a" scsi1 + VM 999 scsi1, the latter a template VM see
+    next entry). Pinned: `TestAdopt_CloudInitOnSATAAlsoExcluded` (slot
+    agnosticity), `TestAdopt_PlainDataDiskStillAdopted` (the exclusion is
+    narrow: no `media=cdrom` token → the disk IS adopted).
+  - **Notes**: PVE-side, these slots were created by Talos/k8s provision
+    tooling's `qm` usage (cloud-init on `scsi1`). A future
+    `spec.hardware.cloud-init.slot` escape hatch (a cloud-init model that
+    targets a data bus) would close this; until then such PVE objects are
+    *documented*, not re-created.
+
+- **VM: PVE template VMs (`template=1`) are out of adoption scope**
+  - **Resource/area**: VM
+  - **PVE configuration/API field**: `template=1`
+  - **Status**: `investigated` (deliberate)
+  - **Priority**: n/a
+  - **What is unsupported**: pveconform has no "template VM" resource kind and
+    must not claim ownership of a clone source (a pveconform VM manifest's
+    disks are the clone *data*; converging one would risk re-creating the
+    template's own disk on the first apply → data loss). M10's adopt therefore
+    **skips** PVE-template VMs: no manifest is written, the live object is
+    recorded on `Result.Skipped` (census stays complete), and a gap names the
+    skip.
+  - **Impact/risk**: none (no manifest; the live object is never touched).
+  - **Discovery source**: M10 live prod-a: VM 999 `tpl-almalinux-10`
+    (`template=1`, `scsi0=vm_disks:base-999-disk-1`), the Talos/almalinux
+    clone source for every prod-a VM. Pinned:
+    `TestAdopt_TemplateVMsSkippedWithCensus`.
+  - **Notes**: prod-a runs a Talos control plane + 3 CPU workers from a
+    PVE-side template; those 4 VMs (141/142/143/144) are adopted normally (they
+    are NOT template-flagged), and the template itself (999) is explicitly
+    excluded.
+
+- **LXC: `ostype` is PVE-inferred bookkeeping, not an owned field**
+  - **Resource/area**: LXC + VM
+  - **PVE configuration/API field**: `ostype`
+  - **Status**: `investigated`
+  - **Priority**: low
+  - **What is unsupported**: PVE infers `ostype` from the installed content /
+    ostemplate — it is not a create/update form-value an operator controls.
+    M10 moved `ostype` from the gap surface to `PVEBookkeepingKeys` (together
+    with `digest`, `meta`, `vmgenid`, `smbios1`, `uuid`, `ostemplate`), so it
+    no longer surfaces as a "pveconform does not model" finding.
+  - **Impact/risk**: none (purely a gap-report noise-reduction change).
+  - **Discovery source**: M10 live prod-a (every VM + LXC reports
+    `ostype=`; none is a pveconform form-value).
+  - **Notes**: no schema change — just adopt's bookkeeping-key list.
+
+- **LXC: `cmode` / `tty` / `console` / `cpulimit` / `cpuunits` / raw `lxc.` — not modelled**
+  - **Resource/area**: LXC options + raw config
+  - **PVE configuration/API field**: `cmode`, `tty`, `console`, `cpulimit`,
+    `cpuunits`, `lxc.`
+  - **Status**: `discovered`
+  - **Priority**: low
+  - **What is unsupported**: these PVE LXC fields are not in pveconform's
+    LXCOptions / LXCExtra model. prod-a reports several of them
+    (110: `cmode=tty`, `tty=2`, `cpulimit=0`, `cpuunits=1024`; 111: also
+    `lxc = [['lxc.apparmor.profile','unconfined']]`; 110/111/203: `console=1`).
+    M10 **partially** closes this: `console` is now adopted + convergable
+    (top-level create-accepted + /config-PUT-accepted); `cmode`, `tty`,
+    `cpulimit`, `cpuunits`, and raw `lxc.` lines remain unmodelled (each
+    surfaces as a named gap).
+  - **Impact/risk**: none today (no write path). Adoption reports them;
+    operators see them in the gap set. A future `LXCOptions.TTYCount` /
+    `LXCOptions.CPULimit` (and an `LXC.LxcConf` raw escape) would close
+    cmode/tty/cpulimit/cpuunits/lxc — deliberately deferred.
+  - **Discovery source**: M10 live prod-a /lxc/{110,111,203}/config.
+    Pinned (console adopted): `TestAdopt_ZeroWritesOnProdFixtureEquivalent`.
+  - **Notes**: `cpulimit` and `cpuunits` are PVE 9.x CPU-weight knobs
+    (default 0/1024 are PVE's "no limit / default weight"); pveconform does
+    not adopt its PVE defaults, so they always surface on non-default live
+    values.
+
+- **VM: cloud-init on pveconform-VMs — no `ciuser`/`cipassword`/`sshkeys`/`ipconfig`/`nameserver` model**
+  - **Resource/area**: VM cloud-init fields (top-level PVE keys on the same
+    object as a pveconform VM)
+  - **PVE configuration/API field**: `ciuser`, `cipassword`, `sshkeys`,
+    `ipconfig0`, `nameserver`, `cicustom`, `ciupgrade`
+  - **Status**: `discovered`
+  - **Priority**: low
+  - **What is unsupported**: pveconform's VM model does not carry
+    cloud-init user credentials / SSH keys / static-ip or DNS fields at
+    the top level (its only cloud-init surface is an ide2/ide3 volume).
+    prod-a's k8s VMs report all of these (5 VMs each: 100/101/102/120/
+    999). M10 adds **redaction** (not adoption): `sshkeys` and `cipassword`
+    gap values are emitted as `<redacted>` — the field name still reports
+    ("pveconform does not model this") but the value NEVER reaches stdout,
+    logs, the gap report, or any generated manifest.
+  - **Impact/risk**: none (no write path; PII is redacted at the source,
+    the adopt layer). The operator's review step (or a future
+    `VM.CloudInit` model) would close these.
+  - **Discovery source**: M10 live prod-a /qemu/{100,101,102,120,999}/
+    /config. Pinned: `TestAdopt_ZeroWritesOnProdFixtureEquivalent`
+    (sentinel "hunter2" + "AAAAB3NzaC1yc2E" must not appear in the report;
+    `sshkeys`/`cipassword` gap values must contain `<redacted>`), and
+    `TestAgent_GeneratedOutputContainsNoCredentialMaterial`
+    (pveconform's own SOPS credential sentinels must not appear in Result
+    text, logs, warnings, skipped, incomplete, or any generated manifest).
+  - **Notes**: `ipconfig0` and `nameserver` are PVE cloud-init's own
+    static-IP model; pveconform's VM networking is the `netN` data-slot
+    property list (model+bridge+MAC+vlan+rate+firewall) — IP on a VM is PVE
+    cloud-init-owned, not pveconform net-owned.
+
+- **LXC: static `ip=`/`gw=` on LXC netX — M10 adds adoption, PVE 9.2 create-time
+  probe confirmed convergent**
+  - **Resource/area**: LXC networks
+  - **PVE configuration/API field**: `ip=<addr/prefix>`, `gw=<addr>` inside
+    the `netX` property string
+  - **Status**: `investigated` (CLOSED by M10)
+  - **Priority**: n/a (closed)
+  - **What was unsupported**: pveconform's LXCNetwork did not carry
+    `ip=`/`gw=`. M10 adds `LXCNetwork.Ip` / `LXCNetwork.Gw` (tri-string,
+    both omitempty; nil/empty = PVE decides) on the wire form, and
+    `parseLXCNetFields` / `PveLXCNetworksFromPVE` capture them on the
+    report form. PVE 9.2 create + /config-PUT both accept the
+    `netX=...,ip=...,gw=...` form (probe: disposable CT 9876 on
+    conformance-dev, created with `ip=192.168.3.100/24,gw=192.168.3.1` and
+    confirmed the report re-echoes both, then destroyed).
+  - **Impact/risk**: none (new convergent surface).
+  - **Discovery source**: M10 live prod-a /lxc/{110,111,203}/config
+    (all three carry `ip=192.168.192.1XX/18,gw=192.168.192.5`). Pinned:
+    `TestAdopt_ZeroWritesOnProdFixtureEquivalent` (asserts the adopted
+    LXC 111 has ip/gw captured, NOT a gap).
+  - **Notes**: `hwaddr` (PVE-assigned MAC) + `type` (PVE normalizes to
+    veth) remain intentionally NOT adopted (same M8 rule: PVE-owned values
+    are captured as gaps + not wired into spec.networks; a pinned MAC on
+    the manifest is respected, random MACs are omitted).

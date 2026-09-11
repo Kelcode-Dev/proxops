@@ -6,9 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
 	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
@@ -23,10 +22,98 @@ var PVEBookkeepingKeys = map[string]bool{
 	"vmgenid": true,
 	"smbios1": true,
 	"uuid":    true,
-	// PVE infers ostype from the ostemplate; it is reserved (spec.template),
-	// so it cannot go in spec.extra either.
+	// PVE infers ostype from the installed OS / ostemplate; it is not a
+	// create form-value pveconform can (or wants to) own, so treating it
+	// as bookkeeping keeps it out of both the owned surface and the gap
+	// report. (probe: every prod-a VM reports ostype=l26 etc.)
 	"ostype":     true,
 	"ostemplate": true,
+}
+
+// sensitiveGapFields are PVE /config keys whose VALUES carry credentials or
+// PII. adopt reports the field NAME as a gap (so the operator knows pveconform
+// does not model it) but must NEVER echo its value: sshkeys embeds public
+// keys + usernames, cipassword is the cloud-init root password placeholder.
+// The gap value is substituted with a fixed marker.
+var sensitiveGapFields = map[string]bool{
+	"sshkeys":    true,
+	"cipassword": true,
+	"password":   true,
+	"sshkey":     true,
+	"keyfile":    true,
+	"secret":     true,
+}
+
+// redactGapValue substitutes a PII/credential-carrying PVE value with a
+// fixed redaction marker so it can never reach stdout, logs, or a committed
+// gap report.
+func redactGapValue(field, value string) string {
+	if sensitiveGapFields[field] {
+		return "<redacted>"
+	}
+	return value
+}
+
+// gapNoteFor augments the default "pveconform does not model this" gap
+// note with a specific meaning for a handful of well-known PVE fields
+// (so the audit is more useful than a generic note). Unknown fields keep
+// the caller-supplied default.
+func gapNoteFor(field, fallback string) string {
+	switch field {
+	case "cmode":
+		return "PVE console-mode token (tty/vga/none); pveconform does not model the LXC console mode"
+	case "tty":
+		return "PVE tty count; pveconform does not model LXC tty count"
+	case "console":
+		return "PVE console enable (=1); pveconform LXCOptions.Console is tri-state and captures it via /config PUT"
+	case "cpulimit":
+		return "PVE CPU rate limit (0 = unbounded); pveconform does not model LXC cpulimit"
+	case "cpuunits":
+		return "PVE CPU weight (share of a 1024-unit pool); pveconform does not model LXC cpuunits"
+	case "features":
+		return "PVE 9.x composite feature tokens (nesting=1, etc.); pveconform captures nesting via LXCOptions.Nesting"
+	case "lxc":
+		return "PVE LXC raw `lxc.` config-line passthrough (AppArmor profile, cgroups, ...); pveconform does not model it"
+	case "template":
+		return "PVE template-flag VMs are out of scope (recorded in Skipped)"
+	case "ipconfig0":
+		return "PVE VM cloud-init ipconfig0; pveconform does not model VM cloud-init networking"
+	case "nameserver":
+		return "PVE VM cloud-init nameserver; pveconform does not model VM cloud-init DNS"
+	case "cicustom":
+		return "PVE cloud-init custom files; pveconform does not model VM cloud-init cicustom"
+	case "ciuser":
+		return "PVE cloud-init username; pveconform does not model VM cloud-init ciuser"
+	case "ciupgrade":
+		return "PVE cloud-init upgrade mode; pveconform does not model it"
+	case "sshkeys":
+		return "PVE cloud-init SSH public keys; pveconform does not model VM cloud-init sshkeys (value redacted)"
+	case "cipassword":
+		return "PVE cloud-init root password; pveconform does not model it (value redacted)"
+	case "kvm":
+		return "PVE KVM nested-virt enable; pveconform does not model it"
+	case "balloon":
+		return "PVE balloon-MiB / auto-balance setting; pveconform does not model it"
+	}
+	return fallback
+}
+
+// pveTemplateValue reports whether PVE's `template` config token is set
+// (PVE reports it as the number 1 or the string "1"; JSON may decode either
+// depending on the PVE build).
+func pveTemplateValue(v any) bool {
+	if v == nil {
+		return false
+	}
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "1" || strings.EqualFold(x, "true")
+	default:
+		n, _ := strconv.ParseFloat(fmt.Sprintf("%v", x), 64)
+		return n == 1
+	}
 }
 
 // artifactNames maps a PVE artifact volid to the generated manifest name, so
@@ -140,6 +227,16 @@ func Run(ctx context.Context, pve *pveclient.Client, cluster string, allowedNode
 
 	res.Gaps = dedupGaps(res.Gaps)
 	sort.Slice(res.Wrote, func(i, j int) bool { return res.Wrote[i].Path < res.Wrote[j].Path })
+	// Incomplete / Skipped are keyed by path; sort them too, because PVE's
+	// per-node listing order is not guaranteed stable across calls and the
+	// adopt log must be byte-identical for idempotency.
+	sort.Strings(res.Incomplete)
+	sort.Slice(res.Skipped, func(i, j int) bool {
+		if res.Skipped[i].Node != res.Skipped[j].Node {
+			return res.Skipped[i].Node < res.Skipped[j].Node
+		}
+		return res.Skipped[i].ID < res.Skipped[j].ID
+	})
 
 	// Read-only assertion: no PVE write endpoint may have been hit.
 	if got := pve.WritesPerformed(); got != writesBefore {
@@ -281,8 +378,10 @@ func (ac *adoptContext) adoptArtifacts(ctx context.Context, nodes []string) erro
 // value pveconform could not recover) still gets written (the operator
 // should see the generated shape to fix it), but it is ADDED TO
 // res.Incomplete and the summary says not to list it in resources.yaml yet.
+// Output is 2-space YAML (schema.YAMLOut) so generated manifests pass the
+// GitOps repo's .yamllint.yaml rule (indentation: spaces: 2).
 func (ac *adoptContext) writeManifest(kind schema.Kind, doc any, name string) error {
-	yb, err := yaml.Marshal(doc)
+	yb, err := schema.YAMLOut(doc)
 	if err != nil {
 		return fmt.Errorf("adopt: marshal %s %s: %w", kind, name, err)
 	}

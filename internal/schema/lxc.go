@@ -31,9 +31,10 @@ type LXCRoot struct {
 // name (wired0 by default in PVE 9.x web UI).
 //
 // PVE 9.2 LXC netX valid form-values: name, bridge, tag, vlan, hwaddr,
-// type, rate, firewall (see pct.conf(5)); `multi_bridge`/`macvlan_mode`
-// are NOT in PVE's netX schema (PVE 9.2 probe-verified: rejected by the
-// create API).
+// type, rate, firewall, ip, gw (see pct.conf(5)); `multi_bridge`/
+// `macvlan_mode` are NOT in PVE's netX schema (PVE 9.2 probe-verified:
+// rejected by the create API). `ip=`/`gw=` are user-set static address /
+// gateway tokens — they are not PVE-assigned, so pveconform may own them.
 type LXCNetwork struct {
 	// Iface is PVE's `name=<iface>` (guest-side interface name, e.g.
 	// "wired0" default when PVE's UI creates a net, "net0" legacy). When
@@ -52,6 +53,13 @@ type LXCNetwork struct {
 	RateLimit int `yaml:"rate-limit,omitempty" json:"rate-limit,omitempty"`
 	// Firewall enables PVE's LXC firewall on this NIC.
 	Firewall bool `yaml:"firewall,omitempty" json:"firewall,omitempty"`
+	// Ip is the user-set static IP / prefix (e.g. "192.168.192.110/18") that
+	// PVE assigns to the guest interface. Empty = PVE will not set one /
+	// the container uses DHCP or the bridge's default.
+	Ip string `yaml:"ip,omitempty" json:"ip,omitempty"`
+	// Gw is the user-set gateway (e.g. "192.168.192.5"). Empty = PVE will
+	// not set one.
+	Gw string `yaml:"gw,omitempty" json:"gw,omitempty"`
 	// Slot overrides the default net<i>.
 	Slot string `yaml:"slot,omitempty" json:"slot,omitempty"`
 }
@@ -102,31 +110,47 @@ type LXCMountOptions struct {
 }
 
 // LXCOptions captures PVE LXC common options panel.
+//
+// Boolean PVE flags use pointer-bool tri-state: nil = "PVE decides" (not
+// sent), true = `=1`, false = `=0`. This lets adopt faithfully capture an
+// explicit `unprivileged=0` (LXC 111 on prod-a) instead of silently
+// dropping it, which would otherwise make PVE fall back to its own default
+// (= `unprivileged=1` on PVE 9.x) on the next recreate.
 type LXCOptions struct {
-	// Unprivileged is PVE's `unprivileged` (PCT 1 = default in PVE 9.x).
-	// When true, pveconform emits `unprivileged=1`.
-	Unprivileged bool `yaml:"unprivileged,omitempty" json:"unprivileged,omitempty"`
+	// Unprivileged is PVE's `unprivileged` (PCT 1 = default in PVE 9.x when
+	// not set). nil = PVE decides; true = 1; false = 0.
+	Unprivileged *bool `yaml:"unprivileged,omitempty" json:"unprivileged,omitempty"`
 	// Protection is PVE's `protection` (prevents accidental destroy).
-	Protection bool `yaml:"protection,omitempty" json:"protection,omitempty"`
+	Protection *bool `yaml:"protection,omitempty" json:"protection,omitempty"`
 	// Nesting is PVE's `nesting` (allows nested LXC/VM).
-	Nesting bool `yaml:"nesting,omitempty" json:"nesting,omitempty"`
+	Nesting *bool `yaml:"nesting,omitempty" json:"nesting,omitempty"`
 	// KeyCtl is PVE's `keyctl` (allows keyctl in guest).
-	KeyCtl bool `yaml:"keyctl,omitempty" json:"keyctl,omitempty"`
+	KeyCtl *bool `yaml:"keyctl,omitempty" json:"keyctl,omitempty"`
 	// Fuse is PVE's `fuse` (allows FUSE mounts inside guest).
-	Fuse bool `yaml:"fuse,omitempty" json:"fuse,omitempty"`
+	Fuse *bool `yaml:"fuse,omitempty" json:"fuse,omitempty"`
 	// OnBoot is PVE's `onboot` (auto-start on node boot).
-	OnBoot bool `yaml:"onboot,omitempty" json:"onboot,omitempty"`
+	OnBoot *bool `yaml:"onboot,omitempty" json:"onboot,omitempty"`
 	// Startup is PVE's `startup` (e.g. "order=10", "start=1").
 	Startup string `yaml:"startup,omitempty" json:"startup,omitempty"`
 	// TTYCount is PVE's `ttys=` (PVE 9.2 create rejects this; only
-	// settable on /config update).
-	// pveconform records the intent and applies it at update time if
-	// the container needs a TTY change.
-	// When the field is left empty, pveconform does NOT send it.
+	// settable on /config update). pveconform records the intent and
+	// applies it at update time. When 0, pveconform does NOT send it.
 	TTYCount int `yaml:"ttys,omitempty" json:"ttys,omitempty"`
-	// Console enables/updates PVE's `console=` option (PVE 9.2 create
-	// rejects a non-boolean `console=tty`).
-	Console bool `yaml:"console,omitempty" json:"console,omitempty"`
+	// Console enables/updates PVE's `console=` option. nil = PVE decides;
+	// true = `console=1`; false = `console=0`.
+	Console *bool `yaml:"console,omitempty" json:"console,omitempty"`
+}
+
+// boolToPVE renders a tri-state LXC option into PVE's wire "0"/"1" /
+// "" (absent). nil = not sent; caller checks separately.
+func boolToPVE(b *bool) string {
+	if b == nil {
+		return ""
+	}
+	if *b {
+		return "1"
+	}
+	return "0"
 }
 
 // LXCUnprivileged is PVE's "unprivileged" (1).
@@ -447,24 +471,44 @@ func (l *LXC) ToCreateParams() (map[string]any, error) {
 		}
 		p[slot] = lxcNetString(n)
 	}
-	// Container options.
-	if l.Spec.Options.Unprivileged {
-		p["unprivileged"] = "1"
+	// Container options. Tri-state pointer-bools: nil = PVE decides (not
+	// sent); non-nil = emit the explicit 0 or 1.
+	//
+	// PVE 9.2 LXC create wire grammar (probe-verified on conformance-dev
+	// 2026-09-10, disposable CTs 9870-9877 / 9880-9882, all destroyed):
+	//   - TOP-LEVEL create keys accepted: unprivileged, protection, onboot,
+	//     console (all as "0"/"1").
+	//   - TOP-LEVEL create keys REJECTED: nesting (400 "property is not
+	//     defined in schema"), keyctl (403), fuse (403). The PVE 9.x
+	//     `features` composite is the ONLY accepted nesting form:
+	//     `features=nesting=1` creates fine; the report re-echoes the same
+	//     token.
+	// So the create-time form:
+	//   - nesting (when set) is folded into `features=nesting=<0|1>`;
+	//   - keyctl/fuse set TRUE are a manifest error (no PVE 9.x create form
+	//     exists to satisfy them) — fail closed instead of submitting a
+	//     400/403 create;
+	//   - keyctl/fuse set FALSE are PVE defaults and are not sent.
+	if s := boolToPVE(l.Spec.Options.Unprivileged); s != "" {
+		p["unprivileged"] = s
 	}
-	if l.Spec.Options.Protection {
-		p["protection"] = "1"
+	if s := boolToPVE(l.Spec.Options.Protection); s != "" {
+		p["protection"] = s
 	}
-	if l.Spec.Options.Nesting {
-		p["nesting"] = "1"
+	if s := boolToPVE(l.Spec.Options.OnBoot); s != "" {
+		p["onboot"] = s
 	}
-	if l.Spec.Options.KeyCtl {
-		p["keyctl"] = "1"
+	if s := boolToPVE(l.Spec.Options.Console); s != "" {
+		p["console"] = s
 	}
-	if l.Spec.Options.Fuse {
-		p["fuse"] = "1"
+	if l.Spec.Options.Nesting != nil {
+		p["features"] = lxcFeaturesCreate(l.Spec.Options.Nesting)
 	}
-	if l.Spec.Options.OnBoot {
-		p["onboot"] = "1"
+	if l.Spec.Options.KeyCtl != nil && *l.Spec.Options.KeyCtl {
+		return nil, fmt.Errorf("%s: spec.options.keyctl=true has no PVE 9.x LXC create form (POST /lxc rejects top-level keyctl with 403 and the features composite has no keyctl token); create the container and enable keyctl on PVE, or drop spec.options.keyctl", l.Ref())
+	}
+	if l.Spec.Options.Fuse != nil && *l.Spec.Options.Fuse {
+		return nil, fmt.Errorf("%s: spec.options.fuse=true has no PVE 9.x LXC create form (POST /lxc rejects top-level fuse with 403 and the features composite has no fuse token); create the container and enable fuse on PVE, or drop spec.options.fuse", l.Ref())
 	}
 	if l.Spec.Options.Startup != "" {
 		p["startup"] = l.Spec.Options.Startup
@@ -521,6 +565,14 @@ func lxcNetString(n LXCNetwork) string {
 	if n.Firewall {
 		sb.WriteString(",firewall=1")
 	}
+	// ip / gw are user-set static addressing; PVE echoes them back on the
+	// /config report when set. Not emitted when empty (PVE decides).
+	if s := strings.TrimSpace(n.Ip); s != "" {
+		sb.WriteString(",ip=" + s)
+	}
+	if s := strings.TrimSpace(n.Gw); s != "" {
+		sb.WriteString(",gw=" + s)
+	}
 	return sb.String()
 }
 
@@ -533,12 +585,16 @@ type lxcNetFields struct {
 	hwaddr   string
 	rate     int
 	firewall bool
+	ip       string
+	gw       string
 }
 
 // parseLXCNetFields parses an LXC netX property string. PVE's report form
 // (create-time is the same grammar) is "name=wired0,bridge=vmbr0,hwaddr=
-// 52:...,type=veth". PVE always normalizes type to veth unless a
-// non-veth type was requested.
+// 52:...,type=veth,ip=192.168.192.110/18,gw=192.168.192.5". PVE always
+// normalizes type to veth unless a non-veth type was requested. PVE's own
+// LXC create API accepts ip=/gw= as static address + gateway; the web UI
+// exposes both on a per-NIC basis.
 func parseLXCNetFields(s string) lxcNetFields {
 	out := lxcNetFields{}
 	for _, kv := range strings.Split(s, ",") {
@@ -561,6 +617,10 @@ func parseLXCNetFields(s string) lxcNetFields {
 			out.rate, _ = strconv.Atoi(v)
 		case "firewall":
 			out.firewall = v == "1" || v == "true"
+		case "ip":
+			out.ip = v
+		case "gw":
+			out.gw = v
 		}
 	}
 	return out
@@ -596,6 +656,21 @@ func lxcNetMatches(cur string, n LXCNetwork) bool {
 		return false
 	}
 	if n.Firewall && !got.firewall {
+		return false
+	}
+	// ip / gw are user-set static addressing (probe-verified PVE 9.x
+	// netX property form: net0=name=eth0,bridge=vmbr2,ip=192.168.192.110/
+	// 18,gw=192.168.192.5,...). They round-trip cleanly so we compare them
+	// as owned tokens — an empty desired Ip/Gw does NOT assert "PVE must
+	// have no static addressing" (PVE omits the token when unset, so
+	// comparing empty-desired-vs-absent live = match; empty-desired-vs-
+	// present-live = PVE had a static address we did not want, but that
+	// would be a PVE-side hand-set not pveconform-side: treat as owned
+	// only when desired was set).
+	if s := strings.TrimSpace(n.Ip); s != "" && got.ip != s {
+		return false
+	}
+	if s := strings.TrimSpace(n.Gw); s != "" && got.gw != s {
 		return false
 	}
 	return true
@@ -826,29 +901,66 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 			stop = true
 		}
 	}
-	// options: PVE stores 0 as "absent"; comparing int-0==absent avoids
-	// false drift.
+	// options: tri-state pointer-bool compare.
+	//
+	// PVE 9.2 wire grammar (probe-verified on conformance-dev 2026-09-10,
+	// disposable CTs 9870-9882, all destroyed; pinned against PVE 9.2):
+	//   - create top-level: unprivileged, protection, onboot, console,
+	//     features (composite); nested top-level nesting= / keyctl= /
+	//     fuse= → 400/403 ("property is not defined").
+	//   - PUT /config top-level: protection, onboot, console, features;
+	//     unprivileged → 500 (create-only), nested keys → 400.
+	//   - keyctl / fuse: NO accepted wire form at create OR /config on
+	//     PVE 9.2 (403/400; the features composite only carries nesting).
+	//     They are adoptable (reported faithfully) but NOT convergable by
+	//     pveconform.
+	//
+	// Comparison model: pveconform owns a key ONLY when the manifest sets
+	// it (non-nil desired). A nil desired means "PVE decides" — pveconform
+	// never writes that key, so any live value is PVE-owned and not
+	// drifted. When non-nil, desired "0/1" must equal PVE's effective
+	// value; PVE reports an explicit 0 key when set off (probe: LXC 111
+	// protection=0), and absent means the PVE default (off for every key
+	// here except unprivileged, whose PVE default is ON=1).
 	if o := &l.Spec.Options; o != nil {
-		if o.Unprivileged && pveInt(current["unprivileged"]) != 1 {
-			upd["unprivileged"] = "1"
+		// unprivileged is PVE 9.x create-only (PUT /config → 500). The
+		// live default when PVE omits the key is unprivileged=1; only an
+		// explicit 0 is "privileged". When it diverges, pveconform cannot
+		// converge in place — surface a recreate-required anomaly.
+		if o.Unprivileged != nil {
+			effective := true
+			if v, present := current["unprivileged"]; present {
+				effective = pveInt(v) == 1
+			}
+			if effective != *o.Unprivileged {
+				l.lxcDiskAnoms = append(l.lxcDiskAnoms, "spec.options.unprivileged diverges from PVE's live value (effective live="+lxcBoolWire(effective)+"); unprivileged is a PVE 9.x create-only flag (PUT /config returns HTTP 500) — pveconform cannot flip it in place, a recreate is required to converge")
+			}
 		}
-		if o.Protection && pveInt(current["protection"]) != 1 {
-			upd["protection"] = "1"
+		compareLXCBoolOption(upd, &stop, "protection", o.Protection, current)
+		compareLXCBoolOption(upd, &stop, "onboot", o.OnBoot, current)
+		compareLXCBoolOption(upd, &stop, "console", o.Console, current)
+		// nesting is convergable only through the composite features=
+		// property (top-level nesting= → 400 on PVE 9.2; probe-verified).
+		// PVE 9.2's features composite recognizes ONLY the nesting token
+		// (features=keyctl=... / features=fuse=... → 403), so emitting the
+		// single-token form "features=nesting=<0|1>" cannot clobber any
+		// PVE-owned other feature.
+		if o.Nesting != nil {
+			s := lxcBoolWire(*o.Nesting)
+			if lxcFeaturesNestingWire(current) != s {
+				upd["features"] = "nesting=" + s
+				stop = true
+			}
 		}
-		if o.Nesting && pveInt(current["nesting"]) != 1 {
-			upd["nesting"] = "1"
-		}
-		if o.KeyCtl && pveInt(current["keyctl"]) != 1 {
-			upd["keyctl"] = "1"
-		}
-		if o.Fuse && pveInt(current["fuse"]) != 1 {
-			upd["fuse"] = "1"
-		}
-		if o.OnBoot && pveInt(current["onboot"]) != 1 {
-			upd["onboot"] = "1"
-		}
+		// keyctl / fuse: no convergable wire form on PVE 9.2. Desired
+		// false + live off/absent = converged. Any other mismatch is a
+		// non-destructive anomaly (pveconform records the intent but
+		// cannot apply it).
+		lxcNonconvergableOptionAnomaly(&l.lxcDiskAnoms, "keyctl", o.KeyCtl, current["keyctl"])
+		lxcNonconvergableOptionAnomaly(&l.lxcDiskAnoms, "fuse", o.Fuse, current["fuse"])
 		if o.Startup != "" && pveStr(current["startup"]) != o.Startup {
 			upd["startup"] = o.Startup
+			stop = true
 		}
 	}
 	if len(upd) == 0 {
@@ -858,6 +970,112 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 }
 
 // --- helpers ---
+
+// lxcBoolWire renders a tri-state LXC boolean option into PVE's wire
+// "0" / "1". Used by Drift to compare + emit.
+func lxcBoolWire(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+// compareLXCBoolOption compares one PVE /config-PUT'able top-level LXC
+// boolean (protection/keyctl/fuse/onboot/console) against PVE's report
+// and, when drifted, adds the update to `upd` and sets `*stop`.
+//
+// PVE reports the value when the operator set it; absence means "PVE
+// default" which is off for every one of these keys. An absent live value
+// therefore equals desired "0".
+//
+// NOTE on `unprivileged`: it cannot be /config-PUT'ed on PVE 9.x
+// (HTTP 500), so it is handled with a dedicated anomaly path in Drift
+// and is NOT routed through this helper.
+func compareLXCBoolOption(upd map[string]any, stop *bool, field string, want *bool, current map[string]any) {
+	if want == nil {
+		return // pveconform does not own this key.
+	}
+	liveStr := pveStr(current[field])
+	if liveStr == "1" || liveStr == "true" {
+		if !*want {
+			upd[field] = "0"
+			*stop = true
+		}
+		return
+	}
+	if liveStr == "0" || liveStr == "false" {
+		if *want {
+			upd[field] = "1"
+			*stop = true
+		}
+		return
+	}
+	// Absent live: PVE default off. Desired "0" = no-op; desired "1" = drift.
+	if *want {
+		upd[field] = "1"
+		*stop = true
+	}
+}
+
+// lxcFeaturesNestingWire renders PVE's effective live nesting value from
+// the composite `features=nesting=<0|1>` form (PVE 9.x) or the legacy
+// top-level `nesting=<0|1>` form. Floor is "0": when PVE reports no
+// nesting signal at all, the effective value is the PVE default (off), so
+// a desired nesting=false must not re-emit features=nesting=0.
+func lxcFeaturesNestingWire(current map[string]any) string {
+	if s := pveStr(current["nesting"]); s != "" {
+		return s
+	}
+	f := pveStr(current["features"])
+	if f != "" {
+		for _, tok := range strings.Split(f, ",") {
+			tok = strings.TrimSpace(tok)
+			if k, v, found := strings.Cut(tok, "="); found && k == "nesting" {
+				return v
+			}
+		}
+	}
+	return "0"
+}
+
+// lxcFeaturesCreate renders the PVE 9.x composite create-time `features`
+// token for a desired nesting. PVE 9.2's /lxc create accepts ONLY
+// `features=nesting=<0|1>` for nesting; top-level `nesting=` is 400 and
+// `features=keyctl=...`/`features=fuse=...` are 403 (probe-verified
+// 2026-09-10).
+func lxcFeaturesCreate(nesting *bool) string {
+	if nesting == nil {
+		return ""
+	}
+	if *nesting {
+		return "nesting=1"
+	}
+	return "nesting=0"
+}
+
+// lxcNonconvergableOptionAnomaly records a non-destructive anomaly when a
+// desired LXC option (keyctl / fuse) has no PVE 9.2 convergable wire form
+// (probe: top-level 400, features composite 403). Desired=true + live
+// off/absent is a manifest intent pveconform cannot apply; desired=false
+// (or nil) + live on/absent is PVE-owned (not drifted). The anomaly
+// surfaces on /status + /metrics so the operator knows a manual toggle on
+// PVE is required to converge.
+func lxcNonconvergableOptionAnomaly(anoms *[]string, field string, want *bool, live any) {
+	if want == nil || !*want {
+		// nil / false desired: pveconform does NOT own an enabled value
+		// (absent live = PVE default is the only state pveconform can
+		// produce); a present live "1"/"true" would be PVE hand-set and
+		// is surfaced elsewhere. Not a pveconform-convergence concern.
+		return
+	}
+	// Desired=true.
+	if pveInt(live) == 1 {
+		return // already converged.
+	}
+	// Desired=true but PVE is off/absent: no wire form exists to flip
+	// this on PVE 9.x. Surface an anomaly (non-destructive, no write).
+	*anoms = append(*anoms, "spec.options."+field+"=true has no PVE 9.x convergable wire form: top-level `"+field+"` is rejected by /lxc create AND /config (403/400 probe-verified 2026-09-10), and the PVE 9.x `features` composite only carries `nesting`. Toggle "+field+" on the PVE host (e.g. `pct set <ctid> -"+field+" 1`) and pveconform will observe converged on the next cycle")
+}
 
 func (l *LXC) allTags() []string {
 	out := make([]string, 0, len(l.Spec.Tags)+1)

@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 
@@ -12,6 +13,25 @@ import (
 // raw manifest string (tests, future `adopt`, docs generators).
 func YAMLTo(s string, target any) error {
 	return yaml.Unmarshal([]byte(s), target)
+}
+
+// YAMLOut encodes v into YAML with 2-space indentation. The GitOps repo
+// pins `spaces: 2` in .yamllint.yaml (see promox-gitops .yamllint.yaml
+// `indentation` rule); pveconform-generated manifests must pass that rule
+// so they can be committed straight from adopt without re-formatting. The
+// default yaml.v3 indent (4) would fail yamllint on every generated
+// manifest.
+func YAMLOut(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // pveDiskSizeBytes parses a PVE disk size string into bytes. PVE reports
