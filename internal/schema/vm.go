@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -94,6 +95,10 @@ type EFIDisk struct {
 // CloudInit models PVE's cloud-init drive on `ide2` and optional cicustom.
 // When Enabled, pveconform renders `ide2:<storage>:cloudinit,size=<size>`
 // at create and manages PVE's auto-named cloud-init drive idempotently.
+//
+// This is the cloud-init DRIVE (ide2 storage volume). It is distinct from
+// the top-level cloud-init DATA fields that PVE's cloud-init generates
+// configdrive content from — see CloudInitData below.
 type CloudInit struct {
 	// Enabled turns cloud-init on; when disabled pveconform does not
 	// manage a cloud-init device at all.
@@ -103,6 +108,84 @@ type CloudInit struct {
 	Storage string `yaml:"storage,omitempty" json:"storage,omitempty"`
 	// Size is the cloud-init drive size, e.g. "4MiB". Default 4MiB.
 	Size string `yaml:"size,omitempty" json:"size,omitempty"`
+}
+
+// CloudInitRedactedSentinel is the marker pveconform uses in ssh-keys entries
+// to signal "PVE owns this value; pveconform must not overwrite it". adopt
+// uses it for ssh-keys when PVE reports a non-empty value (public-key
+// material is treated as credential-adjacent; M10 redaction rule).
+//
+// Semantics on wire:
+//   - ToCreateParams omits the sshkeys field entirely when the sole ssh-keys
+//     entry is the sentinel (or when ssh-keys is empty): the VM is created
+//     without a pveconform-owned cloud-init sshkeys set, and PVE's existing
+//     value survives untouched.
+//   - Drift is a no-op on sshkeys whenever the desired contains the sentinel:
+//     pveconform will not write over PVE's keys.
+//
+// The sentinel is a single character that operators search for in committed
+// manifests: `ssh-keys: ["*"]` means "fill me in before apply; until then
+// pveconform does not touch PVE's sshkeys".
+const CloudInitRedactedSentinel = "*"
+
+// CloudInitIPConfig is one PVE `ipconfig<N>` entry. pveconform's declarative
+// form: NIC (int, PVE's "ipconfig<N>" — i.e. which physical NIC index the
+// static-IP applies to), IP (CIDR like "192.168.192.199/18") and optional
+// Gateway (like "192.168.192.5"). PVE also supports `ipconfig<N>=dhcp`
+// (no static config); that form is not modelled in M11 — operators use
+// `spec.extra` if they need dhcp per-nic.
+type CloudInitIPConfig struct {
+	// NIC is PVE's `ipconfig<N>` slot index (0-based, matching net<N>).
+	// Default when zero: 0.
+	NIC int `yaml:"nic,omitempty" json:"nic,omitempty"`
+	// IP is a CIDR (e.g. "192.168.192.199/18"). Empty → no static IP for
+	// this NIC slot (pveconform will not write ipconfig<N> at all).
+	IP string `yaml:"ip,omitempty" json:"ip,omitempty"`
+	// Gateway is the default-gateway address (e.g. "192.168.192.5").
+	// Empty → omitted from the wire value (PVE only sets static IP).
+	Gateway string `yaml:"gateway,omitempty" json:"gateway,omitempty"`
+}
+
+// CloudInitData models PVE's top-level cloud-init DATA fields: the configdrive
+// content PVE generates from these. Separate from spec.hardware.cloud-init
+// (which owns the ide2 drive itself).
+//
+// Wire keys (PVE /config report + create/POST form-values):
+//
+//	ciuser        (string; e.g. "operator")
+//	sshkeys       (comma-separated public-key material; credential-adjacent —
+//	                M10 gap-value redaction rule applies in adopt)
+//	nameserver    (space-separated IPv4/IPv6 CSV)
+//	searchdomain  (space-separated IPv4/IPv6 CSV)
+//	ipconfig<N>   ("ip=<cidr>[,gw=<addr>]" static or "dhcp")
+//
+// pveconform owns these fields on a VM manifest only when the corresponding
+// struct value is non-empty. Empty desired values mean "pveconform does not
+// own this PVE key; PVE's live state survives untouched".
+//
+// Not modelled in M11 (documented in GAPS.md): cipassword, cicustom,
+// ciupgrade. cipassword is a secret (AGENTS.md no-secret rule + PVE stores
+// it in plaintext — pveconform will not round-trip secrets through git).
+// cicustom is a storage-backed keyset (PVE-side); ciupgrade is a PVE-only
+// guest-agent knob.
+type CloudInitData struct {
+	// CIUser is PVE's `ciuser`: the first configdrive username PVE creates
+	// for cloud-init. Empty → not owned.
+	CIUser string `yaml:"ci-user,omitempty" json:"ci-user,omitempty"`
+	// SSHKeys is PVE's `sshkeys` (comma-separated public keys on the wire).
+	// Each entry may be "user@host:key" (per-user) or just a public key.
+	// Empty → not owned. A single `*` entry is the redacted-sentinel and
+	// means "PVE owns this; do not write it".
+	SSHKeys []string `yaml:"ssh-keys,omitempty" json:"ssh-keys,omitempty"`
+	// Nameservers is PVE's `nameserver` (space-separated CSV on the wire).
+	// Empty → not owned.
+	Nameservers []string `yaml:"nameservers,omitempty" json:"nameservers,omitempty"`
+	// SearchDomains is PVE's `searchdomain` (space-separated CSV on the wire).
+	// Empty → not owned.
+	SearchDomains []string `yaml:"search-domains,omitempty" json:"search-domains,omitempty"`
+	// IPConfigs is PVE's `ipconfig<N>` static-IP set — one entry per NIC slot
+	// pveconform wants a cloud-init static IP on. Empty NIC defaults to 0.
+	IPConfigs []CloudInitIPConfig `yaml:"ipconfigs,omitempty" json:"ipconfigs,omitempty"`
 }
 
 // TPM models PVE's `tpm0` device (only meaningful with bios=ovmf + q35).
@@ -188,6 +271,11 @@ type VMSpec struct {
 	Hardware VMHardware `yaml:"hardware,omitempty" json:"hardware,omitempty"`
 	// Options is the first-class VM Options panel (onboot/protection/...).
 	Options VMOpts `yaml:"options,omitempty" json:"options,omitempty"`
+	// CloudInitData are PVE's top-level cloud-init DATA fields (ciuser,
+	// sshkeys, nameserver, searchdomain, ipconfig<N>). M11. Distinct from
+	// spec.hardware.cloud-init (which owns the cloud-init DRIVE on ide2).
+	// Empty values mean pveconform does not own that PVE key.
+	CloudInitData CloudInitData `yaml:"cloud-init-data,omitempty" json:"cloud-init-data,omitempty"`
 
 	// Extra is a freeform PVE key=value map (escape hatch for anything not
 	// modeled above; e.g. bootspeed, watchdog, rtc).
@@ -399,6 +487,44 @@ func (v *VM) Validate() error {
 	if hw.Sockets < 0 {
 		return fmt.Errorf("%s: spec.hardware.sockets must be non-negative", v.Ref())
 	}
+	// M11: cloud-init data — ssh-keys sentinel rule + static IPs must be
+	// CIDRs, gateways plain IPs.
+	{
+		// A sentinel "*" is exclusive: either the slice is exactly {"*"}
+		// (PVE owns the live sshkeys; pveconform must not write) or the
+		// slice has zero sentinels (pveconform writes the manifest's keys).
+		// Any mix is ambiguous → fail closed at parse time.
+		sentinelCount := 0
+		for _, k := range v.Spec.CloudInitData.SSHKeys {
+			if k == CloudInitRedactedSentinel {
+				sentinelCount++
+			}
+		}
+		if sentinelCount > 0 && sentinelCount != len(v.Spec.CloudInitData.SSHKeys) {
+			return fmt.Errorf("%s: spec.cloud-init-data.ssh-keys mixes the redacted sentinel %q with real keys; use ONLY the sentinel (PVE owns the value) or ONLY real keys (pveconform writes them)", v.Ref(), CloudInitRedactedSentinel)
+		}
+	}
+	for i, c := range v.Spec.CloudInitData.IPConfigs {
+		if c.NIC < 0 {
+			return fmt.Errorf("%s: spec.cloud-init-data.ipconfigs[%d].nic must be >= 0", v.Ref(), i)
+		}
+		if c.IP != "" {
+			if _, ipNet, err := net.ParseCIDR(c.IP); err != nil {
+				return fmt.Errorf("%s: spec.cloud-init-data.ipconfigs[%d].ip: %v", v.Ref(), i, err)
+			} else if ipNet == nil {
+				// unreachable but keep lint happy
+				_ = i
+			}
+		}
+		if c.IP == "" && c.Gateway != "" {
+			return fmt.Errorf("%s: spec.cloud-init-data.ipconfigs[%d]: gateway requires ip", v.Ref(), i)
+		}
+		if c.Gateway != "" {
+			if ip := net.ParseIP(c.Gateway); ip == nil {
+				return fmt.Errorf("%s: spec.cloud-init-data.ipconfigs[%d].gateway %q is not an IP address", v.Ref(), i, c.Gateway)
+			}
+		}
+	}
 	// options — boot-order entries must be non-empty and unique.
 	bootSeen := map[string]bool{}
 	for _, slot := range v.Spec.Options.BootOrder {
@@ -420,6 +546,8 @@ func (v *VM) Validate() error {
 		"onboot", "startup", "protection", "agent",
 		"acpi", "tablet", "hotplug", "boot",
 		"nestedvirt", "hidden", "tags",
+		// M11: top-level cloud-init data fields.
+		"ciuser", "sshkeys", "nameserver", "searchdomain",
 	} {
 		structuredReserved[k] = true
 	}
@@ -429,6 +557,11 @@ func (v *VM) Validate() error {
 		}
 		if strings.HasPrefix(k, "scsi") || strings.HasPrefix(k, "net") {
 			return fmt.Errorf("%s: spec.extra key %q conflicts with a structured field; remove it", v.Ref(), k)
+		}
+		if strings.HasPrefix(k, "ipconfig") {
+			// ipconfig<N> is the dynamic cloud-init static-IP slot pveconform
+			// owns via spec.cloud-init-data.ipconfigs (M11).
+			return fmt.Errorf("%s: spec.extra key %q conflicts with a structured field (use spec.cloud-init-data.ipconfigs); remove it", v.Ref(), k)
 		}
 	}
 	if v.Spec.State != "" {
@@ -542,6 +675,31 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 	}
 	if hw.Serial0 != "" {
 		p["serial0"] = hw.Serial0
+	}
+	// M11: top-level cloud-init DATA fields.
+	//
+	// pveconform uses "empty = not owned" semantics: if a CloudInitData
+	// value is empty, pveconform will NOT send the PVE key AND will NOT
+	// rewrite an existing PVE value (Drift below enforces the same).
+	// `ssh-keys` containing only the sentinel `*` is owned-but-do-not-
+	// write (adopt fills the sentinel for PVE-owned sshkeys so the
+	// operator sees the shape without leaking key material).
+	if v.Spec.CloudInitData.CIUser != "" {
+		p["ciuser"] = v.Spec.CloudInitData.CIUser
+	}
+	if sshkeys := cloudInitSSHKeysWire(v.Spec.CloudInitData.SSHKeys); sshkeys != "" {
+		p["sshkeys"] = sshkeys
+	}
+	if len(v.Spec.CloudInitData.Nameservers) > 0 {
+		p["nameserver"] = strings.Join(v.Spec.CloudInitData.Nameservers, " ")
+	}
+	if len(v.Spec.CloudInitData.SearchDomains) > 0 {
+		p["searchdomain"] = strings.Join(v.Spec.CloudInitData.SearchDomains, " ")
+	}
+	if ips := cloudInitIPConfigWire(v.Spec.CloudInitData); ips != nil {
+		for k, wireVal := range ips {
+			p[k] = wireVal
+		}
 	}
 	// first-class options
 	for k, val := range v.optionsWire() {
@@ -941,6 +1099,52 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 		if pveStr(current["serial0"]) != hw.Serial0 {
 			upd["serial0"] = hw.Serial0
 			stop = true
+		}
+	}
+
+	// M11: top-level cloud-init DATA fields.
+	//
+	// Ownership rule: pveconform owns a PVE key only when the desired
+	// value is non-empty. Empty desired → pveconform does not write AND
+	// does NOT surface drift against a live PVE value (live may hold a
+	// PVE-side value that pveconform has no way of knowing was set by
+	// qm/cloud-init; treating it as drift would flap or clobber it).
+	//
+	// sshkeys: the sentinel `*` means "PVE owns this; do not write". A
+	// live value of any shape coexists with the sentinel without drift.
+	// Empty desired means "pveconform does not model this" too (same as
+	// sentinel, no write, no anomaly).
+	//
+	// Nameservers / search-domains / ipconfig: set-based comparison when
+	// PVE's CSV is space-separated; per-<N> when PVE's shape is
+	// "ip=<cidr>[,gw=<ip>]". PVE may store the static-IP CSV with a
+	// trailing "," or whitespace; we normalise before comparing.
+	if v.Spec.CloudInitData.CIUser != "" {
+		if pveStr(current["ciuser"]) != v.Spec.CloudInitData.CIUser {
+			upd["ciuser"] = v.Spec.CloudInitData.CIUser
+		}
+	}
+	if sshkeys := cloudInitSSHKeysWire(v.Spec.CloudInitData.SSHKeys); sshkeys != "" {
+		if pveStr(current["sshkeys"]) != sshkeys {
+			upd["sshkeys"] = sshkeys
+		}
+	}
+	if wantNS := strings.Join(v.Spec.CloudInitData.Nameservers, " "); wantNS != "" {
+		if !csvSetsEqual(pveStr(current["nameserver"]), wantNS) {
+			upd["nameserver"] = wantNS
+		}
+	}
+	if wantSD := strings.Join(v.Spec.CloudInitData.SearchDomains, " "); wantSD != "" {
+		if !csvSetsEqual(pveStr(current["searchdomain"]), wantSD) {
+			upd["searchdomain"] = wantSD
+		}
+	}
+	for k, wantIPCfg := range cloudInitIPConfigWire(v.Spec.CloudInitData) {
+		// Compare as PVE reports: "ip=<cidr>[,gw=<ip>]" verbatim. PVE may
+		// reorder or add whitespace; treat as set-of-tokens comparison.
+		// A live value that is a different static-IP set is drift.
+		if pveStr(current[k]) != wantIPCfg {
+			upd[k] = wantIPCfg
 		}
 	}
 
@@ -1391,6 +1595,104 @@ func parseNICFields(s string) nicFields {
 		// Bare first token is the model when no key is present.
 		if out.model == "" {
 			out.model = p
+		}
+	}
+	return out
+}
+
+// cloudInitSSHKeysWire renders PVE's `sshkeys` wire value from the
+// declarative SSHKeys slice. Empty → "" (pveconform does not own the PVE key).
+// A single `*` sentinel entry → "" (PVE owns the live value; do not write).
+// Multiple entries → comma-joined string form PVE accepts.
+//
+// The sentinel is exclusive: Validate() rejects mixed sentinel+real keys, so
+// this helper assumes the input already passed validation. Mixed input
+// (if ever reached) returns "" — no write, no flap.
+func cloudInitSSHKeysWire(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	sentinelSeen := false
+	for _, k := range keys {
+		if k == CloudInitRedactedSentinel {
+			sentinelSeen = true
+		}
+	}
+	if sentinelSeen {
+		return ""
+	}
+	out := make([]string, 0, len(keys))
+	seen := map[string]bool{}
+	for _, k := range keys {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// cloudInitIPConfigWire returns PVE "ipconfig<N>" form-values from the
+// declarative IPConfigs. Only slots with a non-empty CIDR are owned.
+//
+// PVE static-IP form: "ip=<cidr>[,gw=<addr>]".
+// PVE also accepts the "dhcp" token: pveconform does NOT model that form
+// in M11 (documented — operators use spec.extra if they want dhcp
+// semantics per-NIC).
+func cloudInitIPConfigWire(cd CloudInitData) map[string]string {
+	if len(cd.IPConfigs) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, ipc := range cd.IPConfigs {
+		if ipc.IP == "" {
+			continue // empty slot → not owned on the wire
+		}
+		slot := "ipconfig" + strconv.Itoa(ipc.NIC)
+		wire := "ip=" + ipc.IP
+		if ipc.Gateway != "" {
+			wire += ",gw=" + ipc.Gateway
+		}
+		out[slot] = wire
+	}
+	return out
+}
+
+// csvSetsEqual reports whether two PVE CSV strings (whitespace-separated)
+// carry the same set of tokens. PVE's cloud-init `nameserver` and
+// `searchdomain` fields are space-separated on the wire; order and
+// duplicates are not semantics — only membership is.
+func csvSetsEqual(cur, want string) bool {
+	c := csvTokens(cur)
+	w := csvTokens(want)
+	if len(c) != len(w) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, t := range c {
+		seen[t] = true
+	}
+	for _, t := range w {
+		if !seen[t] {
+			return false
+		}
+	}
+	return true
+}
+
+// csvTokens splits a PVE CSV on whitespace, dropping empty entries.
+// PVE allows comma-AND-space-separated on some fields; M11's declarative
+// form normalises to space-only.
+func csvTokens(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, tok := range strings.Fields(s) {
+		tok = strings.TrimSpace(tok)
+		if tok != "" {
+			out = append(out, tok)
 		}
 	}
 	return out

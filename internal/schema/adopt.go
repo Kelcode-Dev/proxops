@@ -179,6 +179,133 @@ func PveCpuType(current map[string]any) string {
 // string).
 func PveCpuCores(current map[string]any) int { return pveInt(current["cores"]) }
 
+// --- M11: cloud-init DATA fields (reverse-translation) ---
+//
+// These helpers read PVE's /config cloud-init data keys back into pveconform
+// CloudInitData. Ownership + redaction follow the schema contract:
+//   - ciuser / nameserver / searchdomain / ipconfig<N>: adopted verbatim.
+//   - sshkeys: PVE stores public-key material; M10 redaction rule applies.
+//     adopt returns a single-entry {"*"} sentinel slice when PVE reported a
+//     non-empty sshkeys, so the committed manifest shows the shape
+//     (ssh-keys: ["*"]) without leaking the keys. The operator replaces the
+//     sentinel with real keys before first apply; pveconform refuses to mix
+//     sentinel + real keys at parse time.
+//   - cipassword / cicustom / ciupgrade: NOT adopted (secret / PVE-owned /
+//     out-of-model) — they stay in the gap report by default.
+
+// PveCIUserFromPVE returns PVE's `ciuser` (string, ok). ok=false when the key
+// is absent or blank.
+func PveCIUserFromPVE(current map[string]any) (string, bool) {
+	s := strings.TrimSpace(pveStr(current["ciuser"]))
+	if s == "" {
+		return "", false
+	}
+	return s, true
+}
+
+// PveCISshKeysFromPVE returns the SSH-keys slice for adoption. When PVE reports
+// a non-empty `sshkeys`, a single {"*"} redacted-sentinel slice is returned
+// (the actual keys never reach the manifest). Empty when PVE has no sshkeys.
+func PveCISshKeysFromPVE(current map[string]any) []string {
+	if strings.TrimSpace(pveStr(current["sshkeys"])) == "" {
+		return nil
+	}
+	return []string{CloudInitRedactedSentinel}
+}
+
+// PveCINameserversFromPVE returns PVE's `nameserver` CSV (space-separated on
+// the wire) split into a token slice. Empty when absent/blank.
+func PveCINameserversFromPVE(current map[string]any) []string {
+	return pveCSVField(current["nameserver"])
+}
+
+// PveCISearchDomainsFromPVE returns PVE's `searchdomain` CSV split.
+func PveCISearchDomainsFromPVE(current map[string]any) []string {
+	return pveCSVField(current["searchdomain"])
+}
+
+// PveCIIPConfigsFromPVE returns PVE's `ipconfig<N>` static-IP slots parsed into
+// CloudInitIPConfig. Only PVE slots that carry an "ip=<cidr>" token are
+// adopted; "dhcp" slots are skipped (dhcp is not modelled in M11). The slice
+// is sorted by NIC index for determinism.
+func PveCIIPConfigsFromPVE(current map[string]any) []CloudInitIPConfig {
+	var out []CloudInitIPConfig
+	for k, v := range current {
+		if !strings.HasPrefix(k, "ipconfig") {
+			continue
+		}
+		idStr := strings.TrimPrefix(k, "ipconfig")
+		nic, err := strconv.Atoi(idStr)
+		if err != nil {
+			continue
+		}
+		raw := strings.TrimSpace(pveStr(v))
+		if raw == "" || raw == "dhcp" {
+			continue
+		}
+		// PVE static form: "ip=<cidr>[,gw=<addr>]"
+		ip := ""
+		gw := ""
+		for _, tok := range strings.Split(raw, ",") {
+			tok = strings.TrimSpace(tok)
+			if eq, ok := strings.CutPrefix(tok, "ip="); ok {
+				ip = eq
+			} else if g, ok := strings.CutPrefix(tok, "gw="); ok {
+				gw = g
+			}
+		}
+		if ip == "" {
+			continue
+		}
+		out = append(out, CloudInitIPConfig{NIC: nic, IP: ip, Gateway: gw})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NIC < out[j].NIC })
+	return out
+}
+
+// PveCloudInitDataFromPVE assembles the full CloudInitData from a PVE /config
+// report. This is the single adoption entry-point used by adopt for both VM
+// and TemplateVM.
+func PveCloudInitDataFromPVE(current map[string]any) CloudInitData {
+	cd := CloudInitData{}
+	if u, ok := PveCIUserFromPVE(current); ok {
+		cd.CIUser = u
+	}
+	if keys := PveCISshKeysFromPVE(current); keys != nil {
+		cd.SSHKeys = keys
+	}
+	if ns := PveCINameserversFromPVE(current); ns != nil {
+		cd.Nameservers = ns
+	}
+	if sd := PveCISearchDomainsFromPVE(current); sd != nil {
+		cd.SearchDomains = sd
+	}
+	if ipc := PveCIIPConfigsFromPVE(current); ipc != nil {
+		cd.IPConfigs = ipc
+	}
+	return cd
+}
+
+// pveCSVField splits a PVE whitespace-separated CSV report value into tokens,
+// dropping empties. Returns nil when the value is absent/blank.
+func pveCSVField(v any) []string {
+	s := strings.TrimSpace(pveStr(v))
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, tok := range strings.Fields(s) {
+		tok = strings.TrimSpace(tok)
+		if tok != "" {
+			out = append(out, tok)
+		}
+	}
+	return out
+}
+
 // PveVMOptionsFromPVE extracts the owned VM options PVE reports. Each
 // entry is only included when PVE actually set it.
 //
