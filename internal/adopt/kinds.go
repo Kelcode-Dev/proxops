@@ -157,24 +157,12 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 		raw[k] = v
 	}
 
+	// M11: PVE reports a template (template=1); reverse-translate it to
+	// an adoption of the pveconform TemplateVM kind. See M10 Skipped
+	// census notes in docs/GAPS.md: M11 REPLACES the M10 "skip + record
+	// SkippedObject" behavior by producing a first-class manifest.
 	if pveTemplateValue(raw["template"]) {
-		rawName, _ := raw["name"].(string)
-		ac.res.Skipped = append(ac.res.Skipped, SkippedObject{
-			Kind:   schema.KindVM,
-			Node:   node,
-			ID:     e.VMID,
-			Name:   rawName,
-			Reason: "PVE template VM (template=1); pveconform has no template-VM resource kind and must not claim ownership of a clone source",
-		})
-		ac.res.Gaps = append(ac.res.Gaps, Gap{
-			Kind:  schema.KindVM,
-			Node:  node,
-			ID:    e.VMID,
-			Field: "template",
-			Value: "1",
-			Note:  "PVE template VMs are out of scope for pveconform adoption; no manifest generated (recorded in Skipped)",
-		})
-		return nil
+		return ac.adoptTemplateVM(ctx, node, e, raw)
 	}
 
 	vm := schema.NewVM()
@@ -279,6 +267,30 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 	// state.
 	vm.Spec.State = pveStatusToState(e.Status)
 
+	// M11: PVE-side cloud-init data fields. PVE reports ciuser,
+
+	// ipconfig<N>, nameserver, searchdomain + sshkeys on any VM that
+
+	// has ever had cloud-init configured. pveconform adopts them:
+
+	//   - ciuser / nameserver / searchdomain / ipconfig<N>: as-is.
+
+	//   - sshkeys: PII. M10 redaction rule applies: adopted as a
+
+	//     single "*" sentinel entry in the manifest. Operator must
+
+	//     replace the sentinel with their real public key(s) before
+
+	//     first apply. pveconform refuses to write sshkeys while
+
+	//     the sentinel is present (schema.CloudInitRedactedSentinel).
+
+	//   - cipassword / cicustom / ciupgrade: NOT adopted. Secret or
+
+	//     PVE-side-only fields; they stay in the gap report.
+
+	vm.Spec.CloudInitData = schema.PveCloudInitDataFromPVE(raw)
+
 	if wErr := ac.writeManifest(schema.KindVM, vm, vm.Metadata.Name); wErr != nil {
 		return wErr
 	}
@@ -299,6 +311,12 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 			continue
 		}
 		if VMKeyIsDynamic(k) {
+			continue
+		}
+		// M11: cloud-init data keys owned by pveconform (ciuser, sshkeys,
+		// nameserver, searchdomain, ipconfig*) are NOT gaps; they are
+		// represented in the manifest under spec.cloud-init-data.
+		if isM11OwnedCloudInitDataKey(k) {
 			continue
 		}
 		gap := Gap{Kind: schema.KindVM, Node: node, ID: e.VMID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE config pveconform does not model for VMs; not represented in the generated manifest")}
@@ -603,4 +621,167 @@ func pveStr(v any) string {
 		return strings.Join(parts, ",")
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+// adoptTemplateVM (M11): a PVE-templated qemu object is reverse-translated
+// into a pveconform TemplateVM manifest. This REPLACES M10's "skip + record
+// in Skipped" behavior: pveconform now owns the template lifecycle
+// (create + mark, config drift, ownership-tag prunes) and the manifest
+// captures the same owned-field surface as a regular pveconform VM,
+// PLUS M11's cloud-init data fields.
+//
+// PVE-side sshkeys are redacted: PveCISshKeysFromPVE returns a single
+// {"*"} sentinel, so the emitted manifest's ssh-keys entry is ["*"] —
+// the operator replaces it with real public key(s) before first apply.
+// PVE-side cipassword and cicustom are NOT adopted (secret and
+// PVE-side-only respectively); they stay in the gap report.
+//
+// The manifest's spec.state is always "stopped" (PVE refuses to start a
+// template; DesiredState() returns "stopped" unconditionally — see
+// schema.TemplateVM).
+func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pveclient.VMListEntry, raw map[string]any) error {
+	// M11: PVE-templated object. Emit a pveconform TemplateVM manifest
+	// (not a VM manifest) so the parse layer routes through the TemplateVM
+	// kind + plan/exec use kind=TemplateVM.
+	t := schema.NewTemplateVM()
+	t.Metadata.Name = nameForPVE(pveStr(raw["name"]), e.VMID, "vm")
+	t.Spec.Node = node
+	t.Spec.VMID = e.VMID
+
+	// memory.
+	if mem, ok := schema.PveMemoryToHuman(raw["memory"]); ok {
+		t.Spec.Memory = mem
+	}
+	// cpu.
+	if cpuType := schema.PveCpuType(raw); cpuType != "" {
+		t.Spec.CPU.Type = cpuType
+	}
+	cores := schema.PveCpuCores(raw)
+	if cores > 0 {
+		t.Spec.CPU.Cores = cores
+	}
+	// disks: exclude PVE-side cloud-init / cdrom-style volumes on
+	// data buses (same rule adoptVM uses; PVE owns the non-IDE
+	// cloud-init CDROM that qm cloud-init sets on the template's own
+	// data-bus slot, and pveconform cannot recreate it — see M10 GAP entry
+	// "VM: cloud-init volume on a non-IDE slot is PVE-owned").
+	rawDisks, ok := schema.PveDisksFromPVE(raw)
+	if ok {
+		kept := rawDisks[:0]
+		for _, d := range rawDisks {
+			if schema.PveDiskMedia(t.Spec.VMID, raw, d.Slot) == "cdrom" {
+				// Recorded in gaps below (the gap note names the slot).
+				continue
+			}
+			kept = append(kept, d)
+		}
+		t.Spec.Disks = kept
+	}
+	for _, d := range rawDisks {
+		if schema.PveDiskMedia(t.Spec.VMID, raw, d.Slot) == "cdrom" {
+			ac.res.Gaps = append(ac.res.Gaps, Gap{
+				Kind:  schema.KindTemplateVM,
+				Node:  node,
+				ID:    e.VMID,
+				Field: d.Slot,
+				Value: pveStr(raw[d.Slot]),
+				Note:  "PVE reports a cloud-init / cdrom-style volume on a data-bus slot (" + d.Slot + "). pveconform does not own non-IDE cloud-init slots; this disk is excluded from spec.disks. Review whether it matters for your workload — if PVE's cloud-init is on IDE (ide2/ide3), it is owned via spec.hardware.cloud-init and no action is needed.",
+			})
+		}
+	}
+	// networks.
+	if nics, ok := schema.PveNICsFromPVE(raw); ok {
+		t.Spec.NICs = nics
+	}
+	// hardware.
+	hw := schema.PveVMHardwareFromPVE(raw)
+	if isoVolid, cdromOK := schema.PveCDROMFromPVE(raw); cdromOK {
+		if isoVolid == "" {
+			hw.Cdrom = schema.CDDrive{Iso: schema.CDROMNone}
+		} else if isoName, known := ac.names.iso[isoVolid]; known {
+			hw.Cdrom.Iso = isoName
+		} else {
+			ac.res.Gaps = append(ac.res.Gaps, Gap{
+				Kind:  schema.KindTemplateVM,
+				Node:  node,
+				ID:    e.VMID,
+				Field: "ide2/ide3",
+				Value: isoVolid,
+				Note:  "PVE reports a cdrom that references an ISO with no pveconform manifest in this adopt pass; generate the ISO first, then re-point spec.hardware.cdrom.iso to it",
+			})
+		}
+	}
+	t.Spec.Hardware = hw
+	// options.
+	t.Spec.Options = schema.PveVMOptionsFromPVE(raw)
+	// tags: strip pveconform's ownership tag (the schema re-appends it).
+	if tags := pveStr(raw["tags"]); tags != "" {
+		kept := []string{}
+		for _, tk := range strings.Split(tags, ",") {
+			tk = strings.TrimSpace(tk)
+			if tk == "" || tk == schema.PveOwnershipTag {
+				continue
+			}
+			kept = append(kept, tk)
+		}
+		t.Spec.Tags = kept
+	}
+	// M11: cloud-init data fields (ciuser, ssh-keys→["*"], nameservers,
+	// search-domains, ipconfigs). PVE-side cipassword + cicustom +
+	// ciupgrade are NOT adopted (secret / PVE-side-only / out-of-model).
+	t.Spec.CloudInitData = schema.PveCloudInitDataFromPVE(raw)
+	// state: always "stopped" for a PVE template (PVE refuses to start).
+	t.Spec.State = "stopped"
+
+	if wErr := ac.writeManifest(schema.KindTemplateVM, t, t.Metadata.Name); wErr != nil {
+		return wErr
+	}
+
+	// Gap detection: every PVE /config key pveconform does not model AND
+	// is not PVE bookkeeping. "template" = "1" is explicitly owned by the
+	// pveconform TemplateVM kind (this function is only called when PVE
+	// reports template=1), so it is NOT a gap. Cloud-init data keys owned
+	// by M11 (ciuser, sshkeys, nameserver, searchdomain, ipconfig*<N>)
+	// are also not gaps. cipassword / cicustom / ciupgrade are M11's
+	// explicit non-modelled fields.
+	var gaps []Gap
+	for k := range raw {
+		if PVEBookkeepingKeys[k] {
+			continue
+		}
+		if VMKeysOwned[k] {
+			continue
+		}
+		if k == "template" {
+			// M11: pveconform's TemplateVM kind IS the PVE-side template
+			// flag. Owned.
+			continue
+		}
+		if isM11OwnedCloudInitDataKey(k) {
+			// M11: pveconform's cloud-init data surface owns these keys.
+			// (sshkeys IS adopted, via the "*" sentinel; cipassword /
+			// cicustom / ciupgrade are M10 PII / PVE-side fields,
+			// deliberately not modelled in M11.)
+			continue
+		}
+		if VMKeyIsDynamic(k) {
+			continue
+		}
+		gap := Gap{Kind: schema.KindTemplateVM, Node: node, ID: e.VMID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE config pveconform does not model for TemplateVMs; not represented in the generated manifest")}
+		gaps = append(gaps, gap)
+	}
+	ac.res.Gaps = append(ac.res.Gaps, gaps...)
+	return nil
+}
+
+// isM11OwnedCloudInitDataKey reports whether a PVE /config key is in M11's
+// owned cloud-init data surface: ciuser, sshkeys, nameserver, searchdomain,
+// ipconfig<N>. cipassword, cicustom, ciupgrade are NOT in this set (they are
+// M10 PII / PVE-side-only fields, deliberately not modelled in M11).
+func isM11OwnedCloudInitDataKey(k string) bool {
+	switch k {
+	case "ciuser", "sshkeys", "nameserver", "searchdomain":
+		return true
+	}
+	return strings.HasPrefix(k, "ipconfig")
 }

@@ -429,6 +429,12 @@ func kindPath(cluster string, k schema.Kind, name string) string {
 		dir = "iso"
 	case schema.KindCTTemplate:
 		dir = "ctt"
+	// M11: TemplateVM manifests live under the templatevm/ kind root
+	// (mirrors composition.rootDirs; a TemplateVM pveconform-manifest is
+	// NOT placed under vm/ because it is a distinct resource kind
+	// with its own parse/route/plan/exec/adopt paths).
+	case schema.KindTemplateVM:
+		dir = "templatevm"
 	}
 	return filepath.ToSlash(filepath.Join(dir, cluster, name+".yaml"))
 }

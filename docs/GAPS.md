@@ -301,24 +301,30 @@ read-only target for adoption).
 - **VM: PVE template VMs (`template=1`) are out of adoption scope**
   - **Resource/area**: VM
   - **PVE configuration/API field**: `template=1`
-  - **Status**: `investigated` (deliberate)
+  - **Status**: `investigated` (CLOSED by M11)
   - **Priority**: n/a
-  - **What is unsupported**: pveconform has no "template VM" resource kind and
+  - **What was unsupported**: pveconform had no "template VM" resource kind and
     must not claim ownership of a clone source (a pveconform VM manifest's
     disks are the clone *data*; converging one would risk re-creating the
     template's own disk on the first apply → data loss). M10's adopt therefore
-    **skips** PVE-template VMs: no manifest is written, the live object is
-    recorded on `Result.Skipped` (census stays complete), and a gap names the
+    **skipped** PVE-template VMs: no manifest was written, the live object was
+    recorded on `Result.Skipped` (census stays complete), and a gap named the
     skip.
-  - **Impact/risk**: none (no manifest; the live object is never touched).
+  - **M11 resolution**: pveconform now has `kind: TemplateVM` (first-class
+    resource). Adopt produces `kind: TemplateVM` manifests for PVE objects
+    with `template=1` under `templatevm/<cluster>/` — replacing M10's
+    skip+census behaviour. The M10 data-loss guard still holds on
+    the `kind: VM` side: a pveconform `kind: VM` desired against a
+    PVE-side `template=1` at the same `(node, vmid)` is a non-destructive
+    anomaly, never a write. PVE 9.2 has no `/qemu/{id}/untemplate` endpoint
+    (probe: `HTTP 501 "not implemented"` on conformance-dev 2026-09-11),
+    so a kind-flip on the PVE side is an operator's manual step. Pinned:
+    `TestAdopt_TemplateVMsAdoptedAsTemplateVMManifest` (M11 successor) +
+    `TestE2E_VMDesiredButPVEIsTemplateSurfacesAnomaly` +
+    `TestE2E_VMDesiredAgainstLiveNonTemplateMarksIt`.
   - **Discovery source**: M10 live prod-a: VM 999 `tpl-almalinux-10`
     (`template=1`, `scsi0=vm_disks:base-999-disk-1`), the Talos/almalinux
-    clone source for every prod-a VM. Pinned:
-    `TestAdopt_TemplateVMsSkippedWithCensus`.
-  - **Notes**: prod-a runs a Talos control plane + 3 CPU workers from a
-    PVE-side template; those 4 VMs (141/142/143/144) are adopted normally (they
-    are NOT template-flagged), and the template itself (999) is explicitly
-    excluded.
+    clone source for every prod-a VM.
 
 - **LXC: `ostype` is PVE-inferred bookkeeping, not an owned field**
   - **Resource/area**: LXC + VM
@@ -365,7 +371,8 @@ read-only target for adoption).
     object as a pveconform VM)
   - **PVE configuration/API field**: `ciuser`, `cipassword`, `sshkeys`,
     `ipconfig0`, `nameserver`, `cicustom`, `ciupgrade`
-  - **Status**: `discovered`
+  - **Status**: `discovered` (CLOSED by M11 for the non-secret subset;
+    remains `discovered` for `cipassword`/`cicustom`/`ciupgrade`)
   - **Priority**: low
   - **What is unsupported**: pveconform's VM model does not carry
     cloud-init user credentials / SSH keys / static-ip or DNS fields at
@@ -375,6 +382,13 @@ read-only target for adoption).
     gap values are emitted as `<redacted>` — the field name still reports
     ("pveconform does not model this") but the value NEVER reaches stdout,
     logs, the gap report, or any generated manifest.
+
+  **M11 resolution**: pveconform now models `ciuser`, `nameserver`,
+  `searchdomain`, `ipconfig<N>`, and (redacted) `sshkeys` under
+  `spec: cloud-init-data`. `cipassword` and `cicustom` remain PII / PVE-side
+  — they continue to surface as gaps with the M10 `<redacted>` value rule.
+  `ciupgrade` remains out-of-model. Pinned: `TestVMSpecCloudInitData_*`
+  (schema layer, 7 sub-tests) + e2e `TestE2ETemplateVMCreateMarksAndIsIdempotent`.
   - **Impact/risk**: none (no write path; PII is redacted at the source,
     the adopt layer). The operator's review step (or a future
     `VM.CloudInit` model) would close these.
@@ -414,3 +428,71 @@ read-only target for adoption).
     veth) remain intentionally NOT adopted (same M8 rule: PVE-owned values
     are captured as gaps + not wired into spec.networks; a pinned MAC on
     the manifest is respected, random MACs are omitted).
+## M11 (cloud-init data + TemplateVM kind) — new closed gaps / PVE-9.2 wire findings
+
+M11 closes the two M10/M11-era gaps above (PVE template-VMs out of adoption
+scope; VM cloud-init user/ssh/nameserver/static-ip). New entries below record
+what M11 pins.
+
+- **PVE 9.2 wire: `/qemu/{id}/untemplate` does not exist**
+  - **Resource/area**: VM / TemplateVM
+  - **PVE configuration/API field**: `POST /nodes/{n}/qemu/{id}/untemplate`
+  - **Status**: `investigated` (wire finding, pinned)
+  - **Priority**: n/a
+  - **What is unsupported**: PVE 9.2's `/qemu/{id}/untemplate` endpoint is
+    *not implemented* — probe on conformance-dev PVE 9.2.2 (VM 9100,
+    2026-09-11): `HTTP 501 "Method 'POST /nodes/pve-dev-01/qemu/9100/untemplate'
+    not implemented"`. In contrast, `/lxc/{id}/untemplate` IS implemented
+    (LXC-side M3 behaviour). pveconform must therefore not attempt a
+    kind-flip on the PVE side: the planner converts a `kind: VM` desired
+    against a PVE-side `template=1` into a non-destructive anomaly.
+  - **Impact/risk**: none (the anomaly is non-destructive; PVE-side kind-flip
+    stays a manual operator step via `qm` from a PVE host).
+  - **Discovery source**: M11 disposable VM 9100 probe on conformance-dev.
+    Pinned: `internal/pveclient/mock/mock.go` (mock 501 for
+    POST /qemu/{id}/untemplate) + `TestE2E_VMDesiredButPVEIsTemplateSurfacesAnomaly`.
+
+- **PVE 9.2 wire: `DELETE /qemu/{id}` works on a template VM**
+  - **Resource/area**: TemplateVM
+  - **Status**: `investigated`
+  - **What is new**: a pveconform-owned `TemplateVM` that is no longer
+    desired IS pruned via `DELETE /qemu/{id}`; PVE does not reject the
+    delete because the object is a template (probe on conformance-dev,
+    2026-09-11). The executor's pre-delete stop stays conservative:
+    templates PVE-side are always "stopped", so the STOP step on an already-
+    stopped template VM is a no-op.
+  - **Discovery source**: same disposable VM 9100 probe.
+
+- **PVE 9.2 wire: `POST /qemu` `cloud-init data fields` are create-and-config-
+  put-accepted**
+  - **Resource/area**: VM / TemplateVM / Cloud-Init Data
+  - **PVE configuration/API field**: `ciuser`, `sshkeys`, `nameserver`,
+    `searchdomain`, `ipconfig<N>`
+  - **Status**: `investigated`
+  - **What is pinned**: PVE 9.2 accepts these fields as `POST /qemu`
+    create form-values AND as `POST /qemu/{id}/config` update form-values,
+    in both directions:
+      - `POST ciuser=X + ipconfigN=Y` → task exit=OK, /config report shows
+        `"ciuser": "X"` / `"ipconfig0": "Y"`.
+      - `POST ciuser= + ipconfigN= + nameserver= + searchdomain=` (empty
+        strings) → task exit=OK, PVE stores a whitespace placeholder
+        (`" "`) NOT `""`, and subsequent /config report reflects that.
+    pveconform's semantics: empty desired ⇒ not owned ⇒ no write; set
+    desired ⇒ write on create-or-drift.
+  - **Impact/risk**: none (the empty-vs-nonempty desired distinction
+    prevents pveconform from overwriting a PVE-side value).
+  - **Discovery source**: M11 disposable VM 9100 probe. Pinned:
+    `TestVMSpecCloudInitData_EmptyNotOwned` + `TestVMSpecCloudInitData_Drift/empty-desired-no-write`.
+
+- **PVE 9.2 wire: ssh-keys sentinel semantics**
+  - **Resource/area**: VM cloud-init data
+  - **What is pinned**: pveconform's `spec.cloud-init-data.ssh-keys`
+    supports exactly two shapes:
+      - real keys → pveconform writes the CSV verbatim on create/drift.
+      - `["*"]` (the M10 redacted sentinel) → pveconform does NOT write
+        `sshkeys` on create/drift, letting PVE keep its live value.
+      - Mixed real + `"*"` → `Validate()` fails closed (ambiguous: does
+        pveconform write? does it leave alone?).
+  - **Impact/risk**: none (the mixed shape is refused at parse time).
+  - **Pinned**: `TestVMSpecCloudInitData_SentinelSSHKeysNotOwned` +
+    `TestVMSpecCloudInitData_MixedSentinelFailsClosed`.

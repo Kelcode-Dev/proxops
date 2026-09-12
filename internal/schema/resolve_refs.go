@@ -41,6 +41,14 @@ func ResolveArtifactRefs(resources []Resource) error {
 			if err := v.resolveTemplate(byRef); err != nil {
 				return err
 			}
+		case *TemplateVM:
+			// M11: a TemplateVM re-uses the VM surface (embedded), so the
+			// cdrom.iso artifact edge resolves exactly like a VM's. The
+			// embedded-field type switch above does NOT catch *TemplateVM,
+			// so we route it explicitly through the VM helper.
+			if err := v.resolveCDrom(byRef); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

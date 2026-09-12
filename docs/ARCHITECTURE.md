@@ -188,7 +188,7 @@ directions fail closed).
 `parse.BuildClusterIndex(root, cluster, configuredClusters)` builds the
 Index for exactly that cluster's composed files:
 
-- routing to typed resources (VM / LXC / CTTemplate / ISO) + `Validate()`;
+- routing to typed resources (VM / LXC / CTTemplate / ISO / TemplateVM) + `Validate()`;
 - duplicate `(kind, name)` refs -> error;
 - duplicate PVE id on a node **within the cluster** -> error;
 - structured edges (`VM -> ISO` via `hardware.cdrom.iso`,

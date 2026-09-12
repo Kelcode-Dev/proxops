@@ -156,6 +156,25 @@ func (s *Server) PreloadLXC(node string, cid int, cfg map[string]string, status 
 }
 
 // PreloadCT is an alias of PreloadLXC (M3 naming).
+
+// PreloadVMTemplate seeds a qemu object with the PVE template flag set
+// (M11: the TemplateVM adopt/test path — PVE 9.2 qm objects marked as
+// templates report "template" = "1").
+func (s *Server) PreloadVMTemplate(node string, vmid int, cfg map[string]string) {
+	if cfg == nil {
+		cfg = map[string]string{}
+	}
+	if _, ok := cfg["template"]; !ok {
+		cfg = map[string]string{}
+		for k, v := range cfg {
+			cfg[k] = v
+		}
+		cfg["template"] = "1"
+	}
+	s.set(node, vmid, "qemu", cfg, "stopped")
+}
+
+// PreloadCT is an alias of PreloadLXC (M3 naming).
 func (s *Server) PreloadCT(node string, cid int, cfg map[string]string, status string) {
 	s.set(node, cid, "lxc", cfg, status)
 }
@@ -308,6 +327,13 @@ func (s *Server) CTExists(node string, cid int) bool { return s.VMExists(node, c
 
 // LXCExists is an alias of VMExists for the LXC case.
 func (s *Server) LXCExists(node string, cid int) bool { return s.VMExists(node, cid) }
+
+// VMIsTemplate (M11) reports whether a qemu object on the node is flagged a
+// PVE template (template=1). Mirrors CTIsTemplate for the qm kind.
+func (s *Server) VMIsTemplate(node string, vmid int) bool {
+	v, ok := s.object(node, vmid)
+	return ok && v.Kind == "qemu" && v.Config["template"] == "1"
+}
 
 // CTIsTemplate reports whether an lxc object on the node is flagged a template.
 func (s *Server) CTIsTemplate(node string, cid int) bool {
@@ -714,14 +740,16 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 
 	case "template":
+		// PVE mark-template: POST /{qemu|lxc}/{id}/template → template=1.
+		// PVE reports template objects "stopped".
 		if r.Method == http.MethodPost || r.Method == http.MethodDelete {
-			// PVE's POST /lxc/{id}/template sets "template=1".
 			s.mu.Lock()
 			rec := s.objs[node][id]
 			if rec.Config == nil {
 				rec.Config = map[string]string{}
 			}
 			rec.Config["template"] = "1"
+			rec.Status = "stopped"
 			s.objs[node][id] = rec
 			upid := s.newTaskLocked(node, "template")
 			s.tpl++
@@ -732,6 +760,17 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 
 	case "untemplate":
+		// PVE 9.2 wire (M11 probe 2026-09-11, conformance-dev VM 9100):
+		//   - /lxc/{id}/untemplate  -> 200 + UPID
+		//   - /qemu/{id}/untemplate -> HTTP 501 "not implemented"
+		// The mock mirrors PVE 9.2 exactly: LXC untemplates, qemUs
+		// reject. This locks e2e tests that pin pveconform's
+		// fail-closed VM<->TemplateVM mismatch rule in plan.PlanActions.
+		if kindStr != "lxc" {
+			writeErr(w, http.StatusNotImplemented,
+				"Method '"+r.Method+" /nodes/"+node+"/"+kindStr+"/"+strconv.Itoa(id)+"/untemplate' not implemented")
+			return
+		}
 		if r.Method == http.MethodPost || r.Method == http.MethodDelete {
 			s.mu.Lock()
 			rec := s.objs[node][id]
@@ -748,8 +787,13 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 
 	case "clone":
-		if r.Method != http.MethodPost || kindStr != "lxc" {
-			writeErr(w, http.StatusMethodNotAllowed, "clone is a CT-only POST")
+		// PVE clone: POST /{qemu|lxc}/{id}/clone with newid. PVE 9.2
+		// supports both; M11 pins the qemu path (qemu templates are the
+		// pveconform TemplateVM clone source). The mock preserves the
+		// source kind for the clone target (a PVE clone of a qm is a qm,
+		// of a ct is a ct).
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "clone is a POST")
 			return
 		}
 		_ = r.ParseForm()

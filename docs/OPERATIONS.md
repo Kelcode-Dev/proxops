@@ -253,6 +253,11 @@ mismatch fails closed at config validation.
   manifest to stop re-downloading; PVE keeps the file.
 - **No PVE user/role management.** The PVE token used by pveconform is
   assumed to already exist with the right roles (see README).
+- **No PVE-kind demotion of a template back to a plain VM.** PVE 9.2 has
+  no `/qemu/{id}/untemplate` endpoint (probe: HTTP 501 "not implemented").
+  pveconform therefore surfaces a `kind: VM` desired against a live PVE-side
+  `template=1` as a non-destructive anomaly; the demotion is an operator's
+  manual step on the PVE host.
 
 ### Idempotency by construction
 
@@ -282,13 +287,19 @@ What it does:
   allowlist, PVE's `/cluster/nodes` listing); only allowlisted nodes are
   ever read — this is the cluster-isolation guarantee;
 - writes one manifest per live object under `<kind>/<cluster>/` in the git
-  work tree (VM, LXC, ISO, CTTemplate);
+  work tree (VM, LXC, ISO, CTTemplate, and — M11 — TemplateVM);
 - surfaces **unsupported PVE configuration explicitly** (a `gap` line per
   live key pveconform does not model; `INCOMPLETE` for generated manifests
-  missing a value PVE cannot re-report, e.g. the LXC `ostemplate`;
-  `SKIPPED` for objects pveconform deliberately does not generate — PVE
-  *template* VMs, which a pveconform-managed manifest would wrongly claim
-  ownership of);
+  missing a value PVE cannot re-report, e.g. the LXC `ostemplate`). M11
+  replaces M10's `SKIPPED` contract for PVE *template* VMs: instead of a skip
+  + `Result.Skipped` census entry, pveconform now generates a `kind:
+  TemplateVM` manifest under `templatevm/<cluster>/` and owns the full
+  lifecycle (create + mark, config drift, prune). PVE-side `sshkeys` in the
+  template's cloud-init are redacted to the `["*"]` sentinel so the operator
+  fills in the real key(s) before apply; `cipassword` / `cicustom` stay as
+  gap lines. A pveconform `kind: VM` desired against a live PVE-side template
+  at the same `(node, vmid)` is surfaced as a non-destructive anomaly (no
+  kind-flip write).
 - **redacts sensitive PVE fields** in the gap report: `sshkeys` and
   `cipassword` values are emitted as `<redacted>` (the field name still
   reports, so the operator knows pveconform does not model it);
@@ -333,9 +344,9 @@ PVE -> adopt -> YAML -> (human review) -> clusters/<cluster>/resources.yaml
      -> pveconform diff -> zero unexpected drift
 ```
 
-Every remaining drift line must map to a documented M10 expectation:
+Every remaining drift line must map to a documented M10/M11 expectation:
 
-- `update ... config drift` on every adopted VM: the ownership-tag claim
+- `update ... config drift` on every adopted VM / LXC / TemplateVM: the ownership-tag claim
   (PVE objects carry no `pveconform` tag; pveconform adds one when it
   manages an object). This is expected and is the first write the operator
   consciously approves — it is not applied by `diff`.
@@ -343,8 +354,10 @@ Every remaining drift line must map to a documented M10 expectation:
   whose cloud-init volume sits on a non-IDE slot (PVE 9.x places cloud-init
   on `scsi1` when `ide2` is not used): pveconform does not own non-IDE
   cdrom slots; adopt documents them as a gap and leaves them PVE-managed.
-- `skipped (no pveconform tag)` for objects not yet composed
-  (INCOMPLETE LXC resources, PVE template VMs).
+- `skipped (no pveconform tag)` for LXC resources whose `spec.template`
+  could not be recovered (INCOMPLETE). M10's "SKIPPED PVE template VMs"
+  entry does *not* appear in M11: PVE-side `template=1` objects are now
+  adopted as `kind: TemplateVM` under `templatevm/<cluster>/`.
 
 Live-only data disks are preserved: adopt interrogates the PVE /config
 report, so a live second data disk is represented in the adopted manifest

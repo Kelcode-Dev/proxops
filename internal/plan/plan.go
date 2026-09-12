@@ -34,6 +34,10 @@ const (
 	Delete     ActionKind = "delete"
 	StatusOnly ActionKind = "verify"  // read-back
 	Anomaly    ActionKind = "anomaly" // non-destructive live-only slot surfacing
+	// M11: mark an existing PVE qemu object as a template (POST /qemu/{id}/template).
+	// The planner emits this when a desired TemplateVM matches a live PVE object
+	// at the same (node, vmid) that does NOT report template=1.
+	MarkTemplate ActionKind = "mark-template"
 )
 
 // Action is one planned operation on one PVE object.
@@ -96,6 +100,9 @@ type LiveInventory struct {
 	Power map[string]string
 	// Listing: every PVE resource entry (VMs, LXC, disks, etc.)
 	Listing []pveclient.ClusterResource
+	// M11: qm ids PVE reports as template=1, keyed "node|qmid" -> PVE name.
+	// Used for VM-vs-TemplateVM mismatch anomaly and prune-safety.
+	TemplateKeys map[string]string
 }
 
 // Budget caps deletions per cycle.
@@ -184,6 +191,22 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		key := liveKey(r.Node(), kt, r.ID())
 		cfg, present := live.Configs[key]
 
+		// M11: desired TemplateVM whose live PVE object exists as a non-template
+		// VM -> emit MarkTemplate (one write; re-derivable next cycle).
+		if kt == schema.KindTemplateVM && !present {
+			vmKey := liveKey(r.Node(), schema.KindVM, r.ID())
+			if live.Configs[vmKey] != nil {
+				p.Actions = append(p.Actions, Action{
+					Tier: 0, Kind: kt, Name: ref.Name, Node: r.Node(), ID: r.ID(),
+					What: MarkTemplate, Level: levels(ref), Ref: ref,
+					Reason:    ref.String() + ": PVE object present but not a template; will mark as template",
+					Deps:      depsFor(ref),
+					LivePower: live.Power[vmKey], DesiredPower: r.DesiredState(),
+				})
+				continue
+			}
+		}
+
 		if !present {
 			params, err := r.ToCreateParams()
 			if err != nil {
@@ -195,6 +218,23 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 				Deps:      depsFor(ref),
 				Reason:    ref.String() + ": not on PVE; will " + createVerb(kt),
 				LivePower: "", DesiredPower: r.DesiredState(),
+			})
+			continue
+		}
+
+		// M11: desired pveconform VM whose live PVE object is a PVE-side
+		// template (template=1): pveconform cannot untemplate on PVE 9.2 (501
+		// "not implemented") and must not claim ownership of a clone source.
+		// Surface a non-destructive anomaly; no config/power write.
+		if kt == schema.KindVM && isPVETemplate(cfg) {
+			p.Anomalies = append(p.Anomalies, Action{
+				Tier: 0, Kind: kt, Name: ref.Name, Node: r.Node(), ID: r.ID(),
+				What: Anomaly, Level: levels(ref), Ref: ref,
+				Anomaly: true,
+				// Niche note: pveconform refuses to write a kind-flip on PVE; the
+				// operator either switches the manifest to kind: TemplateVM
+				// (M11), or demotes the PVE object manually.
+				Reason: ref.String() + ": live PVE object is a template (template=1); a pveconform VM manifest cannot be applied to a PVE template and PVE 9.2 has no /qemu/{id}/untemplate - change the manifest to kind: TemplateVM (or demote the PVE object by hand)",
 			})
 			continue
 		}
@@ -281,6 +321,12 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		desiredSet[liveKey(r.Node(), kind, r.ID())] = true
 		// also accept identity by ref (kind+name)
 		desiredSet[r.Ref().String()] = true
+		// M11: a TemplateVM and a VM share PVE's per-qm-id space. Register BOTH
+		// so the prune pass (normalizes qm->KindVM) never prunes a desired
+		// TemplateVM; a desired VM is recognised against a live template.
+		if kind == schema.KindTemplateVM {
+			desiredSet[liveKey(r.Node(), schema.KindVM, r.ID())] = true
+		}
 	}
 
 	for _, res := range live.Listing {
@@ -327,6 +373,11 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 			continue
 		}
 		nameStr, _ := cfg["name"].(string)
+		// M11: a live PVE-side template whose PVE id is claimed by a desired
+		// TemplateVM manifest is NOT a prune candidate.
+		if isPVETemplate(cfg) && desiredTemplateVM(desired, res.Node, res.Vmid) {
+			continue
+		}
 		pruneCandidates = append(pruneCandidates, Action{
 			Tier: 9, Kind: kind, Name: nameStr, Node: res.Node, ID: res.Vmid,
 			What: Delete, Prune: true, Level: 0,
@@ -448,9 +499,10 @@ func LoadLive(ctx context.Context, c *pveclient.Client, desired []schema.Resourc
 		return nil, fmt.Errorf("cluster resources: %w", err)
 	}
 	inv := &LiveInventory{
-		Configs: map[string]map[string]any{},
-		Power:   map[string]string{},
-		Listing: listing,
+		Configs:      map[string]map[string]any{},
+		Power:        map[string]string{},
+		Listing:      listing,
+		TemplateKeys: map[string]string{},
 	}
 	for _, res := range listing {
 		if res.Node == "" || res.Vmid <= 0 || res.Type == "" {
@@ -473,6 +525,14 @@ func LoadLive(ctx context.Context, c *pveclient.Client, desired []schema.Resourc
 			inv.Configs[keyFor(res.Node, kind, res.Vmid)] = cfg
 			if st, sErr := c.VM().Status(ctx, res.Node, res.Vmid); sErr == nil {
 				inv.Power[keyFor(res.Node, kind, res.Vmid)] = normalizePower(st.Status)
+			}
+			// M11: PVE qm object reporting template=1 -> also key under
+			// TemplateVM + record the "node|qmid" template record.
+			if isPVETemplate(cfg) {
+				tvKey := keyFor(res.Node, schema.KindTemplateVM, res.Vmid)
+				inv.Configs[tvKey] = cfg
+				name, _ := cfg["name"].(string)
+				inv.TemplateKeys[res.Node+"|q"+strconv.Itoa(res.Vmid)] = name
 			}
 		case schema.KindLXC:
 			cfg, gErr := c.LXC().Get(ctx, res.Node, res.Vmid)
@@ -562,6 +622,9 @@ func createVerb(k schema.Kind) string {
 		return "download ct-template (vztmpl)"
 	case schema.KindISO:
 		return "download"
+	// M11: TemplateVM create is two PVE writes (POST /qemu + POST /qemu/{id}/template).
+	case schema.KindTemplateVM:
+		return "create + mark as PVE template"
 	default:
 		return "create"
 	}
@@ -705,4 +768,42 @@ func normalizePower(s string) string {
 	default:
 		return strings.ToLower(s)
 	}
+}
+
+// M11: isPVETemplate reports whether PVE's /config indicates the object is a
+// template (template=1). PVE encodes this as an integer JSON number
+// ("template": 1); Go's encoding/json decodes bare integers as float64, so the
+// float64 case is the real-world wire form. The mock PVE stores it as the
+// string "1" (mock form-values are map[string]string), so both cases are
+// supported.
+func isPVETemplate(cfg map[string]any) bool {
+	v, ok := cfg["template"]
+	if !ok {
+		return false
+	}
+	switch t := v.(type) {
+	case string:
+		return t == "1" || t == "true"
+	case int:
+		return t == 1
+	case int64:
+		return t == 1
+	case float64:
+		return t == 1.0
+	}
+	return false
+}
+
+// M11: desiredTemplateVM reports whether a desired TemplateVM manifest claims
+// the PVE id on the given node (prune-safe guard).
+func desiredTemplateVM(desired []schema.Resource, node string, id int) bool {
+	for _, r := range desired {
+		if r.Ref().Kind != schema.KindTemplateVM {
+			continue
+		}
+		if r.Node() == node && r.ID() == id {
+			return true
+		}
+	}
+	return false
 }

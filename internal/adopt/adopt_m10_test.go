@@ -150,18 +150,27 @@ func TestAdopt_ZeroWritesOnProdFixtureEquivalent(t *testing.T) {
 		}
 	}
 
-	// The template VM MUST be skipped, not generated.
-	if len(res.Skipped) != 1 {
-		t.Fatalf("Skipped = %d, want 1 (template VM); got %+v", len(res.Skipped), res.Skipped)
-	}
-	s := res.Skipped[0]
-	if s.ID != 999 || s.Kind != schema.KindVM || !strings.Contains(s.Reason, "template") {
-		t.Errorf("Skipped[0] = %+v, want VM#999 with a template reason", s)
-	}
+	// M11: the template VM MUST be ADOPTED as a pveconform TemplateVM
+	// manifest (replacing M10's "skipped + census" contract). PVE-side
+	// sshkeys are redacted to the "*" sentinel in the committed manifest;
+	// cipassword / cicustom stay in the gap report.
+	gotTV := 0
 	for _, w := range res.Wrote {
-		if strings.Contains(w.Path, "999") {
-			t.Errorf("adopt generated a manifest for the template VM: %s", w.Path)
+		if w.Kind != schema.KindTemplateVM {
+			continue
 		}
+		// The manifest name is the PVE "name" field sanitized (sanitized in
+		// adopt.nameForPVE): for PVE VM 999 named "tpl-almalinux-10" this is
+		// "tpl-almalinux-10". Look for that.
+		if strings.Contains(w.Path, "tpl-almalinux-10") {
+			gotTV++
+		}
+	}
+	if gotTV != 1 {
+		t.Fatalf("TemplateVM manifest = %d, want 1 (PVE VM 999 'tpl-almalinux-10'); paths=%v", gotTV, m10Paths(res.Wrote))
+	}
+	if len(res.Skipped) != 0 {
+		t.Fatalf("Skipped = %d, want 0 (M11 adopts template VMs); got %+v", len(res.Skipped), res.Skipped)
 	}
 
 	// The production VM (100) must be adopted but with scsi1 excluded.
@@ -402,9 +411,12 @@ func TestAdopt_PlainDataDiskStillAdopted(t *testing.T) {
 	}
 }
 
-// TestAdopt_TemplateVMsSkippedWithCensus pins that PVE-template VMs land in
-// Result.Skipped (not manifests) and the census stays complete.
-func TestAdopt_TemplateVMsSkippedWithCensus(t *testing.T) {
+// TestAdopt_TemplateVMsAdoptedAsTemplateVMManifest pins the M11 adoption
+// contract: PVE-template VMs are reverse-translated to pveconform
+// TemplateVM manifests (kind=TemplateVM, under templatevm/<cluster>/)
+// rather than M10's "skipped + census" contract. The zero-write
+// guarantee is preserved (adopt issues only GETs).
+func TestAdopt_TemplateVMsAdoptedAsTemplateVMManifest(t *testing.T) {
 	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
 	t.Cleanup(m.Close)
 	m.PreloadVM("pve01", 500, map[string]string{
@@ -443,19 +455,22 @@ func TestAdopt_TemplateVMsSkippedWithCensus(t *testing.T) {
 	if m.WritesObserved() != 0 {
 		t.Fatalf("mock PVE observed %d write requests", m.WritesObserved())
 	}
-	if len(res.Skipped) != 2 {
-		t.Fatalf("Skipped = %d, want 2 (both template VMs); got %+v", len(res.Skipped), res.Skipped)
+	// M11: PVE-template VMs are no longer "skipped + census": they are adopted
+	// into pveconform TemplateVM manifests (kind=TemplateVM). PVE 9.2's
+	// wire-semantic change (one-way-only /template endpoint; 501 on
+	// /untemplate) makes the manifest the right representation of
+	// owner-controlled state.
+	if len(res.Skipped) != 0 {
+		t.Fatalf("Skipped = %d, want 0 (M11 adopts template VMs); got %+v", len(res.Skipped), res.Skipped)
 	}
-	ids := make([]int, 0, len(res.Skipped))
-	for _, s := range res.Skipped {
-		ids = append(ids, s.ID)
-		if s.Kind != schema.KindVM {
-			t.Errorf("Skipped kind = %v, want VM", s.Kind)
+	tvKinds := 0
+	for _, w := range res.Wrote {
+		if w.Kind == schema.KindTemplateVM {
+			tvKinds++
 		}
 	}
-	sort.Ints(ids)
-	if ids[0] != 500 || ids[1] != 501 {
-		t.Errorf("Skipped ids = %v, want [500 501]", ids)
+	if tvKinds != 2 {
+		t.Fatalf("TemplateVM manifests = %d, want 2 (PVE VMs 500 + 501); paths=%v", tvKinds, m10Paths(res.Wrote))
 	}
 	prodFound := false
 	for _, w := range res.Wrote {

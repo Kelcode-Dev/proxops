@@ -123,6 +123,9 @@ func relocateForM8(t *testing.T, files map[string]string, cluster string) map[st
 		schema.KindLXC:        "lxc",
 		schema.KindISO:        "iso",
 		schema.KindCTTemplate: "ctt",
+		// M11: TemplateVM manifests live under the templatevm/ kind root
+		// (mirrors composition.rootDirs and adopt.kindPath).
+		schema.KindTemplateVM: "templatevm",
 	}
 	used := map[string]bool{}
 

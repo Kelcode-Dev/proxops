@@ -30,3 +30,4 @@ resources:
   - ../../lxc/example/cache-01.yaml
   - ../../vm/example/app-vm.yaml
   - ../../vm/example/talos-worker-01.yaml
+  - ../../templatevm/example/almalinux-tpl.yaml

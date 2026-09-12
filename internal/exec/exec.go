@@ -227,6 +227,18 @@ func (e *Executor) apply(ctx context.Context, a plan.Action) (didStop bool, err 
 			return false, cErr
 		}
 		return false, e.waitTask(ctx, a.Node, upid)
+	// M11: mark an existing qemu VM as a PVE template. pveconform's
+	// executor POSTs /qemu/{id}/template (PVE's one-way-only endpoint:
+	// PVE 9.2 has no /qemu/{id}/untemplate — 501 "not implemented",
+	// probed on conformance-dev 2026-09-11). The planner emits a
+	// MarkTemplate action whenever a desired TemplateVM matches a PVE
+	// object at the same (node, vmid) that is NOT template-flagged.
+	case plan.MarkTemplate:
+		upid, mErr := e.markTemplate(ctx, a)
+		if mErr != nil {
+			return false, mErr
+		}
+		return false, e.waitTask(ctx, a.Node, upid)
 	case plan.Start:
 		upid, sErr := e.start(ctx, a)
 		if sErr != nil {
@@ -278,6 +290,16 @@ func (e *Executor) update(ctx context.Context, a plan.Action) (didStop bool, err
 //
 // Both go through PVE POST /nodes/{n}/storage/{s}/download-url with the
 // `content` form parameter set to "iso" or "vztmpl" respectively.
+//
+// M11 TemplateVM: a single Create action performs two PVE writes:
+//  1. POST /nodes/{n}/qemu with the manifest's create params + start=0
+//     (a PVE template is stopped — DesiredState is always "stopped").
+//  2. POST /nodes/{n}/qemu/{id}/template (the PVE mark endpoint).
+//
+// The two tasks run serially, and both UPIDs are waited on by
+// waitTask (the second returns the mark UPID). This keeps a failed
+// template-mark visible on /status as a Failed action, not a half-created
+// VM that would show up as drift on the next cycle.
 func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 	switch a.Kind {
 	case schema.KindISO, schema.KindCTTemplate:
@@ -296,6 +318,31 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 			}
 		}
 		return e.client.Storage().Download(ctx, a.Node, p, u, f, ct)
+	case schema.KindTemplateVM:
+		// M11: create a VM at the pinned vmid, then mark it as a
+		// template. Both returns a UPID; waitTask drains sequentially.
+		// DesiredPower is always "stopped" for a TemplateVM
+		// (TemplateVM.DesiredState() returns "stopped"; the planner
+		// asserts this in Validate). A template CANNOT be started.
+		v := toValues(a.Params)
+		upid, cErr := e.client.VM().Create(ctx, a.Node, v, false)
+		if cErr != nil {
+			return upid, cErr
+		}
+		waitErr := e.waitTask(ctx, a.Node, upid)
+		if waitErr != nil {
+			return upid, waitErr
+		}
+		mupid, mErr := e.client.VM().MarkTemplate(ctx, a.Node, a.ID)
+		if mErr != nil {
+			// A partially-created VM with a failed mark is visible as a
+			// drift on the next cycle (pveconform's VM↔TemplateVM
+			// mismatch rule fires on a pveconform TV desired vs a live
+			// VM that is not yet template). No automatic retry: the
+			// operator must investigate the PVE-side half-state.
+			return mupid, fmt.Errorf("create template-mark: %w (created VM left un-marked)", mErr)
+		}
+		return mupid, nil
 	default:
 		v := toValues(a.Params)
 		start := a.DesiredPower == "started"
@@ -306,29 +353,46 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 	}
 }
 
+// markTemplate performs a PVE-side VM template-mark for an already-existing
+// qemu object (M11 desired TemplateVM vs. live pveconform-created VM that
+// is not yet PVE-templatel). PVE 9.2's mark endpoint is POST-only;
+// there is no untemplate endpoint (501 "not implemented", probed
+// conformance-dev 2026-09-11).
+func (e *Executor) markTemplate(ctx context.Context, a plan.Action) (string, error) {
+	upid, err := e.client.VM().MarkTemplate(ctx, a.Node, a.ID)
+	if err != nil {
+		return upid, fmt.Errorf("%s: mark-template: %w", a.Ref, err)
+	}
+	return upid, nil
+}
+
 // updateConfig issues a PVE config update. Artifacts (ISO / CTTemplate)
 // never receive config updates — they have no PVE object id; their only
 // PVE-side mutation is the POST /storage/download-url they trigger on Create.
+// M11 TemplateVM shares PVE's /qemu/{id}/config surface with a regular VM
+// (a PVE-side template is just a stopped qm flagged template=1). All four
+// config/power/delete routes therefore dispatch a KindTemplateVM to the
+// VM client with a.Kind == schema.KindVM || a.Kind == schema.KindTemplateVM.
 func (e *Executor) updateConfig(ctx context.Context, a plan.Action) (string, error) {
 	if schema.ArtifactKind(a.Kind) {
 		return "", fmt.Errorf("%s: PVE storage artifacts do not take config updates", a.Kind)
 	}
 	v := toValues(a.Params)
-	if a.Kind == schema.KindVM {
+	if a.Kind == schema.KindVM || a.Kind == schema.KindTemplateVM {
 		return e.client.VM().Update(ctx, a.Node, a.ID, v)
 	}
 	return e.client.LXC().Update(ctx, a.Node, a.ID, v)
 }
 
 func (e *Executor) start(ctx context.Context, a plan.Action) (string, error) {
-	if a.Kind == schema.KindVM {
+	if a.Kind == schema.KindVM || a.Kind == schema.KindTemplateVM {
 		return e.client.VM().Start(ctx, a.Node, a.ID)
 	}
 	return e.client.LXC().Start(ctx, a.Node, a.ID)
 }
 
 func (e *Executor) delete(ctx context.Context, a plan.Action) (string, error) {
-	if a.Kind == schema.KindVM {
+	if a.Kind == schema.KindVM || a.Kind == schema.KindTemplateVM {
 		return e.client.VM().Delete(ctx, a.Node, a.ID)
 	}
 	return e.client.LXC().Delete(ctx, a.Node, a.ID)
@@ -337,7 +401,7 @@ func (e *Executor) delete(ctx context.Context, a plan.Action) (string, error) {
 // stopAndWait stops and awaits the stop task. It returns ""/nil when the
 // object was already stopped (PVE may refuse the stop with "already stopped").
 func (e *Executor) stopAndWait(ctx context.Context, a plan.Action) (didStop bool, err error) {
-	if a.Kind == schema.KindVM {
+	if a.Kind == schema.KindVM || a.Kind == schema.KindTemplateVM {
 		upid, err := e.client.VM().Stop(ctx, a.Node, a.ID)
 		if err != nil {
 			return false, err

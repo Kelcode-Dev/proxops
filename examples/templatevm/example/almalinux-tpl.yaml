@@ -1,0 +1,60 @@
+# M11 example: a pveconform TemplateVM (a PVE qemu object promoted to a
+# PVE template, template=1).
+#
+# A TemplateVM manifest re-uses every field a kind: VM manifest supports
+# with two differences:
+#   1. kind: is TemplateVM (aliases TVM / TEMPLATE also parse).
+#   2. spec.state must be "stopped" (or absent -> stopped). PVE refuses to
+#      start a template; Validate() rejects "started".
+#
+# Lifecycle pveconform owns: CREATE (POST /qemu + POST /qemu/{id}/template),
+# UPDATE (POST /qemu/{id}/config), MARK (MarkTemplate action), PRUNE
+# (DELETE /qemu/{id}).
+#
+# ssh-keys is the single "*" redacted sentinel: replace with a real public
+# key before first apply (pveconform never writes ssh-keys while set).
+apiVersion: proxops/v1alpha1
+kind: TemplateVM
+metadata:
+  name: almalinux-tpl
+spec:
+  node: pve01
+  vmid: 900
+  state: stopped
+  memory: 2GiB
+  cpu:
+    type: host
+    cores: 1
+  disks:
+    - storage: local-lvm
+      size: 32GiB
+      interface: scsi0
+      controller: virtio-scsi-single
+      iothread: true
+  networks:
+    - model: virtio
+      bridge: vmbr0
+  hardware:
+    machine: q35
+    bios: ovmf
+    efi-disk:
+      storage: local-lvm
+      size: 4MiB
+      template: 4m
+    serial0: socket
+  options:
+    agent: true
+    onboot: true
+    boot-order:
+      - scsi0
+  cloud-init-data:
+    ci-user: operator
+    nameservers:
+      - 1.1.1.1
+      - 8.8.8.8
+    ipconfigs:
+      - nic: 0
+        ip: 192.168.192.199/18
+        gateway: 192.168.192.5
+    ssh-keys:
+      - "*"

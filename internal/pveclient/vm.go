@@ -113,3 +113,34 @@ func (vm *VM) Resize(ctx context.Context, node string, vmid int, memoryMib int64
 	p := url.Values{"memory": {strconv.FormatInt(memoryMib, 10)}}
 	return vm.c.Do(ctx, http.MethodPost, node, vmBase(node, vmid)+"/resize", p, nil)
 }
+
+// MarkTemplate promotes a stopped qemu VM to a PVE template.
+// PVE requires the object to be stopped; the planner/executor pre-stop when
+// needed. Asynchronous: returns a task UPID.
+func (vm *VM) MarkTemplate(ctx context.Context, node string, vmid int) (string, error) {
+	return vm.c.Do(ctx, http.MethodPost, node, vmBase(node, vmid)+"/template", nil, nil)
+}
+
+// IsTemplate reports whether PVE reports `template=1` on the object's live
+// /config. Used by the planner to detect the VM↔TemplateVM kind-mismatch
+// shape: a pveconform VM desired against a PVE-side template. PVE 9.2 has
+// no /qemu/{id}/untemplate endpoint (probe-verified: HTTP 501 "not
+// implemented"), so pveconform surfaces this mismatch as a non-destructive
+// anomaly instead of attempting a write.
+func (vm *VM) IsTemplate(ctx context.Context, node string, vmid int) (bool, error) {
+	cfg, err := vm.Get(ctx, node, vmid)
+	if err != nil {
+		return false, err
+	}
+	v, ok := cfg["template"]
+	if !ok {
+		return false, nil
+	}
+	switch t := v.(type) {
+	case string:
+		return t == "1", nil
+	case int:
+		return t == 1, nil
+	}
+	return false, nil
+}

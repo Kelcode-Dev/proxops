@@ -496,6 +496,16 @@ func newResource(doc map[string]any) (schema.Resource, error) {
 			return nil, err
 		}
 		return iso, nil
+	// M11: TemplateVM — a PVE qemu object marked as a template. Shares
+	// the wire surface of a VM (schema.TemplateVM embeds schema.VM) but
+	// has its own kind + lifecycle (create+mark, no start, no untemplate
+	// on PVE 9.2).
+	case schema.KindTemplateVM:
+		tv := schema.NewTemplateVM()
+		if err := docTo(tv, doc); err != nil {
+			return nil, err
+		}
+		return tv, nil
 	default:
 		return nil, fmt.Errorf("unknown kind %q", kindRaw)
 	}
@@ -521,6 +531,9 @@ func metadataOf(r schema.Resource) *schema.Metadata {
 	case *schema.CTTemplate:
 		return &v.Metadata
 	case *schema.ISO:
+		return &v.Metadata
+	// M11: TemplateVM embeds schema.VM, so &v.Metadata works via promotion.
+	case *schema.TemplateVM:
 		return &v.Metadata
 	default:
 		return &schema.Metadata{}

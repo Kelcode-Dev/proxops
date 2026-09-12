@@ -8,6 +8,19 @@ const (
 	KindLXC        Kind = "LXC"
 	KindCTTemplate Kind = "CTTemplate"
 	KindISO        Kind = "ISO"
+	// KindTemplateVM is a PVE qemu VM that has been marked as a
+	// template (PVE `template=1`). pveconform manages its lifecycle as
+	// a first-class object (M11): create + mark-template, config drift,
+	// ownership-tag prunes, and — because PVE 9.2 does not implement
+	// /qemu/{id}/untemplate — a non-destructive anomaly when a pveconform
+	// VM desired matches a PVE-side template.
+	//
+	// Wire shape: identical to VM. pveconform shares PVE's per-node qm
+	// id space with VM, so a TemplateVM and a VM cannot co-exist on the
+	// same PVE id on the same node. PVE's /cluster/resources reports
+	// both with type="qm"; the template flag in the per-object /config
+	// report is what distinguishes them.
+	KindTemplateVM Kind = "TemplateVM"
 )
 
 // Ref is the cross-kind identifier used by the Index and prune guards.

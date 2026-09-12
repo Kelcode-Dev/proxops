@@ -9,7 +9,8 @@ model** (see ARCHITECTURE.md → "Multi-cluster composition"):
 
 ```
 clusters/<cluster>/resources.yaml   # what <cluster> consumes (explicit list)
-<kind>/{base|<cluster>}/....yaml    # resource definitions, kind in vm, lxc, iso, ctt
+<kind>/{base|<cluster>}/....yaml    # resource definitions, kind in vm, lxc,
+                                     #   iso, ctt, templatevm
 ```
 
 Since M9 the cluster's pveconform **configuration** and **credentials**
@@ -43,7 +44,7 @@ Every manifest has this envelope:
 
 ```yaml
 apiVersion: proxops/v1alpha1   # only supported value
-kind: VM | LXC | CTTemplate | ISO
+kind: VM | LXC | CTTemplate | ISO | TemplateVM
 metadata:
   name: human-readable-name      # required, [a-z0-9](-[a-z0-9])*
   labels:                        # optional, free-form
@@ -58,6 +59,11 @@ additionally pinned by `spec` fields (below) — **the agent never invents PVE
 ids** for objects that have one. The two kinds that have **no** PVE numeric id
 (ISO and CTTemplate, both *storage artifacts*) are identified on PVE by
 `(node, storage, filename)` and on pveconform by `metadata.name`.
+
+The three kinds that carry a PVE numeric id (VM, LXC, and — since M11 —
+TemplateVM) share PVE's per-node integer pool: a `spec.vmid` / `spec.vmid`
+collision inside one cluster's composition is a parse error. A TemplateVM and
+a VM can never claim the same `(node, vmid)`.
 
 ---
 
@@ -85,6 +91,9 @@ creates topologically so prerequisites finish **before** their dependants:
    ```
 
    The value is a comma-separated list of `Kind:name` refs.
+
+M11 adds one more structured edge: a TemplateVM's inherited `cdrom.iso`
+reference (see `kind: TemplateVM` below) resolves exactly like a VM's.
 
 Behaviour:
 
@@ -183,6 +192,32 @@ Behaviour:
 | `nested-virt` | no | `nestedvirt=1` | Nested KVM. |
 | `hidden` | no | `hidden=1` | Hide KVM from the guest. |
 
+### Cloud-Init Data (M11)
+
+A pveconform VM's top-level PVE keys `ciuser`, `sshkeys`, `nameserver`,
+`searchdomain`, `ipconfig<N>` are modelled under `spec.cloud-init-data`:
+
+| Field | Required | PVE wire | Semantics |
+|---|---|---|---|
+| `ci-user` | no | `ciuser` | PVE cloud-init user. Empty = not owned. |
+| `ssh-keys` | no | `sshkeys` | PVE cloud-init public-key CSV. Empty = not owned. A single `"*"` sentinel = PVE owns the live value; pveconform does not write `sshkeys`. |
+| `nameservers` | no | `nameserver` (space-separated) | PVE cloud-init DNS server CSV. Set-compared on /config vs. desired — order/duplicates are not semantics. |
+| `search-domains` | no | `searchdomain` (space-separated) | PVE cloud-init DNS search domain CSV. Same set semantics. |
+| `ipconfigs` | no | `ipconfig<N>` (`ip=<cidr>[,gw=<addr>]`) | PVE cloud-init static-IP. One entry per pveconform-owned NIC; `nic` = PVE slot index. PVE's `dhcp` form is **not** modelled. |
+
+Drift semantics: pveconform owns a PVE key only when the desired field is
+non-empty. Empty desired values mean "pveconform does not write the PVE
+key and does NOT surface drift for it" — so a PVE-side `ciuser` that
+pveconform has no way of knowing was set by `qm cloud-init` does not
+flap. The `ssh-keys: ["*"]` sentinel is the same non-write shape:
+pveconform does not write the PVE `sshkeys` field while the sentinel is
+present; PVE's live value survives.
+
+Adoption (M11): PVE-side `sshkeys` are redacted to `["*"]` in emitted
+manifests (M10 PII redaction rule generalized to any kind carrying cloud-
+init data). `cipassword` / `cicustom` / `ciupgrade` are NOT adopted —
+secret or PVE-side-only — and stay in the gap report.
+
 **Deliberately not modelled:** replication jobs (source/destination/schedule
 is a separate concern — a future dedicated resource), `bootspeed`, `netboot`
 (rejected on PVE 9.2 config), and Secure Boot policy (separate PVE
@@ -194,6 +229,34 @@ Drift semantics on disks/NICs/hardware:
 - **NICs** compared on model + bridge + (pinned MAC / vlan / rate / firewall
   when requested).
 - Power transitions are independent of config drift.
+
+---
+
+## `kind: TemplateVM` (M11)
+
+A PVE qemu object promoted to a PVE template (PVE `template=1`). M11 makes
+pveconform own the template lifecycle end-to-end: create + mark, config
+drift, ownership-tag prune. The pveconform schema surface is **identical to
+`kind: VM`** (a `TemplateVM` manifest re-uses every `spec` field a VM
+manifest supports, plus `spec.state` constrained to "stopped").
+
+Differences from `kind: VM`:
+
+| Concern | pveconform behaviour |
+|---|---|
+| `spec.state` | MUST be `stopped` (or absent → "stopped"). PVE refuses to start a template (`state: started` fails `Validate()` at parse time). |
+| PVE id space | PVE's per-node qm id space is shared with `kind: VM` — a TemplateVM and a VM cannot both claim the same `(node, vmid)`. pveconform enforces this as any other in-cluster id collision. |
+| PVE /template endpoint | `POST /qemu/{id}/template` (mark). The planner emits a `MarkTemplate` action when a desired TemplateVM matches a PVE object at the same `(node, vmid)` that is NOT template-flagged. |
+| PVE /untemplate endpoint | **PVE 9.2 has no `/qemu/{id}/untemplate` endpoint** (probe-verified `HTTP 501 "not implemented"` on conformance-dev 2026-09-11). The planner therefore surfaces a **non-destructive anomaly** when a pveconform `kind: VM` desired matches a PVE-side template at the same `(node, vmid)`: pveconform will not attempt a kind-flip write. The operator either changes the manifest to `kind: TemplateVM` (the right pveconform representation of PVE's state) or manually demotes the PVE object (`qm` from the PVE host, or PVE's Web UI). |
+| Create | `POST /qemu` with `start=0` + `POST /qemu/{id}/template`. The executor combines both into a single `Create` action. |
+| Delete | `DELETE /qemu/{id}`. PVE accepts delete on a templated object. |
+| Cloud-init | M11's `spec.cloud-init-data` is fully supported (see `kind: VM` § Cloud-Init Data above). |
+
+Adoption (M11): PVE objects reporting `template=1` now produce `kind:
+TemplateVM` manifests under `templatevm/<cluster>/`, replacing M10's
+"skip + SkippedObject census" contract. PVE-side `sshkeys` are redacted to
+`["*"]` (M10 PII redaction rule generalized); `cipassword` / `cicustom`
+remain in the gap report.
 
 ---
 
