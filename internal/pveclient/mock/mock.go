@@ -51,6 +51,9 @@ type Server struct {
 	objs      map[string]map[int]VM                 // node -> id -> record
 	isos      map[string]map[string]map[string]bool // node -> storage -> filename
 	templates map[string]map[string]map[string]bool // node -> storage -> filename (vztmpl pool)
+	// images: node -> storage -> filename for PVE 9's `import` content pool
+	// (qcow2/vmdk/raw disk images). DiskImage artifacts live here.
+	images map[string]map[string]map[string]bool
 	// lvmVols: node -> storage -> volid ("local-lvm:vm-100-disk-0") -> PVE
 	// data volume (size + PVE `content` label). Surfaces in the bare
 	// storage content listing, mirroring PVE's LVM content pool; adopt
@@ -98,6 +101,7 @@ func New(cfg Config) *Server {
 		objs:      map[string]map[int]VM{},
 		isos:      map[string]map[string]map[string]bool{},
 		templates: map[string]map[string]map[string]bool{},
+		images:    map[string]map[string]map[string]bool{},
 		lvmVols:   map[string]map[string]map[string]lvmVol{},
 		tasks:     map[string]*task{},
 	}
@@ -268,6 +272,20 @@ func (s *Server) PreloadTemplate(node, storage, filename string) {
 	s.templates[node][storage][filename] = true
 }
 
+// PreloadDiskImage adds an already-present import-pool disk image on a storage.
+func (s *Server) PreloadDiskImage(node, storage, filename string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.addNodeLocked(node)
+	if s.images[node] == nil {
+		s.images[node] = map[string]map[string]bool{}
+	}
+	if s.images[node][storage] == nil {
+		s.images[node][storage] = map[string]bool{}
+	}
+	s.images[node][storage][filename] = true
+}
+
 func (s *Server) set(node string, id int, kind string, cfg map[string]string, status string) {
 	if cfg == nil {
 		cfg = map[string]string{}
@@ -301,6 +319,20 @@ func (s *Server) VMConfig(node string, vmid int) map[string]string {
 
 // CTConfig is an alias of VMConfig for the LXC case (kind-agnostic).
 func (s *Server) CTConfig(node string, cid int) map[string]string { return s.VMConfig(node, cid) }
+
+// SetVMConfigField overwrites one config key on a live object, simulating
+// out-of-band PVE-side drift for tests.
+func (s *Server) SetVMConfigField(node string, vmid int, key, val string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o, ok := s.objs[node][vmid]; ok {
+		if o.Config == nil {
+			o.Config = map[string]string{}
+		}
+		o.Config[key] = val
+		s.objs[node][vmid] = o
+	}
+}
 
 // LXCConfig is an alias of VMConfig for the LXC case.
 func (s *Server) LXCConfig(node string, cid int) map[string]string { return s.VMConfig(node, cid) }
@@ -578,6 +610,9 @@ func (s *Server) handleNodeStorageListings(w http.ResponseWriter, node string) {
 	for st := range s.templates[node] {
 		ids[st] = true
 	}
+	for st := range s.images[node] {
+		ids[st] = true
+	}
 	for st := range s.lvmVols[node] {
 		ids[st] = true
 	}
@@ -597,6 +632,58 @@ func (s *Server) handleNodeStorageListings(w http.ResponseWriter, node string) {
 		})
 	}
 	writeOK(w, out)
+}
+
+// parsePVEBool parses PVE 9.2's boolean form-value grammar: 1/0, yes/no,
+// on/off (case-insensitive). ok=false for anything else — notably the
+// Go-style "true"/"false", which real PVE rejects with
+// "type check ('boolean') failed" (probed on conformance-dev 2026-09-13).
+func parsePVEBool(s string) (val bool, ok bool) {
+	switch strings.ToLower(s) {
+	case "1", "yes", "on":
+		return true, true
+	case "0", "no", "off":
+		return false, true
+	}
+	return false, false
+}
+
+// normalizePVEDrive mirrors PVE's create→report transformation for a drive
+// property string. PVE allocates a volume name and rewrites the create form:
+//
+//   - "local-lvm:8"                  → "local-lvm:vm-<id>-disk-<n>,size=8G"
+//   - "local-lvm:0,import-from=X"    → "local-lvm:vm-<id>-disk-<n>,size=<s>G"
+//     (the import-from option is create-time bookkeeping and is NOT re-reported;
+//     PVE derives the size from the image's virtual size — the mock uses a fixed
+//     3G, matching the debian-13 genericcloud image probed on conformance-dev
+//     2026-09-13.)
+//
+// Only the disk-slot keys PVE allocates volumes for are transformed; cdrom /
+// cloudinit / other values pass through with PVE's report shape applied where
+// the mock can model it.
+func normalizePVEDrive(id int, key, val string) string {
+	// Only real disk slots (scsiN/virtioN/sataN) get PVE's volume-name +
+	// size normalization; cdrom/cloudinit values are reported verbatim.
+	if !strings.HasPrefix(key, "scsi") && !strings.HasPrefix(key, "virtio") && !strings.HasPrefix(key, "sata") {
+		return val
+	}
+	ci := strings.IndexByte(val, ':')
+	if ci <= 0 {
+		return val
+	}
+	pool, rest := val[:ci], val[ci+1:]
+	// import-from create form: "<pool>:0,import-from=<volid>[,opts...]".
+	if !strings.HasPrefix(rest, "0,import-from=") {
+		return val
+	}
+	tail := rest[len("0,import-from="):]
+	opts := ""
+	// The volid itself may contain ':' (storage:import path) but never a ',',
+	// so the first ',' after import-from= starts the option list.
+	if j := strings.IndexByte(tail, ','); j >= 0 {
+		opts = tail[j:]
+	}
+	return pool + ":vm-" + strconv.Itoa(id) + "-disk-0,size=3G" + opts
 }
 
 // objectRoute handles /nodes/{n}/{qemu|lxc}/[id[/action]].
@@ -630,7 +717,19 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 					continue
 				}
 				if len(vs) > 0 {
-					cfg[k] = vs[0]
+					cfg[k] = normalizePVEDrive(id, k, vs[0])
+				}
+			}
+			// PVE 9.2 boolean form-values: 1/0/yes/no/on/off. The Go-style
+			// "true" is REJECTED with 400 "type check ('boolean') failed -
+			// got 'true'" (probed on conformance-dev 2026-09-13 — this is
+			// exactly the bug that made every `state: started` create fail
+			// against real PVE while passing against the mock).
+			if sv := r.PostForm.Get("start"); sv != "" {
+				if _, ok := parsePVEBool(sv); !ok {
+					s.mu.Unlock()
+					writeErr(w, http.StatusBadRequest, "Parameter verification failed.\n")
+					return
 				}
 			}
 			kkind := "qemu"
@@ -638,8 +737,10 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 				kkind = "lxc"
 			}
 			status := "stopped"
-			if r.PostForm.Get("start") != "" {
-				status = "running"
+			if sv := r.PostForm.Get("start"); sv != "" {
+				if b, ok := parsePVEBool(sv); ok && b {
+					status = "running"
+				}
 			}
 			s.objs[node][id] = VM{ID: id, Kind: kkind, Config: cfg, Status: status}
 			upid := s.newTaskLocked(node, "create")
@@ -1030,6 +1131,17 @@ func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest
 				})
 			}
 		}
+		// PVE 9 `import` content pool (qcow2/vmdk/raw disk images).
+		if sts := s.images[node][sid]; sts != nil {
+			for f := range sts {
+				out = append(out, map[string]any{
+					"volid":   sid + ":import/" + f,
+					"content": "import",
+					"format":  "qcow2",
+					"size":    int64(330 * 1024 * 1024),
+				})
+			}
+		}
 		// LVM/disk volumes: PVE lists these under LVM storage with
 		// `content` of "rootdir" (CT allocation) or "images" (VM disks).
 		// adopt uses these to recover CT rootfs/mp sizes.
@@ -1080,6 +1192,17 @@ func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest
 			return
 		}
 		content := r.PostFormValue("content")
+		// PVE 9.2 validates the filename extension against the content pool
+		// (probed on conformance-dev 2026-09-13): import accepts
+		// .qcow2/.vmdk/.raw; iso accepts .iso/.img; vztmpl accepts the tar
+		// family. Anything else is 400 "invalid filename or wrong extension".
+		if content == "import" {
+			lc := strings.ToLower(filename)
+			if !strings.HasSuffix(lc, ".qcow2") && !strings.HasSuffix(lc, ".vmdk") && !strings.HasSuffix(lc, ".raw") {
+				writeErr(w, http.StatusBadRequest, "invalid filename or wrong extension")
+				return
+			}
+		}
 		s.mu.Lock()
 		switch content {
 		case "vztmpl":
@@ -1090,6 +1213,15 @@ func (s *Server) storageRoute(w http.ResponseWriter, r *http.Request, node, rest
 				s.templates[node][sid] = map[string]bool{}
 			}
 			s.templates[node][sid][filename] = true
+			s.tdl++
+		case "import":
+			if s.images[node] == nil {
+				s.images[node] = map[string]map[string]bool{}
+			}
+			if s.images[node][sid] == nil {
+				s.images[node][sid] = map[string]bool{}
+			}
+			s.images[node][sid][filename] = true
 			s.tdl++
 		default: // "" | "iso"
 			if s.isos[node] == nil {

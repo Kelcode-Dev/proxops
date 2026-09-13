@@ -39,7 +39,9 @@ func lxcBase(node string, cid int) string {
 // Create submits a ctcreate. start=true boots the container after creation.
 func (l *LXC) Create(ctx context.Context, node string, params url.Values, start bool) (string, error) {
 	if start {
-		params.Set("start", "true")
+		// PVE 9.2 boolean form-value: 1 (NOT "true" — 400 "type check
+		// ('boolean') failed"; same grammar as /qemu, probed 2026-09-13).
+		params.Set("start", "1")
 	}
 	return l.c.Do(ctx, http.MethodPost, node, "nodes/"+node+"/lxc", params, nil)
 }

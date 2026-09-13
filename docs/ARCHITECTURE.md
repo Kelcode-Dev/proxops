@@ -188,10 +188,12 @@ directions fail closed).
 `parse.BuildClusterIndex(root, cluster, configuredClusters)` builds the
 Index for exactly that cluster's composed files:
 
-- routing to typed resources (VM / LXC / CTTemplate / ISO / TemplateVM) + `Validate()`;
+- routing to typed resources (VM / LXC / CTTemplate / ISO / TemplateVM /
+  DiskImage) + `Validate()`;
 - duplicate `(kind, name)` refs -> error;
 - duplicate PVE id on a node **within the cluster** -> error;
 - structured edges (`VM -> ISO` via `hardware.cdrom.iso`,
+  `VM -> DiskImage` via `spec.disks[].image`,
   `LXC -> CTTemplate` via `spec.template`) + `depends-on` annotation edges;
 - unknown edge targets / cycles fail the cluster's cycle (no cross-cluster
   resolution, by construction).
@@ -233,7 +235,7 @@ the safety model is unchanged:
 - **Empty-desired anomaly guard**: 0 desired of a kind + more tagged live
   objects than the budget -> prunes for that kind suppressed,
   `Plan.Anomaly` set.
-- **Conservative artifacts**: ISO/CTTemplate are never pruned.
+- **Conservative artifacts**: ISO / CTTemplate / DiskImage are never pruned.
 - **Live-only disk anomalies**: VM/LXC slots present on PVE but not in the
   manifest are surfaced as non-destructive anomalies and never auto-removed.
 - **Data-loss guards**: pool/size drift on a live data volume is anomaly +

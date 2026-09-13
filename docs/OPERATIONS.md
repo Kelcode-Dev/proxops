@@ -111,10 +111,11 @@ curl -s 127.0.0.1:9494/status | jq .counters
 journalctl -u pveconform -f | grep 'anomaly\|abort\|stale'
 ```
 
-## PVE 9.2 storage listing quirk (ISO + CTTemplate presence)
+## PVE 9.2 storage listing quirk (ISO + CTTemplate + DiskImage presence)
 
 On a node-local `dir` storage, PVE 9.2's per-type content-listing endpoint
-500s with `unable to parse directory volume name 'iso'` (or `'vztmpl'`):
+500s with `unable to parse directory volume name 'iso'` (or `'vztmpl'` /
+`'import'`):
 
 ```sh
 GET /nodes/{n}/storage/local/content/iso      # → 500 (PVE 9.2 dir storage)
@@ -124,16 +125,17 @@ GET /nodes/{n}/storage/local/content         # → 200 — use this
 
 The bare listing returns every pool on that storage with a `content` field per
 entry; pveconform's `Storage.HasContent(ctx, node, storage, contentType,
-filename)` filters on it. This is why ISO / CTTemplate presence detection does
-**not** use `…/content/iso` or `…/content/vztmpl`. Downloads still go through
-`POST /nodes/{n}/storage/{s}/download-url` with the `content=iso|vztmpl` form
-parameter. pveconform treats a listing read failure as **fail-closed**: it
-skips the download for that node this cycle (a `Skipped` record) rather than
-blindly re-downloading, and retries next cycle.
+filename)` filters on it. This is why ISO / CTTemplate / DiskImage presence
+detection does **not** use `…/content/iso`, `…/content/vztmpl` or
+`…/content/import`. Downloads still go through
+`POST /nodes/{n}/storage/{s}/download-url` with the
+`content=iso|vztmpl|import` form parameter. pveconform treats a listing read
+failure as **fail-closed**: it skips the download for that node this cycle (a
+`Skipped` record) rather than blindly re-downloading, and retries next cycle.
 
-## ISO and CTTemplate are storage artifacts
+## ISO, CTTemplate and DiskImage are storage artifacts
 
-Both kinds:
+All three kinds:
 - have **no PVE numeric id** — PVE-side identity is `(node, storage, filename)`;
 - reconcile via a PVE storage `download` task + a bare `content` listing for
   presence;
@@ -149,10 +151,11 @@ the file there.
 
 ## Structured dependencies (inferred — no `depends-on` needed)
 
-pveconform infers two cross-kind edges from the manifest itself:
+pveconform infers three cross-kind edges from the manifest itself:
 
 ```text
 VM.spec.hardware.cdrom.iso   →  ISO.metadata.name
+VM.spec.disks[].image        →  DiskImage.metadata.name
 LXC.spec.template            →  CTTemplate.metadata.name
 ```
 
@@ -181,7 +184,7 @@ kind has 0 manifests but more tagged live objects than the budget.
 anomaly guard are scoped to one cluster's composition + node allowlist —
 an object belonging to cluster A is never pruned because it is absent from
 cluster B's composition, and an empty cluster triggers no destructive
-behaviour on its configured nodes. For ISO / CTTemplate, pveconform
+behaviour on its configured nodes. For ISO / CTTemplate / DiskImage, pveconform
 **never plans a delete** (the "conservative artifact deletion" guarantee):
 PVE storage content may be shared with tooling the agent does not manage, and
 PVE has no "delete by pveconform name" semantics.
@@ -287,7 +290,8 @@ What it does:
   allowlist, PVE's `/cluster/nodes` listing); only allowlisted nodes are
   ever read — this is the cluster-isolation guarantee;
 - writes one manifest per live object under `<kind>/<cluster>/` in the git
-  work tree (VM, LXC, ISO, CTTemplate, and — M11 — TemplateVM);
+  work tree (VM, LXC, ISO, CTTemplate, and — M11 — TemplateVM); `import`
+  content (DiskImage) is not adopted — see GAPS.md;
 - surfaces **unsupported PVE configuration explicitly** (a `gap` line per
   live key pveconform does not model; `INCOMPLETE` for generated manifests
   missing a value PVE cannot re-report, e.g. the LXC `ostemplate`). M11

@@ -37,7 +37,7 @@ func TestVMSpecCloudInitData_ToCreateParams(t *testing.T) {
 	vm := baseCloudInitVM("vm-ci-full")
 	vm.Spec.CloudInitData = CloudInitData{
 		CIUser:        "operator",
-		SSHKeys:       []string{"operator=AAA", "bob=BBB"},
+		SSHKeys:       []string{"ssh-ed25519 AAAAC3Nza operator@laptop", "ssh-rsa AAAAB3Nza bob@desk"},
 		Nameservers:   []string{"1.1.1.1", "8.8.8.8"},
 		SearchDomains: []string{"example.search"},
 		IPConfigs:     []CloudInitIPConfig{{NIC: 0, IP: "192.168.192.199/18", Gateway: "192.168.192.5"}},
@@ -49,8 +49,12 @@ func TestVMSpecCloudInitData_ToCreateParams(t *testing.T) {
 	if params["ciuser"] != "operator" {
 		t.Errorf("ciuser = %v", params["ciuser"])
 	}
-	if params["sshkeys"] != "operator=AAA,bob=BBB" {
-		t.Errorf("sshkeys = %v", params["sshkeys"])
+	// PVE 9.2 requires the sshkeys FIELD VALUE itself to be percent-encoded
+	// with one key per line (conformance-dev probe 2026-09-13: a raw value is
+	// rejected with "invalid urlencoded string"). Keys are joined with %0A,
+	// NOT commas.
+	if got := params["sshkeys"]; got != "ssh-ed25519%20AAAAC3Nza%20operator%40laptop%0Assh-rsa%20AAAAB3Nza%20bob%40desk" {
+		t.Errorf("sshkeys = %v", got)
 	}
 	if params["nameserver"] != "1.1.1.1 8.8.8.8" {
 		t.Errorf("nameserver = %v", params["nameserver"])

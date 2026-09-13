@@ -10,7 +10,7 @@ model** (see ARCHITECTURE.md → "Multi-cluster composition"):
 ```
 clusters/<cluster>/resources.yaml   # what <cluster> consumes (explicit list)
 <kind>/{base|<cluster>}/....yaml    # resource definitions, kind in vm, lxc,
-                                     #   iso, ctt, templatevm
+                                     #   iso, ctt, templatevm, diskimage
 ```
 
 Since M9 the cluster's pveconform **configuration** and **credentials**
@@ -44,7 +44,7 @@ Every manifest has this envelope:
 
 ```yaml
 apiVersion: proxops/v1alpha1   # only supported value
-kind: VM | LXC | CTTemplate | ISO | TemplateVM
+kind: VM | LXC | CTTemplate | ISO | TemplateVM | DiskImage
 metadata:
   name: human-readable-name      # required, [a-z0-9](-[a-z0-9])*
   labels:                        # optional, free-form
@@ -56,9 +56,9 @@ spec: {...}                      # kind-specific (below)
 
 `metadata.name` is the pveconform identity within a kind. PVE identity is
 additionally pinned by `spec` fields (below) — **the agent never invents PVE
-ids** for objects that have one. The two kinds that have **no** PVE numeric id
-(ISO and CTTemplate, both *storage artifacts*) are identified on PVE by
-`(node, storage, filename)` and on pveconform by `metadata.name`.
+ids** for objects that have one. The kinds that have **no** PVE numeric id
+(ISO, CTTemplate, and DiskImage — all *storage artifacts*) are identified on
+PVE by `(node, storage, filename)` and on pveconform by `metadata.name`.
 
 The three kinds that carry a PVE numeric id (VM, LXC, and — since M11 —
 TemplateVM) share PVE's per-node integer pool: a `spec.vmid` / `spec.vmid`
@@ -73,13 +73,14 @@ pveconform builds a **dependency graph** from two sources and schedules
 creates topologically so prerequisites finish **before** their dependants:
 
 1. **Structured references (inferred, preferred).** The schema knows about
-   two cross-kind edges:
+   three cross-kind edges:
    - `VM.spec.hardware.cdrom.iso` → an `ISO`
+   - `VM.spec.disks[].image` → a `DiskImage`
    - `LXC.spec.template` → a `CTTemplate`
 
    These are detected automatically — you do **not** have to repeat them with
-   an annotation. The planner downloads the ISO / container template before
-   it creates the VM / LXC that references it.
+   an annotation. The planner downloads the ISO / disk image / container
+   template before it creates the VM / LXC that references it.
 2. **`depends-on` annotation (escape hatch).** For relationships that cannot
    be expressed in a structured field:
 
@@ -143,10 +144,18 @@ Behaviour:
 | Field | Required | PVE wire | Semantics |
 |---|---|---|---|
 | `storage` | yes | `<slot>=<storage>:<GiB>` | PVE storage backend id. |
-| `size` | yes | size in `<slot>` | Human size (`50GiB`); the number after the pool is **GiB** on the PVE 9.2 wire. |
+| `size` | yes* | size in `<slot>` | Human size (`50GiB`); the number after the pool is **GiB** on the PVE 9.2 wire. *Must be empty when `image` is set (an imported disk takes its size from the image). |
+| `image` | no | `<slot>=<storage>:0,import-from=<img-storage>:import/<filename>` | **A DiskImage `metadata.name`.** Seeds this disk at create from a downloadable cloud image via PVE 9's `import-from` (the size token is forced to `0`). Creates a structured `VM → DiskImage` dependency: the image is downloaded on the VM's node before the VM is created. See `kind: DiskImage`. |
 | `interface` | no (default `scsi0`) | — | Explicit PVE slot (`scsi0`, `scsi1`, `sata2`, `virtio0`, …). |
 | `controller` | no | VM-wide `scsihw` | PVE `scsihw` value; first disk declaring it wins. |
 | `iothread` | no | `,iothread=1` inline | Dedicated I/O thread. |
+
+Image-seeded disks are imported **once** (at create, or when the slot is
+empty). PVE does not re-report the `import-from` option after create (the
+/config shows a plain `local-lvm:vm-N-disk-0,size=3G`), and the volume size
+comes from the image's virtual size, so pveconform compares only the **pool**
+on a live image-seeded disk. A live volume at a different pool is a
+non-destructive anomaly (the M7 data-loss guard), never a re-import.
 
 ### NIC
 
@@ -200,7 +209,7 @@ A pveconform VM's top-level PVE keys `ciuser`, `sshkeys`, `nameserver`,
 | Field | Required | PVE wire | Semantics |
 |---|---|---|---|
 | `ci-user` | no | `ciuser` | PVE cloud-init user. Empty = not owned. |
-| `ssh-keys` | no | `sshkeys` | PVE cloud-init public-key CSV. Empty = not owned. A single `"*"` sentinel = PVE owns the live value; pveconform does not write `sshkeys`. |
+| `ssh-keys` | no | `sshkeys` | PVE cloud-init public keys. Empty = not owned. A single `"*"` sentinel = PVE owns the live value; pveconform does not write `sshkeys`. On the wire pveconform percent-encodes the value and joins keys with `%0A` (PVE 9.2 requires the field value itself to be urlencoded — a raw key is rejected with "invalid urlencoded string"; probed on conformance-dev 2026-09-13). Drift compares the **decoded key set**, so a re-encode or key reorder is never drift. |
 | `nameservers` | no | `nameserver` (space-separated) | PVE cloud-init DNS server CSV. Set-compared on /config vs. desired — order/duplicates are not semantics. |
 | `search-domains` | no | `searchdomain` (space-separated) | PVE cloud-init DNS search domain CSV. Same set semantics. |
 | `ipconfigs` | no | `ipconfig<N>` (`ip=<cidr>[,gw=<addr>]`) | PVE cloud-init static-IP. One entry per pveconform-owned NIC; `nic` = PVE slot index. PVE's `dhcp` form is **not** modelled. |
@@ -390,6 +399,46 @@ never pruned, fail-closed on unreadable listing).
 VMs reference an ISO by `metadata.name` via `spec.hardware.cdrom.iso` (attach state); that
 edge is a structured dependency (so the ISO is downloaded on the VM's node
 before the VM is created) and requires no `depends-on`.
+
+---
+
+## `kind: DiskImage` (M11+)
+
+A downloadable **disk image** on a PVE storage backend (PVE 9's `import`
+content pool: qcow2 / vmdk / raw). Like ISO and CTTemplate it is a **storage
+artifact** with **no** PVE numeric id; identity is `(node, storage, filename)`
+on PVE, `metadata.name` on pveconform.
+
+This kind is what makes a `kind: VM` bootable from a cloud image **without a
+template**: a VM disk references it via `spec.disks[].image`, and pveconform
+seeds that disk at create with PVE's `import-from` form.
+
+| Field | Required | PVE wire | Semantics |
+|---|---|---|---|
+| `spec.nodes` | yes | — | List of PVE nodes the image must exist on. Legacy `spec.node` also accepted. |
+| `spec.storage` | yes | — | PVE storage id with `import` content (e.g. `local`). |
+| `spec.filename` | yes | `filename=` | On-storage name. PVE 9.2's import pool accepts `.qcow2` \| `.vmdk` \| `.raw` (probed on conformance-dev 2026-09-13; `.qcow`/`.img`/`.iso` are rejected at download). |
+| `spec.url` | yes | `url=` | HTTPS URL PVE fetches. |
+| `spec.checksum` | no | (advisory) | `algorithm` + `value`. |
+
+Reconcile semantics mirror ISO/CTTemplate (download per missing node via
+`POST /storage/{s}/download-url` with `content=import`, idempotent, never
+pruned, fail-closed on unreadable listing). The file lands at
+`<storage>:import/<filename>`.
+
+VMs reference a DiskImage by `metadata.name` via `spec.disks[].image`; that
+edge is a structured `VM → DiskImage` dependency (the image is downloaded on
+the VM's node before the VM is created) and requires no `depends-on`.
+
+**End-to-end validation (2026-09-13, conformance-dev PVE 9.2.2):** a
+DiskImage + a cloud-init VM (`ci-user`, `ssh-keys`, `nameservers`,
+`search-domains`, static `ipconfigs`, cloud-init drive on `ide2`, guest
+agent) was created and booted by `pveconform apply`; the guest's
+`cloud-init status` reported `done` with `DataSourceNoCloud`, and hostname,
+static IP + gateway, DNS servers/search domain, the `ci-user` account, and
+the SSH key in `authorized_keys` all matched the manifest. A second apply
+planned zero actions (idempotent), and out-of-band PVE-side edits to
+`ciuser`/`sshkeys` were detected and corrected on the next cycle.
 
 ---
 

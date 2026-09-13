@@ -484,7 +484,7 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 
 // LoadLive reads the cluster listing, then per-object config (VM + LXC; CTT
 // is now a storage artifact and not a PVE listing entry), then power; and
-// finally — for every desired ARTIFACT (ISO and CTTemplate), probes the PVE
+// finally — for every desired ARTIFACT (ISO, CTTemplate, DiskImage), probes the PVE
 // storage backend's content listing to emit {"present": bool} at the
 // artifactKey(node, storage, filename, kind) for each declared node.
 //
@@ -550,7 +550,7 @@ func LoadLive(ctx context.Context, c *pveclient.Client, desired []schema.Resourc
 		}
 	}
 
-	// For each desired ARTIFACT (ISO and CTTemplate), probe every
+	// For each desired ARTIFACT (ISO, CTTemplate, DiskImage), probe every
 	// (node, storage, content) pair it wants present and record
 	// {"present": bool} at the artifact-key for that node.
 	for _, r := range desired {
@@ -596,6 +596,10 @@ func artifactStorageFields(r schema.Resource, kind schema.Kind) (content, storag
 		content = "vztmpl"
 		storage = v.Spec.Storage
 		filename = v.Spec.Filename
+	case *schema.DiskImage:
+		content = "import"
+		storage = v.Spec.Storage
+		filename = v.Spec.Filename
 	}
 	_ = kind
 	return
@@ -622,6 +626,8 @@ func createVerb(k schema.Kind) string {
 		return "download ct-template (vztmpl)"
 	case schema.KindISO:
 		return "download"
+	case schema.KindDiskImage:
+		return "download disk image (import)"
 	// M11: TemplateVM create is two PVE writes (POST /qemu + POST /qemu/{id}/template).
 	case schema.KindTemplateVM:
 		return "create + mark as PVE template"
@@ -630,16 +636,16 @@ func createVerb(k schema.Kind) string {
 	}
 }
 
-// planArtifact plans one artifact (ISO or CTTemplate) at every node it is
-// declared to exist on. For each (node, storage, filename) it is missing,
+// planArtifact plans one artifact (ISO, CTTemplate or DiskImage) at every node
+// it is declared to exist on. For each (node, storage, filename) it is missing,
 // emit one CREATE with the artifact's ToCreateParams.
 //
-// Artifacts are never pruned: deleting an ISO / vztmpl can break other
-// tooling (LXC clones, other VMs that reference it); this is the
+// Artifacts are never pruned: deleting an ISO / vztmpl / import image can break
+// other tooling (LXC clones, other VMs that reference it); this is the
 // conservative artifact-deletion guarantee.
-// planArtifact plans one artifact (ISO or CTTemplate) at every node it is
-// declared to exist on. Artifacts are LEAF nodes in the dep graph: they never
-// depend on each other or on VM/LXC, so no `Deps` are populated.
+// planArtifact plans one artifact (ISO, CTTemplate or DiskImage) at every node
+// it is declared to exist on. Artifacts are LEAF nodes in the dep graph: they
+// never depend on each other or on VM/LXC, so no `Deps` are populated.
 func planArtifact(p *Plan, r schema.Resource, live *LiveInventory, levels LevelsFunc) {
 	kind := r.Ref().Kind
 	_, storage, filename := artifactStorageFields(r, kind)

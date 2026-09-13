@@ -4,9 +4,9 @@ A small, realistic stack to try against a development PVE cluster
 (nodes `pve01` + `pve02` in these examples). To use:
 
 1. Copy this directory into your manifest repo (git).
-2. Ensure PVE storage on each node has `content` including `iso` and `vztmpl`
-   (e.g. a `local` dir storage with ISO + container-template pools, or a
-   dedicated storage).
+2. Ensure PVE storage on each node has `content` including `iso`, `vztmpl`
+   and `import` (e.g. a `local` dir storage with ISO + container-template +
+   disk-image pools, or a dedicated storage).
 3. Point pveconform at the repo (see `../config/pveconform.yaml`), then
    `pveconform diff` → `pveconform apply`.
 
@@ -28,6 +28,14 @@ ctt/
                         # clone, no mark-template step; LXCs are
                         # bootstrapped from it by PVE at create time via
                         # `ostemplate`)
+diskimage/
+  base/
+    debian-13-cloud.yaml # reusable BASE DiskImage: a PVE 9 `import` storage
+                        # artifact (qcow2/vmdk/raw). A VM disk references it
+                        # via `spec.disks[].image` and pveconform seeds the
+                        # disk at create with PVE's `import-from` form — the
+                        # way to boot a real VM from a cloud image without a
+                        # template.
 vm/
   example/
     talos-worker-01.yaml  # cluster-specific VM: Talos worker with pinned
@@ -37,6 +45,10 @@ vm/
                           # `proxops/depends-on` annotation escape
                           # hatch combined with a structured `cdrom.iso`
                           # reference
+    cloudinit-vm.yaml     # cluster-specific VM: the end-to-end cloud-init
+                          # shape — a DiskImage-seeded disk + cloud-init
+                          # drive + ci-user/ssh-keys/nameservers/ipconfig
+                          # (validated live on PVE 9.2)
 lxc/
   example/
     cache-01.yaml         # cluster-specific LXC: cache container pinned to
@@ -60,7 +72,7 @@ lxc/
 
 PVE id-space note: the kinds that DO carry a numeric PVE id (VM, LXC) share
 ONE per-node integer pool. These examples pin well-separated ids to keep that
-obvious to readers: 142 (VM), 400 (annotation-example VM), 9000 (LXC). The
-artifact kinds (`ISO`, `CTTemplate`) have **no** numeric PVE id — their only
-identity is `(node, storage, filename)` on the PVE side and `metadata.name`
-on the pveconform side.
+obvious to readers: 142 (VM), 400 (annotation-example VM), 410 (cloud-init
+VM), 9000 (LXC). The artifact kinds (`ISO`, `CTTemplate`, `DiskImage`) have
+**no** numeric PVE id — their only identity is `(node, storage, filename)` on
+the PVE side and `metadata.name` on the pveconform side.

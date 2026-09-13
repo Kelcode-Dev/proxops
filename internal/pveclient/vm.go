@@ -50,7 +50,11 @@ func vmBase(node string, vmid int) string {
 // memory, cpu, cores, net0, ...). start=true also boots the VM.
 func (vm *VM) Create(ctx context.Context, node string, params url.Values, start bool) (string, error) {
 	if start {
-		params.Set("start", "true")
+		// PVE 9.2 declares `start` as a boolean form-value and REJECTS the
+		// Go-style "true" with HTTP 400 "type check ('boolean') failed - got
+		// 'true'" (probed on conformance-dev 2026-09-13). The accepted forms
+		// are 1/0 (and yes/no/on/off); pveconform uses 1.
+		params.Set("start", "1")
 	}
 	return vm.c.Do(ctx, http.MethodPost, node, "nodes/"+node+"/qemu", params, nil)
 }

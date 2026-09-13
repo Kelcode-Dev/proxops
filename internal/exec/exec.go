@@ -302,7 +302,7 @@ func (e *Executor) update(ctx context.Context, a plan.Action) (didStop bool, err
 // VM that would show up as drift on the next cycle.
 func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 	switch a.Kind {
-	case schema.KindISO, schema.KindCTTemplate:
+	case schema.KindISO, schema.KindCTTemplate, schema.KindDiskImage:
 		p, _ := a.Params["storage"].(string)
 		u, _ := a.Params["url"].(string)
 		f, _ := a.Params["filename"].(string)
@@ -311,10 +311,13 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 			return "", fmt.Errorf("%s: storage/url/filename missing from params", a.Kind)
 		}
 		if ct == "" {
-			if a.Kind == schema.KindISO {
-				ct = "iso"
-			} else {
+			switch a.Kind {
+			case schema.KindCTTemplate:
 				ct = "vztmpl"
+			case schema.KindDiskImage:
+				ct = "import"
+			default:
+				ct = "iso"
 			}
 		}
 		return e.client.Storage().Download(ctx, a.Node, p, u, f, ct)

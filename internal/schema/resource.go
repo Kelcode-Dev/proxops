@@ -8,6 +8,11 @@ const (
 	KindLXC        Kind = "LXC"
 	KindCTTemplate Kind = "CTTemplate"
 	KindISO        Kind = "ISO"
+	// KindDiskImage is a downloadable disk-image storage artifact (PVE 9
+	// `import` content pool: qcow2/vmdk/raw). It is the third ArtifactKind
+	// and is what lets a pveconform VM boot a real OS via create-time
+	// `import-from` without a template. Referenced by VM spec.disks[].image.
+	KindDiskImage Kind = "DiskImage"
 	// KindTemplateVM is a PVE qemu VM that has been marked as a
 	// template (PVE `template=1`). pveconform manages its lifecycle as
 	// a first-class object (M11): create + mark-template, config drift,
@@ -44,7 +49,7 @@ func (r Ref) Equal(o Ref) bool { return r.Kind == o.Kind && r.Name == o.Name }
 //   - ISO:        a .iso file on ISO pool storage.
 //   - CTTemplate: a .vztmpl / tarball on vztmpl pool storage.
 func ArtifactKind(k Kind) bool {
-	return k == KindISO || k == KindCTTemplate
+	return k == KindISO || k == KindCTTemplate || k == KindDiskImage
 }
 
 // Resource is the contract every parsed manifest satisfies. The reconciler

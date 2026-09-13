@@ -488,7 +488,11 @@ what M11 pins.
   - **Resource/area**: VM cloud-init data
   - **What is pinned**: pveconform's `spec.cloud-init-data.ssh-keys`
     supports exactly two shapes:
-      - real keys → pveconform writes the CSV verbatim on create/drift.
+      - real keys → pveconform writes them on create/drift in PVE's
+        required wire grammar: the field VALUE percent-encoded, keys
+        joined with `%0A` (see the sshkeys wire-grammar entry below —
+        the earlier "CSV verbatim" claim was a bug: PVE rejects raw
+        values with 400 "invalid urlencoded string").
       - `["*"]` (the M10 redacted sentinel) → pveconform does NOT write
         `sshkeys` on create/drift, letting PVE keep its live value.
       - Mixed real + `"*"` → `Validate()` fails closed (ambiguous: does
@@ -496,3 +500,110 @@ what M11 pins.
   - **Impact/risk**: none (the mixed shape is refused at parse time).
   - **Pinned**: `TestVMSpecCloudInitData_SentinelSSHKeysNotOwned` +
     `TestVMSpecCloudInitData_MixedSentinelFailsClosed`.
+
+## M11+ (cloud-init E2E validation) — PVE-9.2 wire findings + fixed bugs
+
+The M11 cloud-init surface was validated end-to-end on conformance-dev
+(PVE 9.2.2, 2026-09-13): a disposable VM was created from a Debian 13
+genericcloud image via the new `kind: DiskImage` + `spec.disks[].image`
+import-from path, booted with `state: started`, and the GUEST was verified
+over SSH: hostname, static IP + gateway (`ipconfig0`), DNS servers + search
+domain (`nameserver`/`searchdomain`), the `ciuser` account, and the declared
+SSH key in `authorized_keys` all matched the manifest; `cloud-init status`
+reported `done` with `DataSourceNoCloud [seed=/dev/sr0]`. A second apply
+planned zero actions; out-of-band PVE-side edits to `ciuser`/`sshkeys` were
+detected and corrected. The validation found and FIXED three real bugs:
+
+- **BUG (fixed): `start=true` rejected by PVE 9.2 — every `state: started`
+  create failed against real PVE**
+  - **Resource/area**: VM/LXC create (executor)
+  - **PVE configuration/API field**: `start`
+  - **Status**: `investigated` (CLOSED)
+  - **What was wrong**: `pveclient.VM().Create`/`LXC().Create` set
+    `start="true"`. PVE 9.2 declares `start` as a boolean form-value and
+    rejects the Go-style spelling with `HTTP 400 "type check ('boolean')
+    failed - got 'true'"` (probe: `start=true`/`yes` → 400; `start=1` →
+    create + boot OK). The mock accepted ANY non-empty `start` value, so
+    the bug was invisible to CI: every `state: started` create failed
+    against real PVE while passing every mock test. Fixed to `start=1`;
+    the mock now mirrors PVE's boolean grammar (1/0/yes/no/on/off,
+    anything else → 400).
+  - **Pinned**: `internal/pveclient/start_wire_test.go` (recording server,
+    exact wire bytes) + mock create-route rejection.
+
+- **BUG (fixed): `sshkeys` must be percent-encoded in the field value**
+  - **Resource/area**: VM cloud-init data
+  - **PVE configuration/API field**: `sshkeys`
+  - **Status**: `investigated` (CLOSED)
+  - **What was wrong**: M11 joined `ssh-keys` entries with commas and sent
+    the raw key material. PVE 9.2's API schema declares `sshkeys` as a
+    urlencoded string and decodes it before writing the config, so a raw
+    value is rejected at create/update with
+    `400 "invalid format - invalid urlencoded string: ssh-ed25519 AAAA…"`
+    (probe 2026-09-13). The correct grammar: percent-encode the value,
+    one key per line (`%0A` separators — a comma is NOT a key separator).
+    PVE's /config report returns the encoded string verbatim. pveconform
+    now encodes on write and compares the DECODED key SET on drift (so a
+    re-encode or key reorder never flaps).
+  - **Pinned**: `TestCloudInitSSHKeys_WireGrammar` +
+    `TestCloudInitSSHKeys_DriftNoFlap` +
+    `TestVMSpecCloudInitData_ToCreateParams` + live E2E
+    `TestE2E_CloudInitVMFromDiskImage`.
+
+- **BUG (fixed): cloud-init drive size-token flap**
+  - **Resource/area**: VM hardware cloud-init
+  - **What was wrong**: when PVE created the drive without a size token
+    (`ide2=local-lvm:cloudinit` reports
+    `local-lvm:vm-N-cloudinit,media=cdrom` with NO `size=`),
+    `cloudInitMatches` compared an empty live size against the desired
+    `size=4M` and rewrote the drive every cycle (stop/start churn). Now
+    a live report that omits the size token is compatible — the same
+    rule as `diskMatches`.
+  - **Pinned**: `TestCloudInitDrive_SizeTokenTolerance`.
+
+- **NEW: `kind: DiskImage` + `spec.disks[].image` (import-from)**
+  - **Resource/area**: VM disks / storage artifacts
+  - **PVE configuration/API field**: `POST /storage/{s}/download-url`
+    with `content=import`; `scsiN=<pool>:0,import-from=<volid>`
+  - **Status**: `investigated` (wire facts pinned)
+  - **What is pinned**:
+      - PVE 9.2 dir storage has an `import` content pool; download-url
+        accepts `.qcow2` | `.vmdk` | `.raw` (`.qcow`/`.img`/`.iso` → 400
+        "invalid filename or wrong extension" — note `.img` is ISO-pool
+        only).
+      - `import-from` REQUIRES the size token `0`
+        (`local-lvm:0,import-from=local:import/x.qcow2`); any other size
+        → 400 "'import-from' requires special syntax".
+      - PVE derives the volume size from the image's virtual size and
+        does NOT re-report the `import-from` option (report:
+        `local-lvm:vm-N-disk-0,size=3G`). pveconform therefore compares
+        only the POOL on a live image-seeded disk; the size is not owned.
+      - The option is also accepted on `PUT /config` (a live-slot rewrite
+        would RE-IMPORT and destroy data — pveconform never does it; the
+        M7 data-loss guard holds: empty slot → write, live slot → pool
+        compare only).
+      - A cloud-init drive on a storage whose content list lacks
+        `images` (conformance-dev's `local` = `iso,import,backup,vztmpl`)
+        creates fine but FAILS AT START with
+        "storage 'local' does not support content-type 'images'".
+        `ide2=local-lvm:cloudinit` (block storage, content `images`)
+        creates AND boots. pveconform manifests for bootable cloud-init
+        VMs must set `hardware.cloud-init.storage` to a pool that
+        carries `images` content (on a stock PVE install `local` does;
+        on conformance-dev it does not).
+  - **Pinned**: `TestDiskImage_Validate`, `TestVM_DiskImage_*`,
+    `TestE2E_CloudInitVMFromDiskImage`, mock import-pool parity.
+
+- **GAP: `import` content is not adopted**
+  - **Resource/area**: adopt
+  - **Status**: `discovered`
+  - **What is unsupported**: `pveconform adopt` scans `iso` and `vztmpl`
+    storage content but not `import`. A VM whose disk was imported from a
+    manually-downloaded image adopts as a plain disk (pool+size), losing
+    the image provenance. Deliberate for now: adoption must not invent a
+    `spec.url` it cannot observe (same rule as the artifact placeholder
+    URLs). A future `adopt` pass over `import` content would emit
+    `kind: DiskImage` manifests with placeholder URLs.
+  - **Impact/risk**: none for pveconform-created objects (the manifest
+    carries the reference); adopted VMs keep working (the import is
+    create-time bookkeeping PVE does not re-report).

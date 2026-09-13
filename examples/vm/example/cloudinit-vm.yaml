@@ -1,0 +1,61 @@
+# M11+ example: a cloud-init VM bootstrapped from a DiskImage.
+#
+# This is the end-to-end "create a real, bootable VM from a cloud image"
+# shape, validated against live PVE 9.2.2 on conformance-dev (the guest
+# booted, cloud-init ran with DataSourceNoCloud, and hostname / static IP /
+# DNS / user / SSH key all matched this manifest).
+#
+# How it works:
+#   - spec.disks[].image references the DiskImage artifact "debian-13-cloud".
+#     pveconform infers a VM -> DiskImage dependency, so the image downloads
+#     BEFORE the VM creates, and the disk is seeded at create via PVE's
+#     import-from form. An image-seeded disk has NO size field (PVE derives
+#     the volume size from the image).
+#   - spec.hardware.cloud-init claims ide2 for the cloud-init drive.
+#   - spec.cloud-init-data carries the configdrive DATA fields PVE feeds to
+#     cloud-init: ci-user, ssh-keys (public keys; pveconform percent-encodes
+#     them for PVE's wire grammar), nameservers, search-domains, and a static
+#     ipconfig0.
+#   - options.agent enables the qemu guest agent so PVE can report the guest.
+#   - state: started boots the VM on the create cycle.
+#
+# Replace the ssh-keys entry with your real public key before applying.
+apiVersion: proxops/v1alpha1
+kind: VM
+metadata:
+  name: cloudinit-vm
+spec:
+  node: pve01
+  vmid: 410
+  state: started
+  memory: 2GiB
+  cpu:
+    type: host
+    cores: 1
+  disks:
+    - storage: local-lvm
+      interface: scsi0
+      controller: virtio-scsi-single
+      image: debian-13-cloud   # -> inferred dependency on DiskImage
+  networks:
+    - model: virtio
+      bridge: vmbr0
+  hardware:
+    cloud-init:
+      enabled: true
+      storage: local-lvm
+  options:
+    agent: true
+  cloud-init-data:
+    ci-user: cloudadmin
+    ssh-keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA you@yourhost"
+    nameservers:
+      - 1.1.1.1
+      - 8.8.8.8
+    search-domains:
+      - example.com
+    ipconfigs:
+      - nic: 0
+        ip: 192.168.192.210/24
+        gateway: 192.168.192.1

@@ -496,6 +496,12 @@ func newResource(doc map[string]any) (schema.Resource, error) {
 			return nil, err
 		}
 		return iso, nil
+	case schema.KindDiskImage:
+		di := schema.NewDiskImage()
+		if err := docTo(di, doc); err != nil {
+			return nil, err
+		}
+		return di, nil
 	// M11: TemplateVM — a PVE qemu object marked as a template. Shares
 	// the wire surface of a VM (schema.TemplateVM embeds schema.VM) but
 	// has its own kind + lifecycle (create+mark, no start, no untemplate

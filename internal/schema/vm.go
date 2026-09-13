@@ -3,6 +3,7 @@ package schema
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -25,8 +26,17 @@ type Cpu struct {
 type Disk struct {
 	// Storage is the PVE storage id (pool), e.g. "local-lvm", "vm_disks".
 	Storage string `yaml:"storage" json:"storage"`
-	// Size is the disk size, e.g. "50GiB".
+	// Size is the disk size, e.g. "50GiB". Required unless Image is set
+	// (an image-seeded disk takes its size from the image — PVE derives it
+	// at import time and pveconform does not own the number).
 	Size string `yaml:"size" json:"size"`
+	// Image references a DiskImage artifact by metadata.name. When set,
+	// pveconform seeds this disk at create via PVE 9's
+	// `<pool>:0,import-from=<storage>:import/<filename>` form (the only
+	// supported way to boot a VM from a cloud image without a template).
+	// Image-seeded disks are imported ONCE (at create or when the slot is
+	// empty); pveconform never re-imports over a live volume (data loss).
+	Image string `yaml:"image,omitempty" json:"image,omitempty"`
 	// Slot is the PVE slot, e.g. "scsi0". Defaults to scsi<i> in order.
 	// Named "interface" in the declarative YAML to match user docs.
 	Slot string `yaml:"interface,omitempty" json:"interface,omitempty"`
@@ -35,6 +45,10 @@ type Disk struct {
 	Controller string `yaml:"controller,omitempty" json:"controller,omitempty"`
 	// IOThread requests a dedicated I/O thread for this disk.
 	IOThread bool `yaml:"iothread,omitempty" json:"iothread,omitempty"`
+
+	// imageVolid holds the resolved DiskImage PVE volume id
+	// ("<storage>:import/<filename>") after ResolveArtifactRefs; "" before.
+	imageVolid string
 }
 
 // NIC is one PVE VM network device.
@@ -332,17 +346,24 @@ func (v *VM) DesiredState() string {
 	return "started"
 }
 
-// Deps implements Resource. A VM has exactly one structured dependency:
-// an ISO reference on spec.hardware.cdrom.iso. Returns [] when the VM does
+// Deps implements Resource. A VM has structured dependencies:
+// an ISO reference on spec.hardware.cdrom.iso, and one DiskImage reference
+// per image-seeded disk on spec.disks[].image. Returns [] when the VM does
 // not reference an ISO (either cdrom omitted or cdrom.iso = "none").
 //
 // The planner merges Deps with the metadata.depends-on annotation edge and
 // enforces the DAG (unknown references fail closed; cycles fail closed).
 func (v *VM) Deps() []Ref {
-	if iso := strings.TrimSpace(v.Spec.Hardware.Cdrom.Iso); iso == "" || iso == CDROMNone {
-		return nil
+	var refs []Ref
+	if iso := strings.TrimSpace(v.Spec.Hardware.Cdrom.Iso); iso != "" && iso != CDROMNone {
+		refs = append(refs, Ref{Kind: KindISO, Name: iso})
 	}
-	return []Ref{{Kind: KindISO, Name: v.Spec.Hardware.Cdrom.Iso}}
+	for _, d := range v.Spec.Disks {
+		if img := strings.TrimSpace(d.Image); img != "" {
+			refs = append(refs, Ref{Kind: KindDiskImage, Name: img})
+		}
+	}
+	return refs
 }
 
 // Validate implements Resource.
@@ -380,10 +401,16 @@ func (v *VM) Validate() error {
 		if d.Storage == "" {
 			return fmt.Errorf("%s: spec.disks[%d].storage must be set", v.Ref(), i)
 		}
-		if d.Size == "" {
+		if d.Image != "" {
+			// Image-seeded disk: PVE derives the volume size from the image
+			// (import-from always uses the :0 size token). A declared size
+			// would be silently ignored → fail closed.
+			if d.Size != "" {
+				return fmt.Errorf("%s: spec.disks[%d].size must be empty when image is set (the imported disk takes its size from the DiskImage %q)", v.Ref(), i, d.Image)
+			}
+		} else if d.Size == "" {
 			return fmt.Errorf("%s: spec.disks[%d].size must be set (e.g. 50GiB)", v.Ref(), i)
-		}
-		if _, err := DiskBytes(d.Size); err != nil {
+		} else if _, err := DiskBytes(d.Size); err != nil {
 			return fmt.Errorf("%s: spec.disks[%d].size: %w", v.Ref(), i, err)
 		}
 		slot := d.Slot
@@ -1125,7 +1152,7 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 		}
 	}
 	if sshkeys := cloudInitSSHKeysWire(v.Spec.CloudInitData.SSHKeys); sshkeys != "" {
-		if pveStr(current["sshkeys"]) != sshkeys {
+		if !sshKeysWireMatch(pveStr(current["sshkeys"]), sshkeys) {
 			upd["sshkeys"] = sshkeys
 		}
 	}
@@ -1317,6 +1344,17 @@ func diskVolumeString(d Disk, slot string) string {
 // string ("local-lvm:vm-9100-disk-0,iothread=1,size=8G").
 func driveVolumeString(d Disk) string {
 	s := diskVolumeString(d, d.Slot)
+	if d.Image != "" {
+		// PVE 9 import-from create form: the size token MUST be 0 and the
+		// source is the DiskImage's volid (probed on conformance-dev
+		// 2026-09-13: any other size → 400 "'import-from' requires special
+		// syntax - use <storage ID>:0,import-from=<source>").
+		volid := d.imageVolid
+		if volid == "" {
+			volid = d.Image
+		}
+		s = d.Storage + ":0,import-from=" + volid
+	}
 	if d.IOThread {
 		s += ",iothread=1"
 	}
@@ -1439,9 +1477,13 @@ func (v *VM) diskSlotDrift(current map[string]any) (map[string]any, bool, []stri
 		poolChanged := cur.pool != want.pool
 		sizeChanged := want.sizeSet && (cur.sizeSet && cur.sizeBytes != want.sizeBytes)
 		if poolChanged || sizeChanged {
+			desiredSize := d.Size
+			if d.Image != "" {
+				desiredSize = "from image " + d.Image
+			}
 			anoms = append(anoms, fmt.Sprintf(
 				"disk %s storage/size drift (live=%q; desired pool=%s size=%s); pveconform will NOT auto-resize or re-pool a live data disk (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE (qm set/qmresize) or via a new disk, then update the manifest",
-				slot, curRaw, want.pool, d.Size))
+				slot, curRaw, want.pool, desiredSize))
 			continue
 		}
 		if cur.iothread != want.iothread {
@@ -1603,7 +1645,18 @@ func parseNICFields(s string) nicFields {
 // cloudInitSSHKeysWire renders PVE's `sshkeys` wire value from the
 // declarative SSHKeys slice. Empty → "" (pveconform does not own the PVE key).
 // A single `*` sentinel entry → "" (PVE owns the live value; do not write).
-// Multiple entries → comma-joined string form PVE accepts.
+//
+// PVE 9.2 wire grammar (probed on conformance-dev 2026-09-13): the sshkeys
+// FIELD VALUE must itself be percent-encoded, with one public key per line.
+// PVE's API schema declares sshkeys as a urlencoded string and decodes it
+// before writing the config, so a raw `ssh-ed25519 AAAA... user@host` value is
+// REJECTED at create/update with:
+//
+//	"invalid format - invalid urlencoded string: ssh-ed25519 AAAA...\n"
+//
+// and PVE's /config report returns the encoded form verbatim
+// (`ssh-ed25519%20AAAA...%20user%40host`). Keys are joined with \n (encoded
+// %0A), NOT commas — a comma is not a key separator in PVE's grammar.
 //
 // The sentinel is exclusive: Validate() rejects mixed sentinel+real keys, so
 // this helper assumes the input already passed validation. Mixed input
@@ -1629,7 +1682,64 @@ func cloudInitSSHKeysWire(keys []string) string {
 			out = append(out, k)
 		}
 	}
-	return strings.Join(out, ",")
+	return pveURLEncode(strings.Join(out, "\n"))
+}
+
+// pveURLEncode percent-encodes every byte outside RFC 3986's unreserved set
+// (A-Z a-z 0-9 - . _ ~), using uppercase hex — the encoding PVE's own
+// `sshkeys` reader expects and the shape PVE reports back. Go's url.QueryEscape
+// is NOT usable here: it renders spaces as `+`, which PVE's decoder does not
+// map back to a space inside this field.
+func pveURLEncode(s string) string {
+	const upperhex = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(s) * 3)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == '_' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(upperhex[c>>4])
+		b.WriteByte(upperhex[c&0xF])
+	}
+	return b.String()
+}
+
+// sshKeysWireMatch reports whether PVE's reported `sshkeys` value and our
+// desired wire value carry the same SET of public keys. Both sides are decoded
+// first (PVE reports the percent-encoded form verbatim; older PVE releases and
+// hand-edited configs may differ only in encoding or key order), so a
+// re-encode never reads as drift. Comparison is order-insensitive and
+// duplicate-collapsing, matching cloud-init's own authorized_keys semantics.
+func sshKeysWireMatch(cur, want string) bool {
+	c := sshKeySet(cur)
+	w := sshKeySet(want)
+	if len(c) != len(w) {
+		return false
+	}
+	for k := range w {
+		if !c[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// sshKeySet decodes a PVE sshkeys value into a set of individual keys.
+func sshKeySet(v string) map[string]bool {
+	out := map[string]bool{}
+	if s, err := url.QueryUnescape(strings.ReplaceAll(v, "+", "%2B")); err == nil {
+		v = s
+	}
+	for _, line := range strings.Split(v, "\n") {
+		if k := strings.TrimSpace(line); k != "" {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 // cloudInitIPConfigWire returns PVE "ipconfig<N>" form-values from the
@@ -1720,6 +1830,15 @@ func cloudInitMatches(cur, want string) bool {
 	}
 	if cp != wp {
 		return false
+	}
+	// A live report that omits its size token (PVE created the drive without
+	// one — e.g. `ide2=local-lvm:cloudinit` reports
+	// "local-lvm:vm-N-cloudinit,media=cdrom" with NO size) is compatible:
+	// same rule as diskMatches — PVE is not telling us a number to compare
+	// against, and re-writing the drive to "fix" a size PVE never reported
+	// is a pointless stop-start cycle. (conformance-dev probe 2026-09-13.)
+	if cs == "" {
+		return true
 	}
 	// size: PVE binary suffix ("4K"/"4M"), our desired also binary
 	// (e.g. "4M"). Compare as bytes when both parse, else raw-equal.

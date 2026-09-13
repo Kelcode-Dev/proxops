@@ -72,7 +72,7 @@ func (s *Storage) Content(ctx context.Context, node, storage string) ([]ContentE
 	return out, nil
 }
 
-// Download issues an ISO or CTTemplate download to the storage backend.
+// Download issues an ISO, CTTemplate or DiskImage download to the storage backend.
 // The `content` parameter tells PVE which pool the file belongs to:
 //   - "iso":       PVE downloads to `<storage>:iso/<filename>`
 //   - "vztmpl":    PVE downloads to `<storage>:vztmpl/<filename>`

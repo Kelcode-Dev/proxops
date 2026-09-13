@@ -27,7 +27,9 @@
 resources:
   - ../../ctt/base/golden-base.yaml
   - ../../iso/base/base-iso.yaml
+  - ../../diskimage/base/debian-13-cloud.yaml
   - ../../lxc/example/cache-01.yaml
   - ../../vm/example/app-vm.yaml
+  - ../../vm/example/cloudinit-vm.yaml
   - ../../vm/example/talos-worker-01.yaml
   - ../../templatevm/example/almalinux-tpl.yaml

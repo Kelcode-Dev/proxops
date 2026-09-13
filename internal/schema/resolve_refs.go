@@ -37,6 +37,9 @@ func ResolveArtifactRefs(resources []Resource) error {
 			if err := v.resolveCDrom(byRef); err != nil {
 				return err
 			}
+			if err := v.resolveDiskImages(byRef); err != nil {
+				return err
+			}
 		case *LXC:
 			if err := v.resolveTemplate(byRef); err != nil {
 				return err
@@ -47,6 +50,9 @@ func ResolveArtifactRefs(resources []Resource) error {
 			// embedded-field type switch above does NOT catch *TemplateVM,
 			// so we route it explicitly through the VM helper.
 			if err := v.resolveCDrom(byRef); err != nil {
+				return err
+			}
+			if err := v.resolveDiskImages(byRef); err != nil {
 				return err
 			}
 		}
@@ -110,6 +116,35 @@ func (l *LXC) resolveTemplate(byRef map[Ref]Resource) error {
 	}
 	// PVE's vztmpl volid on dir storage is "<storage>:vztmpl/<filename>".
 	l.ostemplateVolid = ctt.Spec.Storage + ":vztmpl/" + ctt.Spec.Filename
+	return nil
+}
+
+// resolveDiskImages binds every spec.disks[].image reference to the
+// referenced DiskImage's PVE import-pool volid, and validates that the image
+// is placed on the VM's node (the image must be downloaded before the VM's
+// create can import from it).
+func (v *VM) resolveDiskImages(byRef map[Ref]Resource) error {
+	for i := range v.Spec.Disks {
+		d := &v.Spec.Disks[i]
+		imgName := strings.TrimSpace(d.Image)
+		if imgName == "" {
+			d.imageVolid = ""
+			continue
+		}
+		res, ok := byRef[Ref{Kind: KindDiskImage, Name: imgName}]
+		if !ok {
+			return fmt.Errorf("%s: spec.disks[%d].image references unknown DiskImage %q", v.Ref(), i, imgName)
+		}
+		di, ok := res.(*DiskImage)
+		if !ok {
+			return fmt.Errorf("%s: spec.disks[%d].image references %s which is not a DiskImage", v.Ref(), i, res.Ref())
+		}
+		if !containsString(di.Nodes(), v.Spec.Node) {
+			return fmt.Errorf("%s: spec.disks[%d].image %q is not placed on node %s (DiskImage nodes: %v)",
+				v.Ref(), i, imgName, v.Spec.Node, di.Nodes())
+		}
+		d.imageVolid = di.Spec.Storage + ":import/" + di.Spec.Filename
+	}
 	return nil
 }
 

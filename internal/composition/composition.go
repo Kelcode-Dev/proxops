@@ -37,7 +37,7 @@ import (
 
 // rootDirs are the resource kind roots. Any *.yaml placed DIRECTLY under one of
 // these directories is legacy shape and is rejected by checkRepoShape.
-var rootDirs = []string{"vm", "lxc", "iso", "ctt", "templatevm"}
+var rootDirs = []string{"vm", "lxc", "iso", "ctt", "templatevm", "diskimage"}
 
 // Composition is one cluster's discovered resource list.
 type Composition struct {
@@ -62,9 +62,11 @@ func KindForPath(rel string) string {
 		return ""
 	}
 	// M11: "templatevm" is the 5th kind root for the new TemplateVM manifest
-	// (a PVE qemu object that has been marked template).
+	// (a PVE qemu object that has been marked template). "diskimage" is the
+	// 6th (a downloadable qcow2/vmdk/raw image seeding a VM disk via
+	// import-from).
 	switch parts[0] {
-	case "vm", "lxc", "iso", "ctt", "templatevm":
+	case "vm", "lxc", "iso", "ctt", "templatevm", "diskimage":
 		return parts[0]
 	default:
 		return ""
