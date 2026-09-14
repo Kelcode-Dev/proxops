@@ -13,12 +13,12 @@ import (
 //
 // Scenarios covered:
 // 1. Create a TemplateVM on a fresh node (POST /qemu + POST /qemu/{id}/template).
-//    PVE-side result: qm object with template=1, pveconform tag, stopped.
+//    PVE-side result: qm object with template=1, proxops tag, stopped.
 // 2. Idempotency: second cycle produces zero actions.
-// 3. Desired pveconform VM against a live PVE-side template at the same
+// 3. Desired proxops VM against a live PVE-side template at the same
 //    (node, vmid): planner surfaces a non-destructive anomaly (no config or
 //    power write) — pinning PVE 9.2's one-way-only /template endpoint.
-// 4. Desired pveconform VM against a live PVE-side VM at the same (node,
+// 4. Desired proxops VM against a live PVE-side VM at the same (node,
 //    vmid) that is NOT a template: planner surfaces a MarkTemplate action
 //    (POST /qemu/{id}/template).
 
@@ -68,7 +68,7 @@ spec:
 		t.Fatalf("expected a plan.Create for TemplateVM#555; got %+v", p1.Actions)
 	}
 
-	// PVE-side result: object present, qm, template=1, pveconform tag.
+	// PVE-side result: object present, qm, template=1, proxops tag.
 	if !h.mock.VMExists(node, 555) {
 		t.Fatalf("mock PVE: object 555 not present after template create")
 	}
@@ -77,7 +77,7 @@ spec:
 	}
 	cfg := h.mock.VMConfig(node, 555)
 	if !containsTagStr(cfg["tags"], schema.PveOwnershipTag) {
-		t.Errorf("mock PVE: template 555 missing pveconform ownership tag; tags=%q", cfg["tags"])
+		t.Errorf("mock PVE: template 555 missing proxops ownership tag; tags=%q", cfg["tags"])
 	}
 	// PVE-side power must be stopped even though the manifest is explicit.
 	if st, _ := h.mock.VMStatus(node, 555); st != "stopped" {
@@ -103,7 +103,7 @@ spec:
 func TestE2E_VMDesiredButPVEIsTemplateSurfacesAnomaly(t *testing.T) {
 	// Mock PVE has VM#600 marked as a PVE-side template (untagged).
 	harnessFiles := map[string]string{
-		// A pveconform VM manifest at the same PVE-id.
+		// A proxops VM manifest at the same PVE-id.
 		"vm.yaml": `
 apiVersion: proxops/v1alpha1
 kind: VM
@@ -126,7 +126,7 @@ spec:
 `,
 	}
 	h := newHarness(t, harnessFiles, 3)
-	// Preseed PVE-side template at node|VM|600 (with the pveconform tag
+	// Preseed PVE-side template at node|VM|600 (with the proxops tag
 	// so the prune path recognises it as "owned" but the mismatch still
 	// forces the anomaly over a normal Drift).
 	h.mock.PreloadVMTemplate(node, 600, map[string]string{
@@ -166,7 +166,7 @@ spec:
 
 func TestE2E_VMDesiredAgainstLiveNonTemplateMarksIt(t *testing.T) {
 	// Desired TemplateVM at a PVE-id that already exists as a plain qm on
-	// PVE: pveconform should plan MarkTemplate, not Create.
+	// PVE: proxops should plan MarkTemplate, not Create.
 	h := newHarness(t, map[string]string{
 		"tpl.yaml": `
 apiVersion: proxops/v1alpha1
@@ -189,7 +189,7 @@ spec:
   state: stopped
 `,
 	}, 3)
-	// Preload a pveconform-owned qm at 610 (no template flag yet).
+	// Preload a proxops-owned qm at 610 (no template flag yet).
 	h.mock.PreloadVM(node, 610, map[string]string{
 		"name":   "preexisting-vm",
 		"memory": "1024",

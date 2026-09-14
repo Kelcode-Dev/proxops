@@ -50,7 +50,7 @@ func m10GitTree(t *testing.T) string {
 	return root
 }
 
-// m10SOPSConfig writes a pveconform config + fake SOPS file for one
+// m10SOPSConfig writes a proxops config + fake SOPS file for one
 // SOPS-backed cluster. Returns the config path.
 func m10SOPSConfig(t *testing.T, cluster string) string {
 	t.Helper()
@@ -62,7 +62,7 @@ func m10SOPSConfig(t *testing.T, cluster string) string {
 	if err := os.WriteFile(filepath.Join(clDir, "secrets.sops.yaml"), []byte("ENC[stub-decryption-target]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b := "# pveconform M10 test config (SOPS cluster)\n" +
+	b := "# proxops M10 test config (SOPS cluster)\n" +
 		"log:\n  level: info\n" +
 		"pve:\n  auth: token\n  clusters:\n" +
 		"    " + cluster + ":\n" +
@@ -71,9 +71,9 @@ func m10SOPSConfig(t *testing.T, cluster string) string {
 		"      secrets-file: secrets.sops.yaml\n" +
 		"      secrets:\n" +
 		"        pve:\n" +
-		"          user: pveconform-user\n" +
-		"          token-id: pveconform-token-id\n" +
-		"          token: pveconform-token\n" +
+		"          user: proxops-user\n" +
+		"          token-id: proxops-token-id\n" +
+		"          token: proxops-token\n" +
 		"        git:\n" +
 		"          token: pve-git-token\n" +
 		"git:\n  branch: main\n  path: .\n" +
@@ -102,11 +102,11 @@ func m10StubSOPS(t *testing.T, vals map[string]string, err error) {
 // gitx.New → pveclient.New: the SOPS resolution step fails first, so NO
 // PVE client is ever built and NO PVE endpoint is ever dialed.
 func TestAgentApp_MissingSOPSCredentialsFailsClosed(t *testing.T) {
-	// SOPS doc: everything present EXCEPT pveconform-token.
+	// SOPS doc: everything present EXCEPT proxops-token.
 	m10StubSOPS(t, map[string]string{
-		"pveconform-user":     "root@pam",
-		"pveconform-token-id": "m10tok",
-		"pve-git-token":       "gittoken",
+		"proxops-user":     "root@pam",
+		"proxops-token-id": "m10tok",
+		"pve-git-token":    "gittoken",
 	}, nil)
 	cfgPath := m10SOPSConfig(t, "prod-a")
 	cfg, err := config.Load(cfgPath)
@@ -120,7 +120,7 @@ func TestAgentApp_MissingSOPSCredentialsFailsClosed(t *testing.T) {
 
 // TestAgentApp_SOPSWrongIdentityFailsClosed pins that a SOPS decrypt
 // failure (wrong age identity) fails agent construction. The operator
-// never reaches PVE with credentials pveconform could not verify.
+// never reaches PVE with credentials proxops could not verify.
 func TestAgentApp_SOPSWrongIdentityFailsClosed(t *testing.T) {
 	m10StubSOPS(t, nil, secrets.ErrIdentityMismatch)
 	cfgPath := m10SOPSConfig(t, "prod-a")
@@ -134,7 +134,7 @@ func TestAgentApp_SOPSWrongIdentityFailsClosed(t *testing.T) {
 }
 
 // TestAgentApp_SOPSBinaryMissingFailsClosed pins that a missing sops
-// binary fails agent construction: pveconform never bypasses SOPS
+// binary fails agent construction: proxops never bypasses SOPS
 // resolution into a bootstrap credential.
 func TestAgentApp_SOPSBinaryMissingFailsClosed(t *testing.T) {
 	m10StubSOPS(t, nil, secrets.ErrSOPSBinaryMissing)
@@ -178,7 +178,7 @@ func TestAgentApp_MalformedClusterNameFailsClosed(t *testing.T) {
 	// The config's pve.clusters key is malformed; the directory name is
 	// fine but the cross-check invariant requires config key == dir name,
 	// and the key itself fails ValidClusterName first.
-	b := "# pveconform M10 test config (malformed cluster name)\n" +
+	b := "# proxops M10 test config (malformed cluster name)\n" +
 		"log:\n  level: info\n" +
 		"pve:\n  auth: token\n  user: root@pam\n  token-id: x\n  token: y\n  clusters:\n" +
 		"    \"" + badName + "\":\n" +
@@ -219,7 +219,7 @@ func TestAgentApp_ClusterSelectionIsolated(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(clDir, "secrets.sops.yaml"), []byte("ENC[stub-decryption-target]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b := "# pveconform M10 test config (SOPS cluster)\n" +
+	b := "# proxops M10 test config (SOPS cluster)\n" +
 		"log:\n  level: info\n" +
 		"pve:\n  auth: token\n  clusters:\n" +
 		"    prod-a:\n" +
@@ -228,9 +228,9 @@ func TestAgentApp_ClusterSelectionIsolated(t *testing.T) {
 		"      secrets-file: secrets.sops.yaml\n" +
 		"      secrets:\n" +
 		"        pve:\n" +
-		"          user: pveconform-user\n" +
-		"          token-id: pveconform-token-id\n" +
-		"          token: pveconform-token\n" +
+		"          user: proxops-user\n" +
+		"          token-id: proxops-token-id\n" +
+		"          token: proxops-token\n" +
 		"        git:\n" +
 		"          token: pve-git-token\n" +
 		"git:\n  branch: main\n  path: .\n" +
@@ -249,10 +249,10 @@ func TestAgentApp_ClusterSelectionIsolated(t *testing.T) {
 	}
 
 	m10StubSOPS(t, map[string]string{
-		"pveconform-user":     "root@pam",
-		"pveconform-token-id": "m10tok",
-		"pveconform-token":    "deadbeef",
-		"pve-git-token":       "gittoken",
+		"proxops-user":     "root@pam",
+		"proxops-token-id": "m10tok",
+		"proxops-token":    "deadbeef",
+		"pve-git-token":    "gittoken",
 	}, nil)
 	cfg, err := config.Load(cfgPath)
 	if err != nil {

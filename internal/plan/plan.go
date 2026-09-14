@@ -60,7 +60,7 @@ type Action struct {
 	// DesiredPower is the manifest power state ("started"/"stopped").
 	DesiredPower string
 	// Level is the topological create-level of this action's resource:
-	// level 0 = resource has no pveconform dependencies; level n = depends
+	// level 0 = resource has no proxops dependencies; level n = depends
 	// on resources at level < n. The planner uses this to order creates
 	// so prerequisites are planned before dependants; prunes are ordered
 	// by REVERSE level so dependants delete first (ISOs / templates must
@@ -71,7 +71,7 @@ type Action struct {
 	// prerequisite failed earlier in the same cycle (a dependant is not
 	// attempted before its prerequisite is ready).
 	Deps []schema.Ref
-	// Ref is the pveconform manifest Ref this action targets (nil for
+	// Ref is the proxops manifest Ref this action targets (nil for
 	// prunes of PVE-side objects not in git).
 	Ref schema.Ref
 	// Anomaly marks this action as a no-write observation. The executor
@@ -83,10 +83,10 @@ type Action struct {
 // Plan is the ordered result of one planning pass.
 type Plan struct {
 	Actions  []Action
-	Skipped  []Action // live objects with no pveconform tag (never touched)
+	Skipped  []Action // live objects with no proxops tag (never touched)
 	Deferred []Action // prunes beyond the per-cycle budget
 	Anomaly  string   // probable-bad-push signal (empty-desired anomaly guard)
-	// Anomalies: live-only-slot observations (pveconform will NOT delete
+	// Anomalies: live-only-slot observations (proxops will NOT delete
 	// them; the operator does that manually). Surfaced on /status +
 	// /metrics; never executed.
 	Anomalies []Action
@@ -222,8 +222,8 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 			continue
 		}
 
-		// M11: desired pveconform VM whose live PVE object is a PVE-side
-		// template (template=1): pveconform cannot untemplate on PVE 9.2 (501
+		// M11: desired proxops VM whose live PVE object is a PVE-side
+		// template (template=1): proxops cannot untemplate on PVE 9.2 (501
 		// "not implemented") and must not claim ownership of a clone source.
 		// Surface a non-destructive anomaly; no config/power write.
 		if kt == schema.KindVM && isPVETemplate(cfg) {
@@ -231,10 +231,10 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 				Tier: 0, Kind: kt, Name: ref.Name, Node: r.Node(), ID: r.ID(),
 				What: Anomaly, Level: levels(ref), Ref: ref,
 				Anomaly: true,
-				// Niche note: pveconform refuses to write a kind-flip on PVE; the
+				// Niche note: proxops refuses to write a kind-flip on PVE; the
 				// operator either switches the manifest to kind: TemplateVM
 				// (M11), or demotes the PVE object manually.
-				Reason: ref.String() + ": live PVE object is a template (template=1); a pveconform VM manifest cannot be applied to a PVE template and PVE 9.2 has no /qemu/{id}/untemplate - change the manifest to kind: TemplateVM (or demote the PVE object by hand)",
+				Reason: ref.String() + ": live PVE object is a template (template=1); a proxops VM manifest cannot be applied to a PVE template and PVE 9.2 has no /qemu/{id}/untemplate - change the manifest to kind: TemplateVM (or demote the PVE object by hand)",
 			})
 			continue
 		}
@@ -243,7 +243,7 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 
 		// Non-destructive anomalies: live-only slots (VM disks / NICs / LXC
 		// mount-points) that the manifest does not declare.
-		// pveconform will NOT auto-delete these (the executor skips Anomaly
+		// proxops will NOT auto-delete these (the executor skips Anomaly
 		// actions); they are surfaced on /status + /metrics so the operator
 		// can remove them by hand.
 		if anomalies := r.DriftAnomalies(cfg); anomalies != nil {
@@ -295,7 +295,7 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		}
 	}
 
-	// Pass B: prunes (PVE-present, not in desired, pveconform-tagged).
+	// Pass B: prunes (PVE-present, not in desired, proxops-tagged).
 	//
 	// Artifacts (ISO, CTTemplate) are NEVER pruned in the MVP — PV has no
 	// ownership tag on storage content; deleting a vztmpl / iso can silently
@@ -348,7 +348,7 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		// CTT desiredSet key will match (we insert CTT's liveKey too).
 		kind := normalizeKind(res.Type)
 		if kind != schema.KindVM && kind != schema.KindLXC {
-			// Only VM/LXC are managed by pveconform MVP (CTT is LXC-flavored;
+			// Only VM/LXC are managed by proxops MVP (CTT is LXC-flavored;
 			// ISO is not a listing entry).
 			continue
 		}
@@ -368,7 +368,7 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 			p.Skipped = append(p.Skipped, Action{
 				Kind: kind, Name: name, Node: res.Node, ID: res.Vmid,
 				What:   StatusOnly,
-				Reason: "live object without pveconform tag; never touched",
+				Reason: "live object without proxops tag; never touched",
 			})
 			continue
 		}
@@ -381,7 +381,7 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		pruneCandidates = append(pruneCandidates, Action{
 			Tier: 9, Kind: kind, Name: nameStr, Node: res.Node, ID: res.Vmid,
 			What: Delete, Prune: true, Level: 0,
-			Reason:    "present on PVE (pveconform-tagged) but absent in git",
+			Reason:    "present on PVE (proxops-tagged) but absent in git",
 			LivePower: live.Power[keyFor(res.Node, kind, res.Vmid)],
 		})
 	}
@@ -396,7 +396,7 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 	}
 
 	// Anomaly guard (plan §10): when the desired set for a kind is EMPTY and
-	// the count of PVE-live pveconform-tagged orphans of that kind EXCEEDS the
+	// the count of PVE-live proxops-tagged orphans of that kind EXCEEDS the
 	// per-cycle prune budget, this is the "mass deletion" shape of a probable
 	// bad push (someone deleted all manifests of a kind). Suppress prunes for
 	// that kind and surface the anomaly. Orphans within the budget with empty
@@ -417,7 +417,7 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		if candidates > opts.Budget.Prune {
 			suppressed[k] = true
 			anomalyParts = append(anomalyParts,
-				fmt.Sprintf("0 desired %s but %d pveconform-tagged live objects (more than the per-cycle prune budget of %d): probable bad push; suppresses prunes for %s this cycle",
+				fmt.Sprintf("0 desired %s but %d proxops-tagged live objects (more than the per-cycle prune budget of %d): probable bad push; suppresses prunes for %s this cycle",
 					k, candidates, opts.Budget.Prune, k))
 		}
 	}

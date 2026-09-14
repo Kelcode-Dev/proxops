@@ -14,7 +14,7 @@ import (
 	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
 )
 
-// vmManifest is a valid pveconform VM manifest.
+// vmManifest is a valid proxops VM manifest.
 const vmManifest = `apiVersion: proxops/v1alpha1
 kind: VM
 metadata:
@@ -34,7 +34,7 @@ spec:
       bridge: vmbr0
 `
 
-// lxcManifest is a valid pveconform LXC manifest.
+// lxcManifest is a valid proxops LXC manifest.
 const lxcManifest = `apiVersion: proxops/v1alpha1
 kind: LXC
 metadata:
@@ -53,7 +53,7 @@ spec:
     - bridge: vmbr0
 `
 
-// cttManifest is a valid pveconform CTTemplate (vztmpl artifact) manifest —
+// cttManifest is a valid proxops CTTemplate (vztmpl artifact) manifest —
 // a downloadable template archive with no PVE numeric id.
 const cttManifest = `apiVersion: proxops/v1alpha1
 kind: CTTemplate

@@ -23,7 +23,7 @@ var PVEBookkeepingKeys = map[string]bool{
 	"smbios1": true,
 	"uuid":    true,
 	// PVE infers ostype from the installed OS / ostemplate; it is not a
-	// create form-value pveconform can (or wants to) own, so treating it
+	// create form-value proxops can (or wants to) own, so treating it
 	// as bookkeeping keeps it out of both the owned surface and the gap
 	// report. (probe: every prod-a VM reports ostype=l26 etc.)
 	"ostype":     true,
@@ -31,7 +31,7 @@ var PVEBookkeepingKeys = map[string]bool{
 }
 
 // sensitiveGapFields are PVE /config keys whose VALUES carry credentials or
-// PII. adopt reports the field NAME as a gap (so the operator knows pveconform
+// PII. adopt reports the field NAME as a gap (so the operator knows proxops
 // does not model it) but must NEVER echo its value: sshkeys embeds public
 // keys + usernames, cipassword is the cloud-init root password placeholder.
 // The gap value is substituted with a fixed marker.
@@ -54,46 +54,46 @@ func redactGapValue(field, value string) string {
 	return value
 }
 
-// gapNoteFor augments the default "pveconform does not model this" gap
+// gapNoteFor augments the default "proxops does not model this" gap
 // note with a specific meaning for a handful of well-known PVE fields
 // (so the audit is more useful than a generic note). Unknown fields keep
 // the caller-supplied default.
 func gapNoteFor(field, fallback string) string {
 	switch field {
 	case "cmode":
-		return "PVE console-mode token (tty/vga/none); pveconform does not model the LXC console mode"
+		return "PVE console-mode token (tty/vga/none); proxops does not model the LXC console mode"
 	case "tty":
-		return "PVE tty count; pveconform does not model LXC tty count"
+		return "PVE tty count; proxops does not model LXC tty count"
 	case "console":
-		return "PVE console enable (=1); pveconform LXCOptions.Console is tri-state and captures it via /config PUT"
+		return "PVE console enable (=1); proxops LXCOptions.Console is tri-state and captures it via /config PUT"
 	case "cpulimit":
-		return "PVE CPU rate limit (0 = unbounded); pveconform does not model LXC cpulimit"
+		return "PVE CPU rate limit (0 = unbounded); proxops does not model LXC cpulimit"
 	case "cpuunits":
-		return "PVE CPU weight (share of a 1024-unit pool); pveconform does not model LXC cpuunits"
+		return "PVE CPU weight (share of a 1024-unit pool); proxops does not model LXC cpuunits"
 	case "features":
-		return "PVE 9.x composite feature tokens (nesting=1, etc.); pveconform captures nesting via LXCOptions.Nesting"
+		return "PVE 9.x composite feature tokens (nesting=1, etc.); proxops captures nesting via LXCOptions.Nesting"
 	case "lxc":
-		return "PVE LXC raw `lxc.` config-line passthrough (AppArmor profile, cgroups, ...); pveconform does not model it"
+		return "PVE LXC raw `lxc.` config-line passthrough (AppArmor profile, cgroups, ...); proxops does not model it"
 	case "template":
 		return "PVE template-flag VMs are out of scope (recorded in Skipped)"
 	case "ipconfig0":
-		return "PVE VM cloud-init ipconfig0; pveconform does not model VM cloud-init networking"
+		return "PVE VM cloud-init ipconfig0; proxops does not model VM cloud-init networking"
 	case "nameserver":
-		return "PVE VM cloud-init nameserver; pveconform does not model VM cloud-init DNS"
+		return "PVE VM cloud-init nameserver; proxops does not model VM cloud-init DNS"
 	case "cicustom":
-		return "PVE cloud-init custom files; pveconform does not model VM cloud-init cicustom"
+		return "PVE cloud-init custom files; proxops does not model VM cloud-init cicustom"
 	case "ciuser":
-		return "PVE cloud-init username; pveconform does not model VM cloud-init ciuser"
+		return "PVE cloud-init username; proxops does not model VM cloud-init ciuser"
 	case "ciupgrade":
-		return "PVE cloud-init upgrade mode; pveconform does not model it"
+		return "PVE cloud-init upgrade mode; proxops does not model it"
 	case "sshkeys":
-		return "PVE cloud-init SSH public keys; pveconform does not model VM cloud-init sshkeys (value redacted)"
+		return "PVE cloud-init SSH public keys; proxops does not model VM cloud-init sshkeys (value redacted)"
 	case "cipassword":
-		return "PVE cloud-init root password; pveconform does not model it (value redacted)"
+		return "PVE cloud-init root password; proxops does not model it (value redacted)"
 	case "kvm":
-		return "PVE KVM nested-virt enable; pveconform does not model it"
+		return "PVE KVM nested-virt enable; proxops does not model it"
 	case "balloon":
-		return "PVE balloon-MiB / auto-balance setting; pveconform does not model it"
+		return "PVE balloon-MiB / auto-balance setting; proxops does not model it"
 	}
 	return fallback
 }
@@ -168,7 +168,7 @@ type adoptContext struct {
 //  2. artifact discovery (every iso + vztmpl on every allowed node/storage),
 //  3. VM discovery + manifest generation,
 //  4. LXC discovery + manifest generation,
-//  5. gap collection (PVE keys pveconform does not model),
+//  5. gap collection (PVE keys proxops does not model),
 //  6. zero-writes assertion (the read-only invariant).
 //
 // Generated files land under <kind>/<cluster>/ in the git root. Run never
@@ -251,7 +251,7 @@ func (r *Result) logf(format string, args ...any) {
 }
 
 // validClusterName re-exports config.ValidClusterName without an import
-// cycle (adopt must not import config; the pveconform CLI validates config
+// cycle (adopt must not import config; the proxops CLI validates config
 // before it ever reaches adopt).
 func ValidClusterName(s string) bool {
 	if len(s) < 1 || len(s) > 64 {
@@ -335,7 +335,7 @@ func (ac *adoptContext) adoptArtifacts(ctx context.Context, nodes []string) erro
 		if wErr := ac.writeManifest(schema.KindISO, isoDoc, name); wErr != nil {
 			return wErr
 		}
-		// The download URL is a pveconform-owned field that PVE does not
+		// The download URL is a proxops-owned field that PVE does not
 		// report: adopt cannot know where the file came from. The
 		// placeholder keeps the schema valid; the URL is recorded here as
 		// an open gap for the operator to close.
@@ -375,7 +375,7 @@ func (ac *adoptContext) adoptArtifacts(ctx context.Context, nodes []string) erro
 // writeManifest marshals doc and writes <kind>/<cluster>/<name>.yaml under
 // the git root, recording it on res. When the doc is a schema.Resource, it is
 // Validate()-checked: a manifest that cannot be composed (an unknown live
-// value pveconform could not recover) still gets written (the operator
+// value proxops could not recover) still gets written (the operator
 // should see the generated shape to fix it), but it is ADDED TO
 // res.Incomplete and the summary says not to list it in resources.yaml yet.
 // Output is 2-space YAML (schema.YAMLOut) so generated manifests pass the
@@ -430,7 +430,7 @@ func kindPath(cluster string, k schema.Kind, name string) string {
 	case schema.KindCTTemplate:
 		dir = "ctt"
 	// M11: TemplateVM manifests live under the templatevm/ kind root
-	// (mirrors composition.rootDirs; a TemplateVM pveconform-manifest is
+	// (mirrors composition.rootDirs; a TemplateVM proxops-manifest is
 	// NOT placed under vm/ because it is a distinct resource kind
 	// with its own parse/route/plan/exec/adopt paths).
 	case schema.KindTemplateVM:
@@ -439,7 +439,7 @@ func kindPath(cluster string, k schema.Kind, name string) string {
 	return filepath.ToSlash(filepath.Join(dir, cluster, name+".yaml"))
 }
 
-// sanitizeName turns an arbitrary PVE filename into a valid pveconform
+// sanitizeName turns an arbitrary PVE filename into a valid proxops
 // metadata.name (lowercase alnum + '-', <= 63 chars, no leading
 // '-'). PVE's "test-vm-01" passes through; "ISO 13" becomes "iso-13";
 // "debian-13.6.0-amd64-netinst.iso" becomes "debian-13-6-0-amd64-netinst".

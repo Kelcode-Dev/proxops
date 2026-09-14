@@ -95,11 +95,11 @@ func TestLXCNetPinnedWireFormat(t *testing.T) {
 		t.Errorf("net0 = %q, want %q", got, want)
 	}
 	// Drift against PVE's normalized report must be a no-op: PVE attaches
-	// a PVE-assigned hwaddr and `type=veth` that pveconform does not own.
+	// a PVE-assigned hwaddr and `type=veth` that proxops does not own.
 	live := map[string]any{
 		"cores":    1,
 		"memory":   int64(1024), // PVE MiB count for 1GiB
-		"tags":     []any{"pveconform"},
+		"tags":     []any{"proxops"},
 		"hostname": "cache-01",
 		// PVE-assigned container volume id; no size token PVE reports for
 		// the LVM container rootfs. pveDiskInfo treats a missing size as

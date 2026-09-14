@@ -5,7 +5,7 @@ import "testing"
 // TestIsPVETemplate_PinNumberAndString pins the M11 wire finding that PVE
 // encodes `template` as an integer JSON number. Go's encoding/json decodes
 // bare integers as float64, so a real PVE /config payload ("template": 1)
-// reaches pveconform as map[string]any{"template": float64(1)}. The mock PVE
+// reaches proxops as map[string]any{"template": float64(1)}. The mock PVE
 // stores form-values as map[string]string ("template": "1"). Both shapes
 // must classify as a template, or LoadLive would silently fail to key the
 // TemplateVM live entry against real PVE.

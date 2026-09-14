@@ -1,4 +1,4 @@
-// Package app constructs and runs the pveconform agent: one validated config
+// Package app constructs and runs the proxops agent: one validated config
 // in, a wired graph of per-cluster pveclient + one gitx source + one statusx
 // store + per-cluster reconciler + executor + one HTTP server out.
 //
@@ -104,8 +104,8 @@ func PVEParamsFrom(cfg *config.Config, cluster string) pveclient.PVEParams {
 
 // EffectiveGitToken returns the git fetch token the shared git source should
 // use, applying the M9 SOPS precedence: any cluster's SOPS-resolved
-// git-token beats the bootstrap git.token (YAML + PVECONFORM_GIT_TOKEN).
-// The pveconform git source is single (one tree serves every cluster), so
+// git-token beats the bootstrap git.token (YAML + PROXOPS_GIT_TOKEN).
+// The proxops git source is single (one tree serves every cluster), so
 // the effective token must be unique: if two clusters resolve DIFFERENT
 // non-empty SOPS git tokens, the caller must fail closed.
 //
@@ -122,7 +122,7 @@ func EffectiveGitToken(cfg *config.Config) (string, error) {
 			firstSopsToken = sc.GitToken
 			firstSopsCluster = name
 		} else if firstSopsToken != sc.GitToken {
-			return "", fmt.Errorf("git token conflict: clusters %q and %q resolve DIFFERENT SOPS git tokens; pveconform has a single shared git source, so all SOPS-resolved git tokens must be equal (edit the SOPS files or the key references in config.yaml)", firstSopsCluster, name)
+			return "", fmt.Errorf("git token conflict: clusters %q and %q resolve DIFFERENT SOPS git tokens; proxops has a single shared git source, so all SOPS-resolved git tokens must be equal (edit the SOPS files or the key references in config.yaml)", firstSopsCluster, name)
 		}
 	}
 	if firstSopsToken != "" {
@@ -131,7 +131,7 @@ func EffectiveGitToken(cfg *config.Config) (string, error) {
 	return cfg.Git.Token, nil
 }
 
-// clusterAgent is one pveconform cluster: PVE client + dry/apply reconcilers
+// clusterAgent is one proxops cluster: PVE client + dry/apply reconcilers
 // bound to its endpoint and node allowlist.
 type clusterAgent struct {
 	name    string
@@ -140,7 +140,7 @@ type clusterAgent struct {
 	rec     *reconcile.Reconciler
 }
 
-// Agent is the long-running pveconform process.
+// Agent is the long-running proxops process.
 type Agent struct {
 	log      *slog.Logger
 	cfg      *config.Config
@@ -358,7 +358,7 @@ func (a *Agent) Log() *slog.Logger { return a.log }
 // each cycle's outcome is reported via statusx + metrics. Clusters are
 // processed in deterministic sorted-name order every tick.
 func (a *Agent) Start(ctx context.Context) error {
-	a.log.Info("pveconform starting",
+	a.log.Info("proxops starting",
 		slog.String("version", a.version),
 		slog.String("listen", a.cfg.Listen),
 		slog.String("branch", a.cfg.Git.Branch),
@@ -556,7 +556,7 @@ func (a *Agent) renderClusterDiff(i int, cluster string, pl *plan.Plan, res reco
 		b.WriteString("\nANOMALY: " + res.Anomaly + "\n")
 	}
 	if len(res.AnomaliesList) > 0 {
-		fmt.Fprintf(&b, "\nANOMALIES (%d live-only slots pveconform will NOT auto-remove):\n", len(res.AnomaliesList))
+		fmt.Fprintf(&b, "\nANOMALIES (%d live-only slots proxops will NOT auto-remove):\n", len(res.AnomaliesList))
 		for _, msg := range res.AnomaliesList {
 			b.WriteString("  - " + msg + "\n")
 		}
@@ -580,7 +580,7 @@ func (a *Agent) ApplyOnce(ctx context.Context, dryRun bool) (string, error) {
 // ShowStatus prints a snapshot of the in-memory status store.
 func (a *Agent) ShowStatus(ctx context.Context) error {
 	a.log.Info("status requested")
-	// One-shot `pveconform status` must be useful by itself: if no cycle has
+	// One-shot `proxops status` must be useful by itself: if no cycle has
 	// completed yet, run a read-only cycle for every cluster so the report
 	// reflects PVE + git now rather than showing an empty "no cycle" message.
 	if a.store.Last() == nil {
@@ -620,7 +620,7 @@ func (a *Agent) shutdown() error {
 	shctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := a.srv.Shutdown(shctx)
-	a.log.Info("pveconform stopped")
+	a.log.Info("proxops stopped")
 	return err
 }
 

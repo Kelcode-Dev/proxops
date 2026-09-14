@@ -27,7 +27,7 @@ func TestPVEParamsFromCopiesAllFields(t *testing.T) {
 	c := config.Defaults()
 	c.PVE.User = "root@pam"
 	c.PVE.Auth = config.AuthToken
-	c.PVE.TokenID = "pveconform"
+	c.PVE.TokenID = "proxops"
 	c.PVE.Token = "uuid-1234"
 	c.PVE.CAFile = "/etc/pve/conformance-ca.pem"
 	c.PVE.Clusters["conformance-dev"] = config.PVECluster{
@@ -43,8 +43,8 @@ func TestPVEParamsFromCopiesAllFields(t *testing.T) {
 		got.CAFile != c.PVE.CAFile || !nodesEqual(got.Nodes, []string{"pve-dev-01", "pve-dev-02"}) {
 		t.Fatalf("PVEParamsFrom = %+v — the config->client wiring dropped a field.", got)
 	}
-	if got.Credential() != "root@pam!pveconform=uuid-1234" {
-		t.Errorf("Credential() = %q, want root@pam!pveconform=uuid-1234", got.Credential())
+	if got.Credential() != "root@pam!proxops=uuid-1234" {
+		t.Errorf("Credential() = %q, want root@pam!proxops=uuid-1234", got.Credential())
 	}
 
 	// Unknown cluster names fail closed: empty params (no base-url) so no
@@ -60,7 +60,7 @@ func TestPVEParamsFromCopiesAllFields(t *testing.T) {
 func TestPVEParamsFromCredSharing(t *testing.T) {
 	c := config.Defaults()
 	c.PVE.User = "root@pam"
-	c.PVE.TokenID = "pveconform"
+	c.PVE.TokenID = "proxops"
 	c.PVE.Token = "uuid-1234"
 	c.PVE.Clusters["dev"] = config.PVECluster{BaseURL: "https://dev.example:8006"}
 	c.PVE.Clusters["prod"] = config.PVECluster{BaseURL: "https://prod.example:8006"}
@@ -86,7 +86,7 @@ log:
 pve:
   auth: token
   user: root@pve
-  token-id: pveconform
+  token-id: proxops
   token: 5f4e2c1a-0000-0000-0000-00000000beef
   clusters:
     conformance-dev:
@@ -108,7 +108,7 @@ reconcile:
 		t.Fatalf("Validate: %v", err)
 	}
 	got := app.PVEParamsFrom(c, "conformance-dev")
-	wantCred := "root@pve!pveconform=5f4e2c1a-0000-0000-0000-00000000beef"
+	wantCred := "root@pve!proxops=5f4e2c1a-0000-0000-0000-00000000beef"
 	if got.Credential() != wantCred {
 		t.Fatalf("Credential() = %q, want %q", got.Credential(), wantCred)
 	}
@@ -152,12 +152,12 @@ func TestPVEClientRoutesNodeNameThroughSingleHost(t *testing.T) {
 // TestPVEParamsFromEnv — token credential from environment only, shared by
 // every cluster.
 func TestPVEParamsFromEnv(t *testing.T) {
-	t.Setenv("PVECONFORM_PVE_TOKEN", "env-token-abc")
-	t.Setenv("PVECONFORM_PVE_USER", "root@pam")
+	t.Setenv("PROXOPS_PVE_TOKEN", "env-token-abc")
+	t.Setenv("PROXOPS_PVE_USER", "root@pam")
 	c := config.Defaults()
 	c.Git.URL = "https://x/y"
 	c.PVE.Auth = config.AuthToken
-	c.PVE.TokenID = "pveconform"
+	c.PVE.TokenID = "proxops"
 	c.PVE.Clusters["dev"] = config.PVECluster{BaseURL: testBaseURL}
 
 	config.OverlayFromEnv(c)
@@ -166,21 +166,21 @@ func TestPVEParamsFromEnv(t *testing.T) {
 		t.Errorf("Token = %q, want env-token-abc", c.PVE.Token)
 	}
 	if c.PVE.User != "root@pam" {
-		t.Errorf("User = %q, want root@pam (PVECONFORM_PVE_USER not honored)", c.PVE.User)
+		t.Errorf("User = %q, want root@pam (PROXOPS_PVE_USER not honored)", c.PVE.User)
 	}
 	got := app.PVEParamsFrom(c, "dev")
-	if got.Credential() != "root@pam!pveconform=env-token-abc" {
-		t.Errorf("Credential() = %q, want root@pam!pveconform=env-token-abc", got.Credential())
+	if got.Credential() != "root@pam!proxops=env-token-abc" {
+		t.Errorf("Credential() = %q, want root@pam!proxops=env-token-abc", got.Credential())
 	}
 	if got.BaseURL != testBaseURL {
 		t.Errorf("BaseURL = %q, want %q", got.BaseURL, testBaseURL)
 	}
 }
 
-// TestPVEParamsFromComposedTokenValue — PVECONFORM_PVE_TOKEN_VALUE wins
+// TestPVEParamsFromComposedTokenValue — PROXOPS_PVE_TOKEN_VALUE wins
 // over both the YAML pair and any previously set env token.
 func TestPVEParamsFromComposedTokenValue(t *testing.T) {
-	t.Setenv("PVECONFORM_PVE_TOKEN_VALUE", "composed@pam!ci=v1")
+	t.Setenv("PROXOPS_PVE_TOKEN_VALUE", "composed@pam!ci=v1")
 	c := config.Defaults()
 	c.Git.URL = "https://x/y"
 	c.PVE.User = "yaml@pam"
@@ -202,7 +202,7 @@ func TestPVEParamsFromComposedTokenValue(t *testing.T) {
 // PVEParams.Credential (token-mode-only) MUST remain empty so no
 // PVEAPIToken header is accidentally sent alongside a PVEAuthCookie.
 func TestTicketAuthStillWorks(t *testing.T) {
-	t.Setenv("PVECONFORM_PVE_PASSWORD", "env-pass")
+	t.Setenv("PROXOPS_PVE_PASSWORD", "env-pass")
 	c := config.Defaults()
 	c.Git.URL = "https://x/y"
 	c.PVE.Auth = config.AuthTicket
@@ -252,8 +252,8 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 
 	// Env credentials win over flags.
-	t.Setenv("PVECONFORM_PVE_USER", "env@pam")
-	t.Setenv("PVECONFORM_PVE_TOKEN", "env-token-wins")
+	t.Setenv("PROXOPS_PVE_USER", "env@pam")
+	t.Setenv("PROXOPS_PVE_TOKEN", "env-token-wins")
 	c.PVE.User = "flag@pam"
 	c.PVE.TokenID = "flag-id"
 	c.PVE.Token = "flag-token"
@@ -270,7 +270,7 @@ func TestConfigPrecedence(t *testing.T) {
 		t.Errorf("Credential = %q, want env@pam!flag-id=env-token-wins", pg.Credential())
 	}
 	if pg.TokenValue != "" {
-		t.Errorf("TokenValue = %q, want empty (no PVECONFORM_PVE_TOKEN_VALUE was set)", pg.TokenValue)
+		t.Errorf("TokenValue = %q, want empty (no PROXOPS_PVE_TOKEN_VALUE was set)", pg.TokenValue)
 	}
 }
 
@@ -331,7 +331,7 @@ func TestAgentClustersExposure(t *testing.T) {
 	c.Git.Path = t.TempDir()
 	c.PVE.Auth = config.AuthToken
 	c.PVE.User = "root@pam"
-	c.PVE.TokenID = "pveconform"
+	c.PVE.TokenID = "proxops"
 	c.PVE.Token = "deadbeef"
 	c.PVE.Clusters["conformance-dev"] = config.PVECluster{BaseURL: "https://dev.example:8006", Nodes: []string{"dev-1"}}
 	c.PVE.Clusters["prod-a"] = config.PVECluster{BaseURL: "https://prod.example:8006", Nodes: []string{"prod-1"}}

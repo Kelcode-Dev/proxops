@@ -1,16 +1,16 @@
-# M11+ example: a pveconform DiskImage — a downloadable disk-image storage
+# ProxOps DiskImage — a downloadable disk-image storage
 # artifact (PVE 9 `import` content pool: qcow2 / vmdk / raw).
 #
 # This is the third artifact kind (alongside ISO and CTTemplate) and is what
 # lets a kind: VM boot a real OS WITHOUT a template: a VM disk references it
-# via `spec.disks[].image`, and pveconform seeds the disk at create with PVE's
+# via `spec.disks[].image`, and proxops seeds the disk at create with PVE's
 # `import-from` form (`<pool>:0,import-from=<storage>:import/<filename>`).
 #
-# - No PVE numeric id: identity is `metadata.name` on the pveconform side,
+# - No PVE numeric id: identity is `metadata.name` on the proxops side,
 #   and (node, storage, filename) on the PVE side.
 # - Multi-node placement via spec.nodes: the file must exist on each declared
 #   node/storage pair.
-# - Never deleted by pveconform (artifact rule).
+# - Never deleted by proxops (artifact rule).
 # - PVE 9.2's import pool accepts .qcow2 | .vmdk | .raw (probed on
 #   conformance-dev); other extensions are rejected at download time.
 # - The PVE node must have outbound HTTPS to fetch from spec.url.

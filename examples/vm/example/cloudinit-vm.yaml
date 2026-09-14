@@ -1,4 +1,4 @@
-# M11+ example: a cloud-init VM bootstrapped from a DiskImage.
+# Cloud-init VM bootstrapped from a DiskImage.
 #
 # This is the end-to-end "create a real, bootable VM from a cloud image"
 # shape, validated against live PVE 9.2.2 on conformance-dev (the guest
@@ -7,13 +7,13 @@
 #
 # How it works:
 #   - spec.disks[].image references the DiskImage artifact "debian-13-cloud".
-#     pveconform infers a VM -> DiskImage dependency, so the image downloads
+#     proxops infers a VM -> DiskImage dependency, so the image downloads
 #     BEFORE the VM creates, and the disk is seeded at create via PVE's
 #     import-from form. An image-seeded disk has NO size field (PVE derives
 #     the volume size from the image).
 #   - spec.hardware.cloud-init claims ide2 for the cloud-init drive.
 #   - spec.cloud-init-data carries the configdrive DATA fields PVE feeds to
-#     cloud-init: ci-user, ssh-keys (public keys; pveconform percent-encodes
+#     cloud-init: ci-user, ssh-keys (public keys; proxops percent-encodes
 #     them for PVE's wire grammar), nameservers, search-domains, and a static
 #     ipconfig0.
 #   - options.agent enables the qemu guest agent so PVE can report the guest.

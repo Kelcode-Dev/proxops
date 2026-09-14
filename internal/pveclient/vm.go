@@ -53,7 +53,7 @@ func (vm *VM) Create(ctx context.Context, node string, params url.Values, start 
 		// PVE 9.2 declares `start` as a boolean form-value and REJECTS the
 		// Go-style "true" with HTTP 400 "type check ('boolean') failed - got
 		// 'true'" (probed on conformance-dev 2026-09-13). The accepted forms
-		// are 1/0 (and yes/no/on/off); pveconform uses 1.
+		// are 1/0 (and yes/no/on/off); proxops uses 1.
 		params.Set("start", "1")
 	}
 	return vm.c.Do(ctx, http.MethodPost, node, "nodes/"+node+"/qemu", params, nil)
@@ -127,9 +127,9 @@ func (vm *VM) MarkTemplate(ctx context.Context, node string, vmid int) (string, 
 
 // IsTemplate reports whether PVE reports `template=1` on the object's live
 // /config. Used by the planner to detect the VM↔TemplateVM kind-mismatch
-// shape: a pveconform VM desired against a PVE-side template. PVE 9.2 has
+// shape: a proxops VM desired against a PVE-side template. PVE 9.2 has
 // no /qemu/{id}/untemplate endpoint (probe-verified: HTTP 501 "not
-// implemented"), so pveconform surfaces this mismatch as a non-destructive
+// implemented"), so proxops surfaces this mismatch as a non-destructive
 // anomaly instead of attempting a write.
 func (vm *VM) IsTemplate(ctx context.Context, node string, vmid int) (bool, error) {
 	cfg, err := vm.Get(ctx, node, vmid)

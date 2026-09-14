@@ -5,9 +5,9 @@
 //	plan.LoadLive + plan.PlanActions → exec.Executor.Run → mock PVE
 //
 // Invariants verified:
-//   - create → PVE object appears with pveconform ownership tag + desired power
+//   - create → PVE object appears with proxops ownership tag + desired power
 //   - idempotency: a second cycle on converged state produces zero actions
-//   - prune: a pveconform-tagged live VM absent from git is deleted
+//   - prune: a proxops-tagged live VM absent from git is deleted
 //   - budget: 4 tagged orphans with budget=3 → only 3 pruned, 1 deferred
 //   - ownership gate: an untagged live VM is NEVER deleted
 //   - anomaly: desired empty but tagged live present → prunes suppressed
@@ -77,7 +77,7 @@ func newGitRepo(t *testing.T, dir string, files map[string]string) {
 		keepMap[k] = v
 	}
 	if len(keepMap) == 0 {
-		keepMap[".keep"] = "pveconform e2e placeholder\n"
+		keepMap[".keep"] = "proxops e2e placeholder\n"
 	}
 	w, werr := rep.Worktree()
 	if werr != nil {
@@ -96,7 +96,7 @@ func newGitRepo(t *testing.T, dir string, files map[string]string) {
 		}
 	}
 	if _, err := w.Commit("initial", &git.CommitOptions{
-		Author: &object.Signature{Name: "pveconform-test", Email: "t@example.com"},
+		Author: &object.Signature{Name: "proxops-test", Email: "t@example.com"},
 	}); err != nil {
 		t.Fatalf("git commit: %v", err)
 	}
@@ -108,7 +108,7 @@ func newGitRepo(t *testing.T, dir string, files map[string]string) {
 
 // relocateForM8 rewrites legacy top-level manifest fixtures into the M8
 // multi-cluster layout for the harness cluster. Top-level .yaml files that
-// hold one or more pveconform manifests become <kind>/<cluster>/<name>.yaml
+// hold one or more proxops manifests become <kind>/<cluster>/<name>.yaml
 // files; a clusters/<cluster>/resources.yaml listing the result is emitted.
 // Non-manifest files (.keep, README) and already-structured paths pass
 // through unchanged.
@@ -245,7 +245,7 @@ func m8Sanitize(s string) string {
 const node = "pve01"
 
 // apiToken is the accepted PVEAPIToken value.
-const apiToken = "root@pam!pveconform=deadbeef"
+const apiToken = "root@pam!proxops=deadbeef"
 
 // harness wires gitx(local) + mock PVE into a Reconciler.
 type harness struct {
@@ -306,7 +306,7 @@ func newHarness(t *testing.T, gitFiles map[string]string, budget int) *harness {
 		PVE: pveclient.PVEParams{
 			User:    "root@pam",
 			Auth:    "token",
-			TokenID: "pveconform",
+			TokenID: "proxops",
 			Token:   "deadbeef",
 		},
 		BaseURL:     m.URL(),
@@ -409,7 +409,7 @@ spec:
 	if cfg == nil {
 		t.Fatal("no config")
 	}
-	// pveconform ownership tag must be present on the PVE object.
+	// proxops ownership tag must be present on the PVE object.
 	if !containsTag(cfg["tags"], schema.PveOwnershipTag) {
 		t.Errorf("managed VM missing ownership tag; tags=%q", cfg["tags"])
 	}
@@ -424,14 +424,14 @@ spec:
 	}
 }
 
-// TestE2EPruneTaggedOrphan: a pveconform-tagged VM absent from git is deleted.
+// TestE2EPruneTaggedOrphan: a proxops-tagged VM absent from git is deleted.
 func TestE2EPruneTaggedOrphan(t *testing.T) {
 	h := newHarness(t, map[string]string{}, 3)
 	// Simulate a live tagged VM that is not in git.
 	h.mock.PreloadVM(node, 100, map[string]string{
 		"name":   "stale-vm",
 		"memory": "8192",
-		"tags":   "pveconform",
+		"tags":   "proxops",
 	}, "stopped")
 
 	p := h.apply(t)
@@ -463,10 +463,10 @@ func TestE2EPruneRespectsBudget(t *testing.T) {
 		"vm.yaml": vmManifest("kept", 1000),
 	}, 2) // budget = 2
 	// 1000 matches git; 100/101/102 are tagged orphans.
-	h.mock.PreloadVM(node, 1000, map[string]string{"name": "kept", "memory": "8192", "tags": "pveconform"}, "stopped")
+	h.mock.PreloadVM(node, 1000, map[string]string{"name": "kept", "memory": "8192", "tags": "proxops"}, "stopped")
 	for _, id := range []int{100, 101, 102} {
 		h.mock.PreloadVM(node, id, map[string]string{
-			"name": "stale", "memory": "8192", "tags": "pveconform",
+			"name": "stale", "memory": "8192", "tags": "proxops",
 		}, "stopped")
 	}
 	p := h.apply(t)
@@ -498,10 +498,10 @@ func TestE2EPruneUntaggedIgnored(t *testing.T) {
 	h := newHarness(t, map[string]string{
 		"vm.yaml": vmManifest("kept", 1000),
 	}, 3)
-	h.mock.PreloadVM(node, 1000, map[string]string{"name": "kept", "memory": "8192", "tags": "pveconform"}, "stopped")
+	h.mock.PreloadVM(node, 1000, map[string]string{"name": "kept", "memory": "8192", "tags": "proxops"}, "stopped")
 	h.mock.PreloadVM(node, 100, map[string]string{
 		"name": "manual-vm", "memory": "8192",
-		// no pveconform tag
+		// no proxops tag
 	}, "stopped")
 
 	p := h.apply(t)
@@ -524,7 +524,7 @@ func TestE2EAnomalySuppressesPrune(t *testing.T) {
 	// 4 tagged orphans > budget 3 → anomaly shape.
 	for _, id := range []int{100, 101, 102, 103} {
 		h.mock.PreloadVM(node, id, map[string]string{
-			"name": "last-vm", "memory": "4096", "tags": "pveconform",
+			"name": "last-vm", "memory": "4096", "tags": "proxops",
 		}, "stopped")
 	}
 
@@ -548,7 +548,7 @@ func TestE2EAnomalySuppressesPrune(t *testing.T) {
 // TestE2EDiffIsDryRun: diff shows the would-be plan but mutates nothing.
 func TestE2EDiffIsDryRun(t *testing.T) {
 	h := newHarness(t, map[string]string{}, 3)
-	h.mock.PreloadVM(node, 100, map[string]string{"name": "x", "memory": "4096", "tags": "pveconform"}, "stopped")
+	h.mock.PreloadVM(node, 100, map[string]string{"name": "x", "memory": "4096", "tags": "proxops"}, "stopped")
 
 	p := h.diff(t)
 	if p == nil {
@@ -582,7 +582,7 @@ spec:
 
 // lxcManifest returns a fully-valid minimal LXC manifest for e2e tests.
 //
-// PVE 9.x /lxc create REQUIRES `ostemplate`; pveconform encodes this as
+// PVE 9.x /lxc create REQUIRES `ostemplate`; proxops encodes this as
 // spec.template = <CTTemplate name>. To keep each fixture self-contained,
 // the test caller must include a ctt.yaml that defines "base-ctt".
 func lxcManifest(name string, cid int) string {

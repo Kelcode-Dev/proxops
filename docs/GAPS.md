@@ -1,609 +1,411 @@
-# GAPS — PVE configuration pveconform does not fully model, reconcile, or adopt
+# GAPS — PVE configuration ProxOps does not fully model, reconcile, or adopt
 
-This is a **living compatibility backlog**: PVE configuration and features that
-pveconform encounters (during reconciliation, drift, or `adopt`) but does not
-currently fully model/reconcile/adopt. Each entry records enough to prioritise
-future implementation.
+This is a **living compatibility backlog**: PVE configuration and features
+that ProxOps encounters (during reconciliation, drift, or `adopt`) but does
+not currently fully model, reconcile, or adopt. Each entry records enough to
+prioritise future implementation.
 
-It is source-controlled project documentation, **not runtime state**: pveconform
-never writes to this file. `adopt` surfaces per-run gaps in its report (the
-`Gaps` list + `Incomplete` manifests); the operator reviews and (if warranted)
-adds or updates entries here.
+It is source-controlled project documentation, **not runtime state**:
+ProxOps never writes to this file. `adopt` surfaces per-run gaps in its
+report (the `Gaps` list + `Incomplete` manifests); the operator reviews and
+(if warranted) adds or updates entries here.
+
+Closed items are removed from this file — the implementation + its
+regression tests are the record. (The project was previously named
+`pveconform`; entries below describe current behaviour under the `proxops`
+name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
 
 ## Statuses
 
 | Status | Meaning |
 |---|---|
 | `discovered` | seen in live PVE / adoption output; not yet analysed |
-| `investigated` | analysed: pveconform deliberately does not model it today, impact understood |
-| `planned` | a milestone will implement it |
-| `deliberate` | pveconform will NOT model this (by design) |
+| `investigated` | analysed: ProxOps deliberately does not model it today, impact understood |
+| `planned` | a future milestone may implement it |
+| `deliberate` | ProxOps will NOT model this (by design) |
 
 ## Conventions
 
-- **PVE field**: the wire key as PVE reports it (or the API form-value pveconform
-  would need).
-- **Priority**: `low` / `medium` / `high` — weighted by data-loss risk, drift
-  flapping risk, and adoption-fidelity impact.
+- **PVE field**: the wire key as PVE reports it (or the API form-value
+  ProxOps would need).
+- **Priority**: `low` / `medium` / `high` — weighted by data-loss risk,
+  drift flapping risk, and adoption-fidelity impact.
 
-## Gaps
+## Open gaps
 
 ### VM: live-only disk properties beyond pool/size/iothread
 
-- **Resource/area**: VM disks (`scsi*`, `virtio*, `sata*`)
-- **PVE configuration/API field**: drive property options other than
-  `iothread` — e.g. `discard=on`, `ssd=1`, `mbcache=force`, `aio`
+- **Resource/area**: VM disks (`scsi*`, `virtio*`, `sata*`)
+- **PVE field**: drive property options other than `iothread` — e.g.
+  `discard=on`, `ssd=1`, `mbcache=force`, `aio`
 - **Status**: discovered
 - **Priority**: low
-- **What is unsupported**: pveconform's owned disk surface is pool + size +
-  iothread + slot + controller. PVE reports additional drive options; adopted
-  manifests do not carry them, and `Drift` ignores them.
-- **Impact/risk**: none today (the option is not written back, so it neither
-  flaps nor mutates). An adopted VM is incomplete; an in-place PVE change of
-  `discard=` would not be visible to pveconform.
-- **Discovery source**: live conformance-dev `/qemu/{id}/config` reports during
-  M8 adopt; `schema.parseDiskInfo`.
-- **Notes**: adding a structured `Disk.Options` (map of passthrough tokens) is a
-  natural M9 candidate. Until then such options are treated as PVE-owned.
+- **What is unsupported**: ProxOps's owned disk surface is pool + size +
+  iothread + slot + controller. PVE reports additional drive options;
+  adopted manifests do not carry them, and `Drift` ignores them.
+- **Impact/risk**: none today (the option is not written back, so it
+  neither flaps nor mutates). An adopted VM is incomplete; an in-place PVE
+  change of `discard=` would not be visible to ProxOps.
+- **Discovery source**: live conformance-dev `/qemu/{id}/config` reports
+  during adoption; `schema.parseDiskInfo`.
+- **Notes**: a structured `Disk.Options` (map of passthrough tokens) would
+  close this. Until then such options are treated as PVE-owned.
+
+### VM: cpu.flags is declarative-only
+
+- **Resource/area**: VM CPU (`spec.cpu.flags`)
+- **PVE field**: `args` (PVE's free-form QEMU argument string)
+- **Status**: investigated
+- **Priority**: low
+- **What is unsupported**: `spec.cpu.flags` parses and round-trips in the
+  manifest but is **never sent on the wire** and is **not adopted** —
+  ProxOps does not map it to PVE's `args`. A live `args=` value surfaces
+  as a gap on adopt.
+- **Impact/risk**: none (no write path). Setting `cpu.flags` has no effect
+  on PVE; use `spec.extra.args` for real QEMU arguments.
+- **Discovery source**: schema review (`internal/schema/vm.go` — `Flags`
+  has no create/drift reference).
 
 ### LXC: `ostemplate` is unrecoverable after create
 
 - **Resource/area**: LXC root source (`spec.template`)
-- **PVE configuration/API field**: `ostemplate` (create-only form-value)
+- **PVE field**: `ostemplate` (create-only form-value)
 - **Status**: investigated
 - **Priority**: medium
-- **What is unsupported**: PVE does not persist the ostemplate a container was
-  booted from; `GET /nodes/{n}/lxc/{id}/config` omits it. pveconform can adopt
-  every other owned LXC field, but `spec.template` requires a human.
+- **What is unsupported**: PVE does not persist the ostemplate a container
+  was booted from; `GET /nodes/{n}/lxc/{id}/config` omits it. ProxOps can
+  adopt every other owned LXC field, but `spec.template` requires a human.
 - **Impact/risk**: adoption output is explicit about this (a Gap + an
-  `Incomplete` manifest that `resources.yaml` must not list until the operator
-  sets `spec.template`); no silent loss. A re-created LXC (after manual delete)
-  would need the template again, which a manifest-less round-trip cannot supply.
-- **Discovery source**: M8 live adopt of conformance-dev CT 9200; PVE API
+  `Incomplete` manifest that `resources.yaml` must not list until the
+  operator sets `spec.template`); no silent loss.
+- **Discovery source**: live adopt of conformance-dev CTs; PVE API
   documentation (`ostemplate` is a /lxc create parameter).
-- **Notes**: the operator's review step is part of the M8 contract
+- **Notes**: the operator's review step is part of the adoption contract
   (docs/OPERATIONS.md → "Adopting existing PVE objects").
 
 ### LXC: container mount points with pre-existing paths
 
 - **Resource/area**: LXC mount points (`mp*`)
-- **PVE configuration/API field**: `mpN=<path>:/<path>` (bind mounts) vs
+- **PVE field**: `mpN=<path>:/<path>` (bind mounts) vs
   `mpN=<pool>:<size>` (allocated volumes)
 - **Status**: discovered
 - **Priority**: low
-- **What is unsupported**: pveconform models only *allocated* LVM/dir volumes
+- **What is unsupported**: ProxOps models only *allocated* LVM/dir volumes
   (`mpN=<pool>:<size>,mp=<mountpoint>`). PVE bind-mounts of a host path
-  (`mp0=/mnt/share:/srv/data`) are a different shape not owned by pveconform.
+  (`mp0=/mnt/share:/srv/data`) are a different shape not owned by ProxOps.
 - **Impact/risk**: a bind mount on a live LXC is not adoptable and not
-  reconciled; it will not flap or be removed (pveconform never owns it).
-- **Discovery source**: PVE pct.conf(5) mpN grammar; M8 schema review.
+  reconciled; it will not flap or be removed (ProxOps never owns it).
+- **Discovery source**: PVE pct.conf(5) mpN grammar.
 - **Notes**: a future `LXCBinding` shape (path + read-only + optional
   bind-options) would close this.
 
-### ISO / CTTemplate: download URLs are not part of PVE's state
+### LXC: `keyctl` / `fuse` are adoptable but NOT convergable on PVE 9.x
 
-- **Resource/area**: ISO, CTTemplate (artifact kinds)
-- **PVE configuration/API field**: (none — PVE has no concept of
-  `spec.url` for an already-present file)
+- **Resource/area**: LXC options (`spec.options.keyctl`, `spec.options.fuse`)
+- **PVE field**: `keyctl`, `fuse`
 - **Status**: investigated
 - **Priority**: low
-- **What is unsupported**: pveconform's artifact manifests carry `spec.url`
-  (plus optional `spec.checksum`) as the *download source* pveconform uses when
-  the file is absent on a node. PVE does not report where a present file came
-  from, so `adopt` emits `spec.url: https://placeholder.invalid/...` and marks
-  the URL as a Gap.
-- **Impact/risk**: an adopted ISO/CTTemplate is *placement-faithful* (presence
-  on the observed nodes) but *re-seed-incomplete*: on a fresh node pveconform
+- **What is unsupported**: PVE 9.2's LXC create AND /config-PUT schema both
+  REJECT `keyctl=` and `fuse=` as top-level form-values (HTTP 400/403,
+  "property is not defined in schema"), and the PVE 9.x `features`
+  composite only recognizes a `nesting=<0|1>` token — `features=keyctl=1` /
+  `features=fuse=1` are 403. Yet PVE's /config report CAN carry these keys
+  (a container created via pct/webUI sets them). ProxOps therefore
+  **adopts** `keyctl`/`fuse` into `spec.options` (faithful capture) but
+  **cannot converge** a desired=on onto a live=off container — Drift
+  surfaces a non-destructive anomaly instead of submitting a
+  400-guaranteed write.
+- **Impact/risk**: none today (the option is not written back). A manifest
+  that asks to enable them on a new container fails closed at
+  create-params (`ToCreateParams` error names the blocked option).
+- **Discovery source**: probe (disposable CTs on conformance-dev, all
+  destroyed; 403 at create). Pinned:
+  `internal/schema/lxc_wire_regressions_test.go`
+  (`TestLXCToCreateParams_KeyctlTrueBlocks`,
+  `TestLXCDrift_KeyctlTrueLiveOffIsAnomalyNoWrite`).
+- **Notes**: closing this requires a PVE-side `pct set` step (out of
+  ProxOps's API surface). If PVE ever adds a wire form, drop the
+  fail-closed + anomaly and wire the token through
+  ToCreateParams/Drift.
+
+### LXC: `unprivileged` is create-only on PVE 9.x
+
+- **Resource/area**: LXC options (`spec.options.unprivileged`)
+- **PVE field**: `unprivileged`
+- **Status**: investigated
+- **Priority**: low
+- **What is unsupported**: PVE 9.2's /config-PUT returns HTTP 500 when
+  given `unprivileged=0` or `=1`. The flag is LXC-create-time-only.
+  ProxOps adopts it faithfully (`*bool`; an explicit 0 is owned, not
+  dropped) but Drift cannot flip it — a divergent `unprivileged` surfaces
+  as a non-destructive anomaly that names "a recreate is required to
+  converge".
+- **Impact/risk**: none today (never written back). Adoption output is
+  faithful; only a recreate path would ever change it.
+- **Discovery source**: probe (PUT /lxc/9200/config unprivileged=0 → 500).
+  Pinned: `TestLXCDrift_UnprivilegedTrueLiveOffIsAnomalyNoWrite`.
+
+### LXC: `ttys` / `cmode` / `cpulimit` / `cpuunits` / raw `lxc.` — not modelled
+
+- **Resource/area**: LXC options + raw config
+- **PVE field**: `ttys`, `cmode`, `cpulimit`, `cpuunits`, `lxc.`
+- **Status**: discovered
+- **Priority**: low
+- **What is unsupported**: these PVE LXC fields are not reconciled.
+  `spec.options.ttys` parses but is **never sent** (PVE 9.2 rejects
+  `ttys=` at create) and is **not adopted** — it surfaces as a gap.
+  `cmode`, `cpulimit`, `cpuunits`, and raw `lxc.` lines are likewise
+  unmodelled and surface as named gaps. (`console` IS owned + convergable;
+  `cpuunits` is not mapped from `spec.cpu.units`, which is declarative-only.)
+- **Impact/risk**: none today (no write path). Adoption reports them.
+- **Discovery source**: live `/lxc/{id}/config` reports on adopted
+  clusters. Pinned (console owned): the LXC wire-regression tests.
+- **Notes**: `cpulimit`/`cpuunits` are PVE CPU-weight knobs (defaults 0 /
+  1024); ProxOps does not adopt PVE defaults, so they surface on
+  non-default live values.
+
+### LXC: an existing CT marked as a PVE template is not modelled
+
+- **Resource/area**: LXC / CTTemplate
+- **PVE field**: `template=1` on a `/lxc/{id}/config` report
+- **Status**: discovered
+- **Priority**: low
+- **What is unsupported**: ProxOps has no "LXC template" resource kind.
+  `kind: TemplateVM` covers the qemu side (`POST /qemu/{id}/template`) only.
+  A container promoted with `pct template` is not adopted as a distinct
+  kind and is not reconciled as a template.
+- **Impact/risk**: adoption of such an object is not exercised by the
+  project's own clusters; behaviour is unverified rather than known-wrong.
+- **Discovery source**: schema review — `adoptLXC` has no `template` branch
+  (contrast `adoptVM`, which routes `template=1` to `kind: TemplateVM`).
+
+### Artifacts: download URLs are not part of PVE's state
+
+- **Resource/area**: ISO, CTTemplate, DiskImage (artifact kinds)
+- **PVE field**: (none — PVE has no concept of `spec.url` for an
+  already-present file)
+- **Status**: investigated
+- **Priority**: low
+- **What is unsupported**: ProxOps's artifact manifests carry `spec.url` as
+  the *download source* used when the file is absent on a node. PVE does
+  not report where a present file came from, so `adopt` emits
+  `spec.url: https://placeholder.invalid/...` and marks the URL as a Gap.
+  `adopt` also does not scan the `import` content pool at all, so a
+  DiskImage-backed VM adopts as a plain disk (pool+size), losing the image
+  provenance.
+- **Impact/risk**: an adopted artifact is *placement-faithful* (presence on
+  the observed nodes) but *re-seed-incomplete*: on a fresh node ProxOps
   would fail the download until the operator replaces the placeholder URL.
   This is deliberate: inventing a URL from a PVE name would be guesswork.
-- **Discovery source**: M8 live adopt; PVE storage content listing shape.
-- **Notes**: the operator's review step replaces the placeholder URL before the
-  artifact is listed in `clusters/<cluster>/resources.yaml`.
+- **Discovery source**: live adopt; PVE storage content listing shape.
+- **Notes**: the operator's review step replaces the placeholder URL before
+  the artifact is listed in `clusters/<cluster>/resources.yaml`. A future
+  `adopt` pass over `import` content would emit `kind: DiskImage`
+  manifests with placeholder URLs.
+
+### Artifacts: `spec.checksum` wire acceptance is not live-verified
+
+- **Resource/area**: ISO, CTTemplate, DiskImage
+- **PVE field**: `checksum` + `checksum_algorithm` form-values on
+  `POST /nodes/{n}/storage/{s}/download-url`
+- **Status**: discovered
+- **Priority**: low
+- **What is unsupported**: ProxOps sends `checksum` and
+  `checksum_algorithm` on the download-url request when `spec.checksum` is
+  set. Whether PVE 9.2's `download-url` endpoint accepts these exact
+  parameter names (vs PVE's documented `checksum-algorithm` spelling) has
+  **not been probed against live PVE** — the in-memory mock ignores them,
+  so CI cannot catch a rejection. Treat checksum verification as
+  best-effort until a live probe pins it.
+- **Impact/risk**: if PVE rejects the parameter, the download task fails
+  (surfaced as a failed action, retried next cycle) — it does not silently
+  skip verification.
+- **Discovery source**: code review (`internal/schema/ctt.go`,
+  `iso.go`, `diskimage.go` `ToCreateParams`). A conformance-dev probe
+  would close this.
+
+### VM: cloud-init volume on a non-IDE slot is PVE-owned
+
+- **Resource/area**: VM disks
+- **PVE field**: `<slot>=...-cloudinit,media=cdrom` where `<slot>` is
+  `scsi*`/`virtio*`/`sata*`
+- **Status**: investigated
+- **Priority**: medium
+- **What is unsupported**: ProxOps's cloud-init model is IDE-only
+  (`spec.hardware.cloud-init` → `ide2`/`ide3`). PVE 9.2 can place a
+  cloud-init cdrom volume on a data-slot bus instead — some clusters report
+  `scsi1=...:vm-NNN-cloudinit,media=cdrom` on top of `scsi0` (the root
+  disk). ProxOps cannot recreate such a slot (its create-time cloud-init
+  form goes to ide2), so adoption **excludes** `media=cdrom`-shuffled
+  slots from `spec.disks` and reports each one as a gap (`PveDiskMedia`
+  detection is slot-agnostic: `media=cdrom` or a `*-cloudinit`
+  PVE-assigned volume name).
+- **Impact/risk**: none today (the slot is never written; Drift surfaces it
+  as a non-destructive live-only anomaly, matching the data-loss guard).
+  An adopted manifest is *disk-faithful* except for the PVE-owned
+  cloud-init slot (documented in the gap report + here).
+- **Discovery source**: live `/qemu/{id}/config` reports. Pinned:
+  `TestAdopt_CloudInitOnSATAAlsoExcluded`,
+  `TestAdopt_PlainDataDiskStillAdopted`.
+- **Notes**: a future `spec.hardware.cloud-init.slot` escape hatch (a
+  cloud-init model that targets a data bus) would close this; until then
+  such PVE objects are *documented*, not re-created.
+
+### Cloud-init: `cipassword` / `cicustom` / `ciupgrade` are not modelled
+
+- **Resource/area**: VM cloud-init data
+- **PVE field**: `cipassword`, `cicustom`, `ciupgrade`
+- **Status**: investigated
+- **Priority**: low
+- **What is unsupported**: ProxOps models `ciuser`, `sshkeys` (redacted),
+  `nameserver`, `searchdomain`, and `ipconfig<N>` under
+  `spec.cloud-init-data`. `cipassword` (a secret) and `cicustom` (custom
+  user/meta/network-data references) are **not** adopted or reconciled;
+  `ciupgrade` is PVE-side-only. On adopt, `cipassword`/`sshkeys` gap
+  values are emitted as `<redacted>` (the field name still reports, so the
+  operator knows ProxOps does not model it; the value never reaches
+  stdout, logs, the gap report, or any generated manifest).
+- **Impact/risk**: none (no write path; PII is redacted at the source).
+- **Discovery source**: live `/qemu/{id}/config` reports. Pinned:
+  `TestAdopt_ZeroWritesOnProdFixtureEquivalent` (sentinel values must not
+  appear in the report; `sshkeys`/`cipassword` gap values must contain
+  `<redacted>`), `TestAgent_GeneratedOutputContainsNoCredentialMaterial`.
+
+### LXC: `cpu.units` is declarative-only
+
+- **Resource/area**: LXC CPU (`spec.cpu.units`)
+- **PVE field**: `cpuunits`
+- **Status**: investigated
+- **Priority**: low
+- **What is unsupported**: `spec.cpu.units` parses but is **never sent**
+  and **not adopted**; PVE's `cpuunits` surfaces as a gap.
+- **Impact/risk**: none (no write path).
+- **Discovery source**: code review (`internal/schema/lxc.go` — `Units`
+  has no create/drift reference).
 
 ## Deliberately not modelled (out of scope by design)
 
 These are *deliberate* non-goals recorded so future readers know they were
 considered:
 
-- **VM replication** (`repl1`, `replN`, and the replication `schedule`): pveconform
-  does not model PVE replication. It is a PVE-side DR feature with its own target
-  + schedule + failover semantics; pveconform's ownership model (idempotent
-  converge-to-git) does not map to it. Discovery source: known PVE API, recorded
-  during M8 as a pre-existing gap. Status: `deliberate`.
-- **PVE storage resources** (creating/disabling storage backends): the
-  P9 scope control keeps pveconform off storage administration; it only reads
-  storage (content listing, downloads). Status: `deliberate` for M8+.
-- **PVE firewall / netfilter**: per-VM/per-LXC firewalls and the cluster
-  firewall are untouched. pveconform models NIC `firewall=1` toggle only.
-  Status: `deliberate`.
-- **HA resources, pools, users, roles, SDN**: out of the GitOps model. Status:
+- **VM replication** (`repl1`, `replN`, and the replication `schedule`):
+  ProxOps does not model PVE replication. It is a PVE-side DR feature with
+  its own target + schedule + failover semantics; ProxOps's ownership
+  model (idempotent converge-to-git) does not map to it. Status:
   `deliberate`.
+- **PVE storage resources** (creating/disabling storage backends): scope
+  control keeps ProxOps off storage administration; it only reads storage
+  (content listing, downloads). Status: `deliberate`.
+- **PVE firewall / netfilter**: per-VM/per-LXC firewalls and the cluster
+  firewall are untouched. ProxOps models the NIC `firewall=1` toggle only.
+  Status: `deliberate`.
+- **HA resources, pools, users, roles, SDN**: out of the GitOps model.
+  Status: `deliberate`.
+- **Secure Boot policy** (`/qemu/{id}/security`): `spec.hardware.efi-disk.secure-boot`
+  is recorded + validated but NOT sent — PVE manages Secure Boot through a
+  separate endpoint. Status: `deliberate`.
+- **`bootspeed` / `netboot`**: rejected on PVE 9.2 `/config`; not modelled.
+  Status: `deliberate`.
 
-## M9 (SOPS-backed cluster configuration) — new gaps / deliberate limitations
-
-Entries added during the M9 implementation pass:
+## Credentials / runtime limitations
 
 - **External `sops` binary dependency (`internal/secrets`)**
-  - **Resource/area**: configuration layer
-  - **PVE configuration/API field**: n/a
   - **Status**: `deliberate`
-  - **What is unsupported**: pveconform shells out to `sops --decrypt`
-    (age backend); it does NOT link the SOPS Go module. When a cluster
+  - **What is unsupported**: ProxOps shells out to `sops --decrypt` (age
+    backend); it does NOT link the SOPS Go module. When a cluster
     references `secrets-file`, `sops` + `age` MUST be on PATH on the host
-    pveconform runs on; otherwise `ErrSOPSBinaryMissing` is surfaced at
-    agent construction. No KMS or GCP/Azure/Ali/Huawei/PGP backends are
+    ProxOps runs on; otherwise `ErrSOPSBinaryMissing` is surfaced at agent
+    construction. No KMS or GCP/Azure/Ali/Huawei/PGP backends are
     supported — only `age`.
-  - **Discovery source**: M9 design decision (task §16). The Go module
-    `github.com/getsops/sops/v3` would pull ~160 transitive deps; the SOPS
-    CLI is already mandatory on any host where SOPS-encrypted secrets are
-    managed (the operator encrypts with it). Documented in
-    `docs/OPERATIONS.md` § "Per-cluster SOPS secrets (M9)".
+  - **Notes**: the Go module `github.com/getsops/sops/v3` would pull ~160
+    transitive deps; the SOPS CLI is already mandatory on any host where
+    SOPS-encrypted secrets are managed. Documented in
+    `docs/OPERATIONS.md` § "Per-cluster SOPS secrets".
 
 - **SOPS identity (age private key) lifecycle / rotation**
-  - **Resource/area**: credentials
-  - **Status**: `planned` (out of M9 scope, task §20 "automatic key rotation"
-    and "automatic secret rotation" explicitly excluded)
-  - **What is unsupported**: pveconform does NOT rotate SOPS recipients.
-    Rotation is an operator workflow: add new recipient to SOPS command
-    line, re-encrypt the file, commit both. The private age key has no
+  - **Status**: `planned`
+  - **What is unsupported**: ProxOps does NOT rotate SOPS recipients.
+    Rotation is an operator workflow: add the new recipient to the SOPS
+    command line, re-encrypt the file, commit. The private age key has no
     built-in "grace period / revoke" — it is whatever the operator's
-    SOPS_AGE_KEY_FILE points at.
-  - **Discovery source**: task §16 "do not add automatic key rotation"
-    and task §20 (SCOPE CONTROL).
+    `SOPS_AGE_KEY_FILE` points at.
 
 - **No SOPS file watching / hot reload of credentials**
-  - **Resource/area**: runtime
   - **Status**: `planned`
   - **What is unsupported**: SOPS decryption happens once at agent
     construction. A rotated PVE token in the SOPS file is not picked up
-    without a process restart. Same as M8 env-var credentials: the
-    operator's job is to `systemctl restart pveconform` after rotating.
+    without a process restart. Same as env-var credentials: the operator's
+    job is to `systemctl restart proxops` after rotating.
     `poll-interval` re-diffs git + PVE but does NOT re-decrypt secrets.
-  - **Discovery source**: M9 design decision; no reason to watch a
-    SOPS file during a reconcile cycle when the same behaviour applies
-    to env vars.
 
 - **SOPS `git-token` conflict handling**
-  - **Resource/area**: git source
   - **Status**: `investigated`
-  - **What is unsupported**: If TWO cluster SOPS files both name
-    `git.token` keys that resolve to DIFFERENT values, pveconform fails
+  - **What is unsupported**: if TWO cluster SOPS files both name
+    `git.token` keys that resolve to DIFFERENT values, ProxOps fails
     closed with "git token conflict" at agent construction. This is
-    deliberate: the pveconform git source is single, one worktree, one
-    fetch token — two different values would mean "clone two different
-    git repos" which is out of scope. When two clusters share the same
-    git token value, that value is used for all.
-  - **Discovery source**: M9 implementation of `app.EffectiveGitToken`.
+    deliberate: the ProxOps git source is single — one worktree, one fetch
+    token — and two different values would mean "clone two different git
+    repos", which is out of scope. When two clusters share the same git
+    token value, that value is used for all.
 
 - **No per-cluster CA pinning via SOPS**
-  - **Resource/area**: TLS
   - **Status**: `deliberate`
-  - **What is unsupported**: `pve.ca-file` is a per-pve level setting,
-    shared across clusters. To pin a different CA per cluster, the
-    operator must use M8 style (a global config that does not reference
-    SOPS for that cluster). SOPS does not (today) have a "ca-file"
-    credential field. If multi-CA pinning becomes necessary, add a
-    `PVECredentialKeys.CAFile` + SOPS `pve-ca-file` entry and resolve it
-    alongside the user/token fields.
-  - **Discovery source**: M9 design decision; task §20 "PVE Storage
-    resources (out of scope)" implies CA pinning is a TLS concern, not
-    a PVE API concern, and the M8 global CA is sufficient for most
-    deployments.
+  - **What is unsupported**: `pve.ca-file` is a per-`pve`-level setting,
+    shared across clusters. To pin a different CA per cluster, the operator
+    must use a global config that does not reference SOPS for that
+    cluster. SOPS does not (today) have a "ca-file" credential field. If
+    multi-CA pinning becomes necessary, add a SOPS `pve-ca-file` entry and
+    resolve it alongside the user/token fields.
 
-## M10 (real prod-a adoption) — new gaps / PVE-9.2 wire findings
+## PVE 9.2 wire findings (pinned, not gaps)
 
-Entries discovered while reverse-engineering the **production** prod-a
-PVE cluster (2026-09-10, PVE 9.2.2 on node `pve01`). Probe work happened on
-the disposable conformance-dev cluster (never on prod-a, which is a
-read-only target for adoption).
+These are verified behaviours ProxOps handles correctly. They are recorded
+here so a future change does not silently regress them; each is pinned by a
+test.
 
-- **LXC: `keyctl` / `fuse` are adoptable but NOT convergable on PVE 9.x**
-  - **Resource/area**: LXC options (`spec.options.keyctl`, `spec.options.fuse`)
-  - **PVE configuration/API field**: `keyctl`, `fuse`
-  - **Status**: `investigated`
-  - **Priority**: low
-  - **What is unsupported**: PVE 9.2's LXC create AND /config-PUT schema both
-    REJECT `keyctl=` and `fuse=` as top-level form-values (HTTP 400/403,
-    "property is not defined in schema"), and the PVE 9.x `features` composite
-    only recognizes a `nesting=<0|1>` token — `features=keyctl=1` /
-    `features=fuse=1` are 403. Yet PVE's /config report CAN carry these keys
-    (a container created via pct/webUI sets them). pveconform therefore
-    **adopts** `keyctl`/`fuse` into `spec.options` (faithful capture) but
-    **cannot converge** a desired=on onto a live=off container — Drift
-    surfaces a non-destructive anomaly instead of submitting a 400-guaranteed
-    write.
-  - **Impact/risk**: none today (the option is not written back). An adopted
-    LXC that has keyctl/fuse on PVE is represented; a manifest that asks to
-    enable them on a new container fails closed at create-params
-    (`ToCreateParams` error names the blocked option).
-  - **Discovery source**: M10 probe (disposable CTs 9881/9882 on conformance-dev,
-    both destroyed; 403 at create). Pinned: `internal/schema/lxc_wire_regressions_test.go`
-    (`TestLXCToCreateParams_KeyctlTrueBlocks`,
-    `TestLXCDrift_KeyctlTrueLiveOffIsAnomalyNoWrite`).
-  - **Notes**: closing this requires a PVE-side `pct set` step (out of
-    pveconform's API surface). If PVE ever adds a wire form, drop the
-    fail-closed + anomaly and wire the token through ToCreateParams/Drift.
-
-- **LXC: `unprivileged` is create-only on PVE 9.x**
-  - **Resource/area**: LXC options (`spec.options.unprivileged`)
-  - **PVE configuration/API field**: `unprivileged`
-  - **Status**: `investigated`
-  - **Priority**: low
-  - **What is unsupported**: PVE 9.2's /config-PUT returns HTTP 500 when
-    given `unprivileged=0` or `=1` (probe: conformance-dev CT 9200). The
-    flag is LXC-create-time-only. pveconform adopts it faithfully
-    (`*bool`; an explicit 0 is owned, not dropped) but Drift cannot flip it —
-    a divergent `unprivileged` surfaces as a non-destructive anomaly that
-    names "a recreate is required to converge".
-  - **Impact/risk**: none today (never written back). Adoption output is
-    faithful; only a recreate path would ever change it.
-  - **Discovery source**: M10 probe (PUT /lxc/9200/config unprivileged=0 → 500).
-    Pinned: `TestLXCDrift_UnprivilegedTrueLiveOffIsAnomalyNoWrite`.
-  - **Notes**: prod-a LXC 111 (nfs-server) reports `unprivileged=0` —
-    the adopted manifest pins it via pointer-bool; Drift will not touch it
-    (untagged until the operator lists it, and even then the anomaly is
-    non-destructive).
-
-- **LXC: `nesting` rides the PVE 9.x `features=` composite (not a top-level key)**
-  - **Resource/area**: LXC options (`spec.options.nesting`)
-  - **PVE configuration/API field**: `nesting` (PVE 8.x) / `features=nesting=0|1` (PVE 9.x)
-  - **Status**: `investigated`
-  - **Priority**: low
-  - **What is unsupported (as a top-level wire token)**: PVE 9.2 rejects
-    top-level `nesting=` on both /lxc create (400) and /config-PUT (400). The
-    accepted form is the composite `features=nesting=<0|1>` (probe: create
-    with `features=nesting=1` → 200 + report re-echoes the token; PUT
-    `features=nesting=0` → 200). pveconform's owned `spec.options.nesting`
-    maps to that composite on both the create and drift paths; top-level
-    `nesting=` is NEVER emitted.
-  - **Impact/risk**: none today (converged through the composite). prod-a
-    LXC 203 (seaweedfs-01) reports `features=nesting=1` — adopted faithfully.
-  - **Discovery source**: M10 probe (disposable CT 9880, destroyed; conformance-dev
-    CT 9200 PUT probe). Pinned: `TestLXCToCreateParams_NestingAsComposite`,
-    `TestLXCDrift_NestingEmitsFeaturesNotTopLevel`.
-  - **Notes**: the PVE 9.x `features` composite today carries only `nesting`
-    in pveconform's known grammar (keyctl/fuse tokens → 403, see first M10
-    entry). If PVE adds new feature tokens, `Drift` would need to merge
-    them (a bare `features=nesting=X` write today cannot clobber anything
-    because no other PVE-owned feature token is known).
-
-- **VM: cloud-init volume on a non-IDE slot is PVE-owned, not a pveconform disk**
-  - **Resource/area**: VM disks
-  - **PVE configuration/API field**: `<slot>=...-cloudinit,media=cdrom` where
-    `<slot>` is `scsi*`/`virtio*`/`sata*`
-  - **Status**: `investigated`
-  - **Priority**: medium
-  - **What is unsupported**: pveconform's cloud-init model is IDE-only
-    (`spec.hardware.cloud-init` → `ide2`/`ide3`). PVE 9.2 can place a
-    cloud-init cdrom volume on a data-slot bus instead — every
-    prod-a k8s VM (100/101/102/120) + the template VM (999) report
-    `scsi1=vm_disks:vm-NNN-cloudinit,media=cdrom,size=4M` on top of
-    `scsi0=...-disk-1` (the root disk). pveconform cannot recreate such a
-    slot (its create-time cloud-init form goes to ide2), so adoption
-    **excludes** `media=cdrom`-shuffled slots from `spec.disks` and reports
-    each one as a gap (`PveDiskMedia` detection is slot-agnostic:
-    `media=cdrom` or a `*-cloudinit` PVE-assigned volume name).
-  - **Impact/risk**: none today (the slot is never written; Drift surfaces it
-    as a non-destructive live-only anomaly, matching the M7 live-only-disk
-    guard). An adopted manifest is *disk-faithful* except for the PVE-owned
-    cloud-init slot (which is documented in the gap report + GAPS.md).
-  - **Discovery source**: M10 live prod-a `/qemu/{id}/config` (VM 100 –
-    "app-prod-a" scsi1 + VM 999 scsi1, the latter a template VM see
-    next entry). Pinned: `TestAdopt_CloudInitOnSATAAlsoExcluded` (slot
-    agnosticity), `TestAdopt_PlainDataDiskStillAdopted` (the exclusion is
-    narrow: no `media=cdrom` token → the disk IS adopted).
-  - **Notes**: PVE-side, these slots were created by Talos/k8s provision
-    tooling's `qm` usage (cloud-init on `scsi1`). A future
-    `spec.hardware.cloud-init.slot` escape hatch (a cloud-init model that
-    targets a data bus) would close this; until then such PVE objects are
-    *documented*, not re-created.
-
-- **VM: PVE template VMs (`template=1`) are out of adoption scope**
-  - **Resource/area**: VM
-  - **PVE configuration/API field**: `template=1`
-  - **Status**: `investigated` (CLOSED by M11)
-  - **Priority**: n/a
-  - **What was unsupported**: pveconform had no "template VM" resource kind and
-    must not claim ownership of a clone source (a pveconform VM manifest's
-    disks are the clone *data*; converging one would risk re-creating the
-    template's own disk on the first apply → data loss). M10's adopt therefore
-    **skipped** PVE-template VMs: no manifest was written, the live object was
-    recorded on `Result.Skipped` (census stays complete), and a gap named the
-    skip.
-  - **M11 resolution**: pveconform now has `kind: TemplateVM` (first-class
-    resource). Adopt produces `kind: TemplateVM` manifests for PVE objects
-    with `template=1` under `templatevm/<cluster>/` — replacing M10's
-    skip+census behaviour. The M10 data-loss guard still holds on
-    the `kind: VM` side: a pveconform `kind: VM` desired against a
-    PVE-side `template=1` at the same `(node, vmid)` is a non-destructive
-    anomaly, never a write. PVE 9.2 has no `/qemu/{id}/untemplate` endpoint
-    (probe: `HTTP 501 "not implemented"` on conformance-dev 2026-09-11),
-    so a kind-flip on the PVE side is an operator's manual step. Pinned:
-    `TestAdopt_TemplateVMsAdoptedAsTemplateVMManifest` (M11 successor) +
-    `TestE2E_VMDesiredButPVEIsTemplateSurfacesAnomaly` +
-    `TestE2E_VMDesiredAgainstLiveNonTemplateMarksIt`.
-  - **Discovery source**: M10 live prod-a: VM 999 `tpl-almalinux-10`
-    (`template=1`, `scsi0=vm_disks:base-999-disk-1`), the Talos/almalinux
-    clone source for every prod-a VM.
-
-- **LXC: `ostype` is PVE-inferred bookkeeping, not an owned field**
-  - **Resource/area**: LXC + VM
-  - **PVE configuration/API field**: `ostype`
-  - **Status**: `investigated`
-  - **Priority**: low
-  - **What is unsupported**: PVE infers `ostype` from the installed content /
-    ostemplate — it is not a create/update form-value an operator controls.
-    M10 moved `ostype` from the gap surface to `PVEBookkeepingKeys` (together
-    with `digest`, `meta`, `vmgenid`, `smbios1`, `uuid`, `ostemplate`), so it
-    no longer surfaces as a "pveconform does not model" finding.
-  - **Impact/risk**: none (purely a gap-report noise-reduction change).
-  - **Discovery source**: M10 live prod-a (every VM + LXC reports
-    `ostype=`; none is a pveconform form-value).
-  - **Notes**: no schema change — just adopt's bookkeeping-key list.
-
-- **LXC: `cmode` / `tty` / `console` / `cpulimit` / `cpuunits` / raw `lxc.` — not modelled**
-  - **Resource/area**: LXC options + raw config
-  - **PVE configuration/API field**: `cmode`, `tty`, `console`, `cpulimit`,
-    `cpuunits`, `lxc.`
-  - **Status**: `discovered`
-  - **Priority**: low
-  - **What is unsupported**: these PVE LXC fields are not in pveconform's
-    LXCOptions / LXCExtra model. prod-a reports several of them
-    (110: `cmode=tty`, `tty=2`, `cpulimit=0`, `cpuunits=1024`; 111: also
-    `lxc = [['lxc.apparmor.profile','unconfined']]`; 110/111/203: `console=1`).
-    M10 **partially** closes this: `console` is now adopted + convergable
-    (top-level create-accepted + /config-PUT-accepted); `cmode`, `tty`,
-    `cpulimit`, `cpuunits`, and raw `lxc.` lines remain unmodelled (each
-    surfaces as a named gap).
-  - **Impact/risk**: none today (no write path). Adoption reports them;
-    operators see them in the gap set. A future `LXCOptions.TTYCount` /
-    `LXCOptions.CPULimit` (and an `LXC.LxcConf` raw escape) would close
-    cmode/tty/cpulimit/cpuunits/lxc — deliberately deferred.
-  - **Discovery source**: M10 live prod-a /lxc/{110,111,203}/config.
-    Pinned (console adopted): `TestAdopt_ZeroWritesOnProdFixtureEquivalent`.
-  - **Notes**: `cpulimit` and `cpuunits` are PVE 9.x CPU-weight knobs
-    (default 0/1024 are PVE's "no limit / default weight"); pveconform does
-    not adopt its PVE defaults, so they always surface on non-default live
-    values.
-
-- **VM: cloud-init on pveconform-VMs — no `ciuser`/`cipassword`/`sshkeys`/`ipconfig`/`nameserver` model**
-  - **Resource/area**: VM cloud-init fields (top-level PVE keys on the same
-    object as a pveconform VM)
-  - **PVE configuration/API field**: `ciuser`, `cipassword`, `sshkeys`,
-    `ipconfig0`, `nameserver`, `cicustom`, `ciupgrade`
-  - **Status**: `discovered` (CLOSED by M11 for the non-secret subset;
-    remains `discovered` for `cipassword`/`cicustom`/`ciupgrade`)
-  - **Priority**: low
-  - **What is unsupported**: pveconform's VM model does not carry
-    cloud-init user credentials / SSH keys / static-ip or DNS fields at
-    the top level (its only cloud-init surface is an ide2/ide3 volume).
-    prod-a's k8s VMs report all of these (5 VMs each: 100/101/102/120/
-    999). M10 adds **redaction** (not adoption): `sshkeys` and `cipassword`
-    gap values are emitted as `<redacted>` — the field name still reports
-    ("pveconform does not model this") but the value NEVER reaches stdout,
-    logs, the gap report, or any generated manifest.
-
-  **M11 resolution**: pveconform now models `ciuser`, `nameserver`,
-  `searchdomain`, `ipconfig<N>`, and (redacted) `sshkeys` under
-  `spec: cloud-init-data`. `cipassword` and `cicustom` remain PII / PVE-side
-  — they continue to surface as gaps with the M10 `<redacted>` value rule.
-  `ciupgrade` remains out-of-model. Pinned: `TestVMSpecCloudInitData_*`
-  (schema layer, 7 sub-tests) + e2e `TestE2ETemplateVMCreateMarksAndIsIdempotent`.
-  - **Impact/risk**: none (no write path; PII is redacted at the source,
-    the adopt layer). The operator's review step (or a future
-    `VM.CloudInit` model) would close these.
-  - **Discovery source**: M10 live prod-a /qemu/{100,101,102,120,999}/
-    /config. Pinned: `TestAdopt_ZeroWritesOnProdFixtureEquivalent`
-    (sentinel "hunter2" + "AAAAB3NzaC1yc2E" must not appear in the report;
-    `sshkeys`/`cipassword` gap values must contain `<redacted>`), and
-    `TestAgent_GeneratedOutputContainsNoCredentialMaterial`
-    (pveconform's own SOPS credential sentinels must not appear in Result
-    text, logs, warnings, skipped, incomplete, or any generated manifest).
-  - **Notes**: `ipconfig0` and `nameserver` are PVE cloud-init's own
-    static-IP model; pveconform's VM networking is the `netN` data-slot
-    property list (model+bridge+MAC+vlan+rate+firewall) — IP on a VM is PVE
-    cloud-init-owned, not pveconform net-owned.
-
-- **LXC: static `ip=`/`gw=` on LXC netX — M10 adds adoption, PVE 9.2 create-time
-  probe confirmed convergent**
-  - **Resource/area**: LXC networks
-  - **PVE configuration/API field**: `ip=<addr/prefix>`, `gw=<addr>` inside
-    the `netX` property string
-  - **Status**: `investigated` (CLOSED by M10)
-  - **Priority**: n/a (closed)
-  - **What was unsupported**: pveconform's LXCNetwork did not carry
-    `ip=`/`gw=`. M10 adds `LXCNetwork.Ip` / `LXCNetwork.Gw` (tri-string,
-    both omitempty; nil/empty = PVE decides) on the wire form, and
-    `parseLXCNetFields` / `PveLXCNetworksFromPVE` capture them on the
-    report form. PVE 9.2 create + /config-PUT both accept the
-    `netX=...,ip=...,gw=...` form (probe: disposable CT 9876 on
-    conformance-dev, created with `ip=192.168.3.100/24,gw=192.168.3.1` and
-    confirmed the report re-echoes both, then destroyed).
-  - **Impact/risk**: none (new convergent surface).
-  - **Discovery source**: M10 live prod-a /lxc/{110,111,203}/config
-    (all three carry `ip=192.168.192.1XX/18,gw=192.168.192.5`). Pinned:
-    `TestAdopt_ZeroWritesOnProdFixtureEquivalent` (asserts the adopted
-    LXC 111 has ip/gw captured, NOT a gap).
-  - **Notes**: `hwaddr` (PVE-assigned MAC) + `type` (PVE normalizes to
-    veth) remain intentionally NOT adopted (same M8 rule: PVE-owned values
-    are captured as gaps + not wired into spec.networks; a pinned MAC on
-    the manifest is respected, random MACs are omitted).
-## M11 (cloud-init data + TemplateVM kind) — new closed gaps / PVE-9.2 wire findings
-
-M11 closes the two M10/M11-era gaps above (PVE template-VMs out of adoption
-scope; VM cloud-init user/ssh/nameserver/static-ip). New entries below record
-what M11 pins.
-
-- **PVE 9.2 wire: `/qemu/{id}/untemplate` does not exist**
-  - **Resource/area**: VM / TemplateVM
-  - **PVE configuration/API field**: `POST /nodes/{n}/qemu/{id}/untemplate`
-  - **Status**: `investigated` (wire finding, pinned)
-  - **Priority**: n/a
-  - **What is unsupported**: PVE 9.2's `/qemu/{id}/untemplate` endpoint is
-    *not implemented* — probe on conformance-dev PVE 9.2.2 (VM 9100,
-    2026-09-11): `HTTP 501 "Method 'POST /nodes/pve-dev-01/qemu/9100/untemplate'
-    not implemented"`. In contrast, `/lxc/{id}/untemplate` IS implemented
-    (LXC-side M3 behaviour). pveconform must therefore not attempt a
-    kind-flip on the PVE side: the planner converts a `kind: VM` desired
-    against a PVE-side `template=1` into a non-destructive anomaly.
-  - **Impact/risk**: none (the anomaly is non-destructive; PVE-side kind-flip
-    stays a manual operator step via `qm` from a PVE host).
-  - **Discovery source**: M11 disposable VM 9100 probe on conformance-dev.
-    Pinned: `internal/pveclient/mock/mock.go` (mock 501 for
-    POST /qemu/{id}/untemplate) + `TestE2E_VMDesiredButPVEIsTemplateSurfacesAnomaly`.
-
-- **PVE 9.2 wire: `DELETE /qemu/{id}` works on a template VM**
-  - **Resource/area**: TemplateVM
-  - **Status**: `investigated`
-  - **What is new**: a pveconform-owned `TemplateVM` that is no longer
-    desired IS pruned via `DELETE /qemu/{id}`; PVE does not reject the
-    delete because the object is a template (probe on conformance-dev,
-    2026-09-11). The executor's pre-delete stop stays conservative:
-    templates PVE-side are always "stopped", so the STOP step on an already-
-    stopped template VM is a no-op.
-  - **Discovery source**: same disposable VM 9100 probe.
-
-- **PVE 9.2 wire: `POST /qemu` `cloud-init data fields` are create-and-config-
-  put-accepted**
-  - **Resource/area**: VM / TemplateVM / Cloud-Init Data
-  - **PVE configuration/API field**: `ciuser`, `sshkeys`, `nameserver`,
-    `searchdomain`, `ipconfig<N>`
-  - **Status**: `investigated`
-  - **What is pinned**: PVE 9.2 accepts these fields as `POST /qemu`
-    create form-values AND as `POST /qemu/{id}/config` update form-values,
-    in both directions:
-      - `POST ciuser=X + ipconfigN=Y` → task exit=OK, /config report shows
-        `"ciuser": "X"` / `"ipconfig0": "Y"`.
-      - `POST ciuser= + ipconfigN= + nameserver= + searchdomain=` (empty
-        strings) → task exit=OK, PVE stores a whitespace placeholder
-        (`" "`) NOT `""`, and subsequent /config report reflects that.
-    pveconform's semantics: empty desired ⇒ not owned ⇒ no write; set
-    desired ⇒ write on create-or-drift.
-  - **Impact/risk**: none (the empty-vs-nonempty desired distinction
-    prevents pveconform from overwriting a PVE-side value).
-  - **Discovery source**: M11 disposable VM 9100 probe. Pinned:
-    `TestVMSpecCloudInitData_EmptyNotOwned` + `TestVMSpecCloudInitData_Drift/empty-desired-no-write`.
-
-- **PVE 9.2 wire: ssh-keys sentinel semantics**
-  - **Resource/area**: VM cloud-init data
-  - **What is pinned**: pveconform's `spec.cloud-init-data.ssh-keys`
-    supports exactly two shapes:
-      - real keys → pveconform writes them on create/drift in PVE's
-        required wire grammar: the field VALUE percent-encoded, keys
-        joined with `%0A` (see the sshkeys wire-grammar entry below —
-        the earlier "CSV verbatim" claim was a bug: PVE rejects raw
-        values with 400 "invalid urlencoded string").
-      - `["*"]` (the M10 redacted sentinel) → pveconform does NOT write
-        `sshkeys` on create/drift, letting PVE keep its live value.
-      - Mixed real + `"*"` → `Validate()` fails closed (ambiguous: does
-        pveconform write? does it leave alone?).
-  - **Impact/risk**: none (the mixed shape is refused at parse time).
-  - **Pinned**: `TestVMSpecCloudInitData_SentinelSSHKeysNotOwned` +
-    `TestVMSpecCloudInitData_MixedSentinelFailsClosed`.
-
-## M11+ (cloud-init E2E validation) — PVE-9.2 wire findings + fixed bugs
-
-The M11 cloud-init surface was validated end-to-end on conformance-dev
-(PVE 9.2.2, 2026-09-13): a disposable VM was created from a Debian 13
-genericcloud image via the new `kind: DiskImage` + `spec.disks[].image`
-import-from path, booted with `state: started`, and the GUEST was verified
-over SSH: hostname, static IP + gateway (`ipconfig0`), DNS servers + search
-domain (`nameserver`/`searchdomain`), the `ciuser` account, and the declared
-SSH key in `authorized_keys` all matched the manifest; `cloud-init status`
-reported `done` with `DataSourceNoCloud [seed=/dev/sr0]`. A second apply
-planned zero actions; out-of-band PVE-side edits to `ciuser`/`sshkeys` were
-detected and corrected. The validation found and FIXED three real bugs:
-
-- **BUG (fixed): `start=true` rejected by PVE 9.2 — every `state: started`
-  create failed against real PVE**
-  - **Resource/area**: VM/LXC create (executor)
-  - **PVE configuration/API field**: `start`
-  - **Status**: `investigated` (CLOSED)
-  - **What was wrong**: `pveclient.VM().Create`/`LXC().Create` set
-    `start="true"`. PVE 9.2 declares `start` as a boolean form-value and
-    rejects the Go-style spelling with `HTTP 400 "type check ('boolean')
-    failed - got 'true'"` (probe: `start=true`/`yes` → 400; `start=1` →
-    create + boot OK). The mock accepted ANY non-empty `start` value, so
-    the bug was invisible to CI: every `state: started` create failed
-    against real PVE while passing every mock test. Fixed to `start=1`;
-    the mock now mirrors PVE's boolean grammar (1/0/yes/no/on/off,
-    anything else → 400).
-  - **Pinned**: `internal/pveclient/start_wire_test.go` (recording server,
-    exact wire bytes) + mock create-route rejection.
-
-- **BUG (fixed): `sshkeys` must be percent-encoded in the field value**
-  - **Resource/area**: VM cloud-init data
-  - **PVE configuration/API field**: `sshkeys`
-  - **Status**: `investigated` (CLOSED)
-  - **What was wrong**: M11 joined `ssh-keys` entries with commas and sent
-    the raw key material. PVE 9.2's API schema declares `sshkeys` as a
-    urlencoded string and decodes it before writing the config, so a raw
-    value is rejected at create/update with
-    `400 "invalid format - invalid urlencoded string: ssh-ed25519 AAAA…"`
-    (probe 2026-09-13). The correct grammar: percent-encode the value,
-    one key per line (`%0A` separators — a comma is NOT a key separator).
-    PVE's /config report returns the encoded string verbatim. pveconform
-    now encodes on write and compares the DECODED key SET on drift (so a
-    re-encode or key reorder never flaps).
-  - **Pinned**: `TestCloudInitSSHKeys_WireGrammar` +
-    `TestCloudInitSSHKeys_DriftNoFlap` +
-    `TestVMSpecCloudInitData_ToCreateParams` + live E2E
-    `TestE2E_CloudInitVMFromDiskImage`.
-
-- **BUG (fixed): cloud-init drive size-token flap**
-  - **Resource/area**: VM hardware cloud-init
-  - **What was wrong**: when PVE created the drive without a size token
-    (`ide2=local-lvm:cloudinit` reports
-    `local-lvm:vm-N-cloudinit,media=cdrom` with NO `size=`),
-    `cloudInitMatches` compared an empty live size against the desired
-    `size=4M` and rewrote the drive every cycle (stop/start churn). Now
-    a live report that omits the size token is compatible — the same
-    rule as `diskMatches`.
-  - **Pinned**: `TestCloudInitDrive_SizeTokenTolerance`.
-
-- **NEW: `kind: DiskImage` + `spec.disks[].image` (import-from)**
-  - **Resource/area**: VM disks / storage artifacts
-  - **PVE configuration/API field**: `POST /storage/{s}/download-url`
-    with `content=import`; `scsiN=<pool>:0,import-from=<volid>`
-  - **Status**: `investigated` (wire facts pinned)
-  - **What is pinned**:
-      - PVE 9.2 dir storage has an `import` content pool; download-url
-        accepts `.qcow2` | `.vmdk` | `.raw` (`.qcow`/`.img`/`.iso` → 400
-        "invalid filename or wrong extension" — note `.img` is ISO-pool
-        only).
-      - `import-from` REQUIRES the size token `0`
-        (`local-lvm:0,import-from=local:import/x.qcow2`); any other size
-        → 400 "'import-from' requires special syntax".
-      - PVE derives the volume size from the image's virtual size and
-        does NOT re-report the `import-from` option (report:
-        `local-lvm:vm-N-disk-0,size=3G`). pveconform therefore compares
-        only the POOL on a live image-seeded disk; the size is not owned.
-      - The option is also accepted on `PUT /config` (a live-slot rewrite
-        would RE-IMPORT and destroy data — pveconform never does it; the
-        M7 data-loss guard holds: empty slot → write, live slot → pool
-        compare only).
-      - A cloud-init drive on a storage whose content list lacks
-        `images` (conformance-dev's `local` = `iso,import,backup,vztmpl`)
-        creates fine but FAILS AT START with
-        "storage 'local' does not support content-type 'images'".
-        `ide2=local-lvm:cloudinit` (block storage, content `images`)
-        creates AND boots. pveconform manifests for bootable cloud-init
-        VMs must set `hardware.cloud-init.storage` to a pool that
-        carries `images` content (on a stock PVE install `local` does;
-        on conformance-dev it does not).
-  - **Pinned**: `TestDiskImage_Validate`, `TestVM_DiskImage_*`,
-    `TestE2E_CloudInitVMFromDiskImage`, mock import-pool parity.
-
-- **GAP: `import` content is not adopted**
-  - **Resource/area**: adopt
-  - **Status**: `discovered`
-  - **What is unsupported**: `pveconform adopt` scans `iso` and `vztmpl`
-    storage content but not `import`. A VM whose disk was imported from a
-    manually-downloaded image adopts as a plain disk (pool+size), losing
-    the image provenance. Deliberate for now: adoption must not invent a
-    `spec.url` it cannot observe (same rule as the artifact placeholder
-    URLs). A future `adopt` pass over `import` content would emit
-    `kind: DiskImage` manifests with placeholder URLs.
-  - **Impact/risk**: none for pveconform-created objects (the manifest
-    carries the reference); adopted VMs keep working (the import is
-    create-time bookkeeping PVE does not re-report).
+- **`/qemu/{id}/untemplate` does not exist** — PVE 9.2 returns HTTP 501
+  "not implemented" (probe on conformance-dev). ProxOps must not attempt a
+  kind-flip on the PVE side: the planner converts a `kind: VM` desired
+  against a PVE-side `template=1` into a non-destructive anomaly. Pinned:
+  `internal/pveclient/mock/mock.go` (mock 501) +
+  `TestE2E_VMDesiredButPVEIsTemplateSurfacesAnomaly`.
+- **`DELETE /qemu/{id}` works on a template VM** — a ProxOps-owned
+  `TemplateVM` that is no longer desired IS pruned via
+  `DELETE /qemu/{id}`; PVE does not reject the delete because the object is
+  a template. The executor's pre-delete stop is a no-op on an always-stopped
+  template.
+- **`start` is a boolean form-value** — PVE 9.2 rejects `start=true`
+  ("type check ('boolean') failed"); ProxOps sends `start=1`. The mock
+  mirrors the grammar (1/0/yes/no/on/off, else 400). Pinned:
+  `internal/pveclient/start_wire_test.go`.
+- **`sshkeys` must be percent-encoded** — PVE 9.2 declares `sshkeys` a
+  urlencoded string; a raw value is rejected with 400 "invalid urlencoded
+  string". ProxOps percent-encodes the value (keys joined `%0A`) on write
+  and compares the DECODED key SET on drift. Pinned:
+  `TestCloudInitSSHKeys_WireGrammar`, `TestCloudInitSSHKeys_DriftNoFlap`.
+- **cloud-init drive needs an `images`-content storage** — a drive on a
+  storage whose content list lacks `images` creates fine but FAILS AT
+  START ("storage 'local' does not support content-type 'images'").
+  Bootable cloud-init VMs must set `hardware.cloud-init.storage` to a pool
+  that carries `images`. Pinned: `TestCloudInitDrive_SizeTokenTolerance`
+  (size-token tolerance) + the DiskImage e2e.
+- **`import-from` requires size token `0`** —
+  `local-lvm:0,import-from=local:import/x.qcow2`; any other size → 400.
+  PVE derives the volume size from the image and does NOT re-report
+  `import-from`, so ProxOps compares only the POOL on a live image-seeded
+  disk. Pinned: `TestDiskImage_Validate`, `TestVM_DiskImage_*`,
+  `TestE2E_CloudInitVMFromDiskImage`.
+- **artifact filename-extension contract** — `download-url` validates the
+  extension against `content`: import accepts `.qcow2`/`.vmdk`/`.raw`;
+  iso accepts `.iso`/`.img`; vztmpl accepts the tar family. Anything else
+  is 400 "wrong file extension". Enforced at parse time. Pinned:
+  `internal/schema/artifact_ext.go`.
+- **`nesting` rides the `features=` composite** — PVE 9.2 rejects
+  top-level `nesting=` on create (400) and PUT (400); the accepted form is
+  `features=nesting=<0|1>`. ProxOps emits the composite on both paths and
+  never a top-level `nesting=`. Pinned:
+  `TestLXCToCreateParams_NestingAsComposite`,
+  `TestLXCDrift_NestingEmitsFeaturesNotTopLevel`.
+- **LXC static `ip=`/`gw=` inside `netX`** — PVE 9.2 create + PUT accept
+  the `netX=...,ip=...,gw=...` form; ProxOps owns them end-to-end. Pinned:
+  the LXC wire-regression tests.

@@ -33,6 +33,6 @@ func TestM11_TemplDrift_SimulateProd999(t *testing.T) {
 		t.Logf("  update %q -> %v", k, v)
 	}
 	if !changed {
-		t.Errorf("Drift: changed=false; expected tags to claim pveconform (PVE 999 has no tags key)")
+		t.Errorf("Drift: changed=false; expected tags to claim proxops (PVE 999 has no tags key)")
 	}
 }

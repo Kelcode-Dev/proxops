@@ -192,7 +192,7 @@ func TestE2ECTTAlreadyPresentNoop(t *testing.T) {
 
 // TestE2EAbsentPruneNeverTouchesArtifacts: removing every artifact manifest
 // while the PVE-side files remain present must produce zero prunes —
-// pveconform's conservative artifact-deletion guarantee.
+// proxops's conservative artifact-deletion guarantee.
 func TestE2EAbsentPruneNeverTouchesArtifacts(t *testing.T) {
 	// Seed the PVE side with both an ISO and a vztmpl.
 	h := newHarness(t, map[string]string{}, 3)

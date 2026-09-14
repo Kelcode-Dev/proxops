@@ -5,7 +5,7 @@ import "strings"
 // nameserverEquals reports whether two `nameserver` wire forms match
 // PVE-fully. PVE accepts comma-separated on input (e.g. "1.1.1.1,8.8.8.8")
 // but reports space-separated on /config (e.g. "1.1.1.1 8.8.8.8").
-// pveconform normalizes both sides so PVE's whitespace reformat does not
+// proxops normalizes both sides so PVE's whitespace reformat does not
 // trip drift.
 func nameserverEquals(current, want string) bool {
 	if current == "" && want == "" {

@@ -1,4 +1,4 @@
-// Package main provides the pveconform CLI. Configuration is loaded from
+// Package main provides the proxops CLI. Configuration is loaded from
 // defaults + an optional YAML file + flags + env, validated, then handed to the
 // appropriate subcommand. Flags only override their config-file values when
 // explicitly set by the user (pflag.Changed).
@@ -72,9 +72,9 @@ func newRootCmd() *cobra.Command {
 	var gf globalFlags
 
 	root := &cobra.Command{
-		Use:   "pveconform",
-		Short: "Reconcile Proxmox with Git (Git -> pveconform -> PVE API).",
-		Long: "pveconform is a GitOps reconciler for Proxmox VE. It watches a git\n" +
+		Use:   "proxops",
+		Short: "Reconcile Proxmox with Git (Git -> proxops -> PVE API).",
+		Long: "proxops is a GitOps reconciler for Proxmox VE. It watches a git\n" +
 			"repository as the source of truth and continuously converges every\n" +
 			"configured Proxmox cluster to match it, using the PVE API (no shell-\n" +
 			"out, no state file, no Kubernetes).\n" +
@@ -88,7 +88,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	root.PersistentFlags().StringVar(&gf.configPath, "config", envOr("PVECONFORM_CONFIG", ""), "path to pveconform.yaml")
+	root.PersistentFlags().StringVar(&gf.configPath, "config", envOr("PROXOPS_CONFIG", ""), "path to proxops.yaml")
 	root.PersistentFlags().StringVar(&gf.logLevel, "log-level", "", "override log level (debug|info|warn|error)")
 	root.PersistentFlags().StringVar(&gf.listenAddr, "listen", "", "HTTP bind for /healthz /metrics /status")
 	root.PersistentFlags().StringVar(&gf.gitURL, "git-url", "", "git repository URL (https)")
@@ -164,7 +164,7 @@ func newRunCmd(gf *globalFlags, root *cobra.Command) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			log.Info("pveconform starting", "version", agent.Version(), "listen", agent.Config().Listen, "clusters", agent.Clusters())
+			log.Info("proxops starting", "version", agent.Version(), "listen", agent.Config().Listen, "clusters", agent.Clusters())
 
 			ctx, stop := signal.NotifyContext(c, syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
@@ -172,7 +172,7 @@ func newRunCmd(gf *globalFlags, root *cobra.Command) *cobra.Command {
 			if err := agent.RunWatch(ctx); err != nil {
 				return err
 			}
-			log.Info("pveconform stopped")
+			log.Info("proxops stopped")
 			return nil
 		},
 	}
@@ -255,8 +255,8 @@ func newStatusCmd(gf *globalFlags, root *cobra.Command) *cobra.Command {
 	}
 }
 
-// newAdoptCmd implements `pveconform adopt` (M8). READ-ONLY: it inspects a
-// single named PVE cluster and writes pveconform YAML into a git working
+// newAdoptCmd implements `proxops adopt` (M8). READ-ONLY: it inspects a
+// single named PVE cluster and writes proxops YAML into a git working
 // tree, suitable for committing. It never mutates PVE.
 //
 // Explicit cluster selection is required: adopt cannot "pick a cluster for
@@ -266,10 +266,10 @@ func newAdoptCmd(gf *globalFlags, root *cobra.Command) *cobra.Command {
 	var cf adoptFlags
 	cmd := &cobra.Command{
 		Use:   "adopt",
-		Short: "Generate pveconform YAML from one PVE cluster's live objects (read-only).",
+		Short: "Generate proxops YAML from one PVE cluster's live objects (read-only).",
 		Long: "Adopt inspects one configured PVE cluster (its endpoint + node " +
 			"allowlist), reads live VM / LXC / ISO / CTTemplate objects, and " +
-			"writes a pveconform YAML manifest for each into the git work " +
+			"writes a proxops YAML manifest for each into the git work " +
 			"tree under <kind>/<cluster>/. The command is READ-ONLY with " +
 			"respect to PVE: it does not create, modify, delete, or tag any " +
 			"PVE object.\n" +

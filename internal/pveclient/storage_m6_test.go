@@ -54,7 +54,7 @@ func TestStorageDownloadURLPath(t *testing.T) {
 		gotFilename = r.PostForm.Get("filename")
 		gotContent = r.PostForm.Get("content")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":"UPID:pve01:00001337:0110:abcd:download:boot.iso:root@pam!pveconform:"}`))
+		_, _ = w.Write([]byte(`{"data":"UPID:pve01:00001337:0110:abcd:download:boot.iso:root@pam!proxops:"}`))
 	})
 	c := newTestClient(t, h)
 
@@ -93,7 +93,7 @@ func TestStorageDownloadVZTMPLContent(t *testing.T) {
 		_ = r.ParseForm()
 		gotContent = r.PostForm.Get("content")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":"UPID:pve01:00001337:0111:abcd:download:tmpl.vztmpl:root@pam!pveconform:"}`))
+		_, _ = w.Write([]byte(`{"data":"UPID:pve01:00001337:0111:abcd:download:tmpl.vztmpl:root@pam!proxops:"}`))
 	})
 	c := newTestClient(t, h)
 	if _, err := c.Storage().Download(context.Background(), "pve01", "local",
@@ -130,7 +130,7 @@ func TestStorageDownloadOmitsContentWhenEmpty(t *testing.T) {
 
 // TestStorageDownloadLegacyPathReturns501 drives an httptest PVE exactly as
 // PVE 9.2 behaves (501 on the legacy /download path, 200 on /download-url)
-// and asserts pveconform's Storage.Download still succeeds. If someone
+// and asserts proxops's Storage.Download still succeeds. If someone
 // regresses the pveclient to the old path, this test fails with the same
 // 501 the real cluster returns.
 func TestStorageDownloadLegacyPathReturns501(t *testing.T) {
@@ -165,6 +165,6 @@ func TestStorageDownloadLegacyPathReturns501(t *testing.T) {
 	}
 	if _, err := c.Storage().Download(context.Background(), "pve01", "local",
 		"https://x/y.iso", "y.iso", "iso"); err != nil {
-		t.Fatalf("Download against 501-on-legacy server: %v — pveconform is still calling the legacy /download path", err)
+		t.Fatalf("Download against 501-on-legacy server: %v — proxops is still calling the legacy /download path", err)
 	}
 }

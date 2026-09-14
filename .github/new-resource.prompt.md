@@ -1,5 +1,5 @@
 ---
-description: Prepare PVE Conform for a release
+description: Prepare ProxOps for a release
 ---
 
 Prepare the repository for a release.

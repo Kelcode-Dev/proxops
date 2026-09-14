@@ -1,6 +1,6 @@
 // Package secrets decrypts SOPS/age-backed cluster credential material for
-// pveconform. It is the ONLY place that touches encrypted secret bytes. The
-// plaintext it returns is held in memory only: pveconform never writes a
+// proxops. It is the ONLY place that touches encrypted secret bytes. The
+// plaintext it returns is held in memory only: proxops never writes a
 // decrypted secrets file to disk, and nothing in this package or in the
 // config / app / CLI layers logs, diffs, statuses, or exports the values
 // (task §2: no plaintext secret in any output channel).
@@ -16,18 +16,18 @@
 //     hidden;
 //   - the standard SOPS age identity mechanism (SOPS_AGE_KEY_FILE /
 //     SOPS_AGE_KEY / AGE_KEY_FILE) is honoured by inheriting the process env —
-//     pveconform itself never sets or reads key material (task §7, §8);
+//     proxops itself never sets or reads key material (task §7, §8);
 //   - "decrypt into memory only" is structurally true: the sops child process
-//     prints the plaintext; pveconform reads it once into a map. If a
-//     secrets-file is NOT configured, pveconform never invokes sops at all.
+//     prints the plaintext; proxops reads it once into a map. If a
+//     secrets-file is NOT configured, proxops never invokes sops at all.
 //
-// Bootstrap / chicken-and-egg (task §8, documented explicitly): pveconform
+// Bootstrap / chicken-and-egg (task §8, documented explicitly): proxops
 // obtains the age IDENTITY (private key) ONLY from outside the encrypted
 // repository — the operator's process environment (SOPS_AGE_KEY_FILE or
 // SOPS_AGE_KEY). The GitOps repository holds the encrypted file (whose
 // `sops:` metadata names the PUBLIC age recipient) and all non-secret config;
 // the private key lives on the operator's workstation or a key service, never
-// in git. pveconform adds no alternative (no self-hosted vault, no in-repo
+// in git. proxops adds no alternative (no self-hosted vault, no in-repo
 // key, no key-file flag that would accept a repo path).
 package secrets
 
@@ -51,13 +51,13 @@ import (
 var (
 	// ErrSOPSBinaryMissing: a secrets-file is configured but the sops
 	// executable is not on PATH.
-	ErrSOPSBinaryMissing = errors.New("sops binary not found on PATH; install Mozilla SOPS + age, or run pveconform without a configured secrets-file")
+	ErrSOPSBinaryMissing = errors.New("sops binary not found on PATH; install Mozilla SOPS + age, or run proxops without a configured secrets-file")
 
 	// ErrUnencryptedSecrets: the configured file parses but carries no sops:
 	// metadata — i.e. somebody committed a PLAINTEXT credential file.
-	// pveconform refuses to use it (task §13: do not silently accept an
+	// proxops refuses to use it (task §13: do not silently accept an
 	// unencrypted secrets file as valid configuration).
-	ErrUnencryptedSecrets = errors.New("configured secrets file is not SOPS-encrypted (no sops metadata); a cluster secrets file must be encrypted with sops — pveconform refuses plaintext credential files")
+	ErrUnencryptedSecrets = errors.New("configured secrets file is not SOPS-encrypted (no sops metadata); a cluster secrets file must be encrypted with sops — proxops refuses plaintext credential files")
 
 	// ErrNoIdentity: sops reported that no usable age identity is present in
 	// the environment (SOPS_AGE_KEY_FILE / SOPS_AGE_KEY unset or empty).
@@ -86,7 +86,7 @@ var (
 
 // sopsTimeout bounds one decryption invocation. A well-provisioned sops age
 // decrypt is milliseconds; the generous bound catches a wedged key agent
-// without making pveconform hang indefinitely.
+// without making proxops hang indefinitely.
 const sopsTimeout = 30 * time.Second
 
 // SecretsFile is the decrypted result of one SOPS file: the flat top-level
@@ -121,10 +121,10 @@ func (s SecretsFile) Len() int { return len(s.Values) }
 // top-level `secrets:` mapping, in memory only, via the external sops binary.
 //
 // Security properties:
-//   - Plaintext is never written to disk by pveconform.
+//   - Plaintext is never written to disk by proxops.
 //   - Key material (the private age key) enters only through the inherited
 //     process environment (SOPS_AGE_KEY_FILE / SOPS_AGE_KEY / AGE_KEY_FILE);
-//     pveconform never sets, reads, or copies it.
+//     proxops never sets, reads, or copies it.
 //   - Errors are classified into the sentinel set above plus, for unknown
 //     failures, a short redacted hint; a decrypted value is never embedded.
 func DecryptFile(path string) (SecretsFile, error) {
@@ -191,7 +191,7 @@ func decryptWithSops(path string) (map[string]string, error) {
 		"--output-type", "json",
 		path)
 	// Inherit the operator's process environment: this is the standard
-	// SOPS age identity mechanism. Nothing sensitive set by pveconform (no
+	// SOPS age identity mechanism. Nothing sensitive set by proxops (no
 	// PVE tokens, no git tokens) is passed to sops, because the env is the
 	// operator's own — but we deliberately do not ADD anything.
 	cmd.Env = os.Environ()
@@ -209,7 +209,7 @@ func decryptWithSops(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("%w: %v", ErrMalformedDocument, err)
 	}
 	if doc.Secrets == nil {
-		return nil, fmt.Errorf("%w: %s did not contain a top-level `secrets:` mapping (point secrets-file at the SOPS file, not the pveconform config)",
+		return nil, fmt.Errorf("%w: %s did not contain a top-level `secrets:` mapping (point secrets-file at the SOPS file, not the proxops config)",
 			ErrMalformedDocument, shorten(path))
 	}
 	vals := make(map[string]string, len(doc.Secrets))

@@ -1,11 +1,11 @@
 # Architecture
 
-`pveconform` is a single-process, multi-cluster GitOps reconciler for
+`proxops` is a single-process, multi-cluster GitOps reconciler for
 Proxmox VE. One agent reads one git repository and converges **every
 configured PVE cluster**:
 
 ```
-                          pveconform agent
+                          proxops agent
         +-----------------------------------------------------------+
         |        config:  pve.clusters = {conformance-dev, ...}     |
         |                                                          |
@@ -40,7 +40,7 @@ order. Statelessness is deliberate: restart = full re-diff.
 
 ## Multi-cluster composition
 
-The cluster boundary is the M8 invariant that keeps multi-cluster operation
+The cluster boundary is the invariant that keeps multi-cluster operation
 safe:
 
 ```
@@ -53,7 +53,7 @@ PVE resource        ->  only objects on those nodes are ever read/written/pruned
 
 - **Composition is explicit**: a cluster reconciles exactly the resource
   files its `resources.yaml` lists. There is no overlay, inheritance, or
-  merge (pveconform does not use Kustomize and deliberately avoids
+  merge (ProxOps does not use Kustomize and deliberately avoids
   Kustomize semantics).
 - **Reusable bases**: `<kind>/base/*.yaml` are shared *by reference*: any
   number of clusters may list the same file. Ownership is by composition,
@@ -61,7 +61,7 @@ PVE resource        ->  only objects on those nodes are ever read/written/pruned
 - **Cluster-specific resources**: `<kind>/<cluster>/*.yaml` are only
   consumed by the cluster that lists them.
 - **Fail-closed identity**: a composition with no `pve.clusters` entry (or a
-  configured cluster with no composition) aborts at start -- pveconform can
+  configured cluster with no composition) aborts at start -- ProxOps can
   never reconcile an endpoint whose desired set is unknown.
 - **No cross-cluster dependencies**: a structured edge
   (`VM.cdrom.iso`, `LXC.template`) or `depends-on` annotation resolves
@@ -77,43 +77,40 @@ PVE resource        ->  only objects on those nodes are ever read/written/pruned
   two clusters sharing one endpoint -- prune scoping is endpoint-based, and
   merging inventories would be a footgun.)
 
-**M9 (SOPS-backed cluster configuration):** the pveconform process
-configuration moves INTO the GitOps repository, per cluster:
+**Cluster-local configuration (SOPS):** the ProxOps process
+configuration can live INSIDE the GitOps repository, per cluster:
 
 ```
-clusters/<cluster>/config.yaml        # the pveconform --config for this cluster
+clusters/<cluster>/config.yaml        # the proxops --config for this cluster
 clusters/<cluster>/secrets.sops.yaml  # SOPS/age-encrypted PVE + git creds
-clusters/<cluster>/resources.yaml     # M8 composition (unchanged)
+clusters/<cluster>/resources.yaml     # resource composition
 ```
 
-A cluster-local `config.yaml` is a *complete* pveconform config: it carries
+A cluster-local `config.yaml` is a *complete* ProxOps config: it carries
 the shared application fields (`log`, `git`, `reconcile`, `listen`,
 `data-dir`) PLUS one entry in `pve.clusters` for that cluster (its
-`base-url`, `nodes` allowlist, and — M9 — `secrets-file` + `secrets`) .
-The M8 root-level `config/pveconform.yaml` (bootstrap, multi-cluster,
+`base-url`, `nodes` allowlist, and `secrets-file` + `secrets`).
+The root-level `config/proxops.yaml` (bootstrap, multi-cluster,
 env credentials) remains valid for hosts that have not adopted the
-GitOps-local config. pveconform no longer requires a PVE credential in the
+GitOps-local config. ProxOps no longer requires a PVE credential in the
 process environment when a cluster references one via SOPS.
 
-Layer behaviour (M9):
+Layer behaviour:
 - **config.Load** resolves `secrets-file` relative to the config file's
   own directory, so the same cluster-local config works from any CWD
-  (no silent CWD dependence; task §5 "no implicit magic, no cluster
-  guessing").
+  (no silent CWD dependence; no implicit magic, no cluster guessing).
 - **`git.path: "."`** is a sentinel meaning "reconcile from the git
   worktree that contains this config file". Load canonicalises the
   `--config` path to absolute first, then walks up from the config
   file's own directory to the nearest `.git` marker; an absolute
-  `git.path` still works for mount / rsync setups (task §18 "fresh
-  checkout + external identity → pveconform → decrypt in memory →
-  conformance-dev"). The walk-up is config-anchored, not
-  CWD-anchored: the same cluster-local config behaves identically no
-  matter what directory pveconform is launched from.
+  `git.path` still works for mount / rsync setups. The walk-up is
+  config-anchored, not CWD-anchored: the same cluster-local config
+  behaves identically no matter what directory ProxOps is launched from.
 - **`pve.clusters.<name>.secrets`** is a closed reference block:
   `pve.{user,token-id,token,password}` and `git.token`, each naming one
   top-level key under the decrypted SOPS document's `secrets:` mapping.
-  It is NOT a templating language (task §3); every referenced key must
-  exist non-empty in the SOPS file or pveconform fails closed.
+  It is NOT a templating language; every referenced key must
+  exist non-empty in the SOPS file or ProxOps fails closed.
 - **Config.ResolveSOPS** (in `internal/app.New`) decrypts every SOPS
   cluster's file, in memory, at startup, and populates
   `c.SopsResolved[<cluster>]` with the PVE user / token-id / token /
@@ -126,19 +123,19 @@ Layer behaviour (M9):
   credential `user@realm!tokenid=uuid`) is SUPPRESSED for any SOPS
   cluster — the SOPS-resolved trio is authoritative. One PVE user +
   token can serve multiple SOPS clusters, but the SOPS values are
-  per-cluster (task §12 "cluster A cannot accidentally consume
-  cluster B's secret configuration").
+  per-cluster (cluster A cannot accidentally consume cluster B's
+  secret configuration).
 - **EffectiveGitToken** picks the single git fetch token the shared
   `gitx.Source` uses: SOPS-resolved first; env / YAML otherwise. Two
   different SOPS-resolved git tokens fail closed with a "git token
   conflict" error.
-- **`internal/secrets`** (M9-new) owns the SOPS age-identity + binary
+- **`internal/secrets`** owns the SOPS age-identity + binary
   call. It invokes the external `sops` (age backend) binary via
   `exec.LookPath("sops")` in a 30s-budgeted `exec.CommandContext`. The
   command runs with a copy of the operator's `os.Environ()` so
   `SOPS_AGE_KEY_FILE` / `SOPS_AGE_KEY` / `AGE_KEY_FILE` reach sops' age
-  backend untouched. pveconform never sets or inspects those variables
-  itself (task §8). The sops child process's STDOUT (the decrypted
+  backend untouched. ProxOps never sets or inspects those variables
+  itself. The sops child process's STDOUT (the decrypted
   YAML) goes through a JSON parse into a
   `map[string]string` — the in-memory `Config.SopsResolved` map is
   populated from that and is tagged `json:"-" yaml:"-"` so no
@@ -148,17 +145,17 @@ Layer behaviour (M9):
   `ErrMalformedDocument` + a redacted exit-code + hint for anything
   else. sops's OWN stderr is NOT re-emitted verbatim (only a <= 120-char,
   token-redacted hint) — defense against a sops version / hostile
-  document leaking secret material into pveconform's error text
-  (task §13 "error messages identify the problem without printing
-  secret contents").
+  document leaking secret material into ProxOps's error text
+  (error messages identify the problem without printing
+  secret contents).
 - **The gitx source** is built AFTER SOPS resolution, so its
   `gitx.Options.Token` carries the SOPS-resolved git token
   (when one was referenced).
 
-The M8 root `.config.yaml` / `config/pveconform.yaml` bootstrap shape is
+The root `.config.yaml` / `config/proxops.yaml` bootstrap shape is
 unchanged: `pve.{auth,user,token-id,token,token-value,password,ca-file}`
 + `pve.clusters.<name>.{base-url,nodes}`. A cluster that sets
-`secrets-file` adds the M9 shape but does NOT re-declare the shared
+`secrets-file` adds the SOPS shape but does NOT re-declare the shared
 `pve.user` / `pve.token-id` / `pve.token` in the SOPS reference — the
 SOPS document supplies them via the `secrets:` block. The shared `pve.*`
 fields still act as bootstrap credentials for any SOPS-less cluster in
@@ -199,7 +196,7 @@ Index for exactly that cluster's composed files:
   resolution, by construction).
 
 `parse.BuildIndex` (whole-tree walk) still exists for the examples check and
-test tooling; the M8 runtime always uses the cluster-scoped builders.
+test tooling; the runtime always uses the cluster-scoped builders.
 
 ### pveclient -- thin PVE JSON API client
 
@@ -230,7 +227,7 @@ read-only invariant (zero writes).
 cluster's planner (neither a prune candidate nor a skip entry). The rest of
 the safety model is unchanged:
 
-- **Ownership gate**: `pveconform` tag required for any delete.
+- **Ownership gate**: `proxops` tag required for any delete.
 - **Prune budget**: max N *per cluster* per cycle (default 3).
 - **Empty-desired anomaly guard**: 0 desired of a kind + more tagged live
   objects than the budget -> prunes for that kind suppressed,
@@ -252,9 +249,9 @@ Actions run in plan order; stop-required flows: Stop -> Update -> Start
 the next cycle re-diffs. Every `statusx.Object` record is tagged with the
 cluster.
 
-### adopt -- PVE -> pveconform YAML (M8, read-only)
+### adopt -- PVE -> ProxOps YAML (read-only)
 
-`pveconform adopt --cluster <name>`:
+`proxops adopt --cluster <name>`:
 
 1. Resolves the cluster in `pve.clusters`; uses that cluster's endpoint and
    node allowlist (unknown cluster -> error; the command does not pick a
@@ -262,14 +259,17 @@ cluster.
 2. Enumerates nodes (allowlist; only when the allowlist is empty does it
    query `/cluster/nodes`).
 3. Reverse-engineers every VM and LXC on those nodes from their PVE
-   `/config` report into a pveconform manifest, and every `iso`/`vztmpl`
-   storage artifact into an ISO/CTTemplate manifest (same filename on
-   several allowed nodes -> one manifest with `spec.nodes` covering them).
+   `/config` report into a ProxOps manifest, every PVE-side template
+   (`template=1`) into a `kind: TemplateVM` manifest, and every
+   `iso`/`vztmpl` storage artifact into an ISO/CTTemplate manifest (same
+   filename on several allowed nodes -> one manifest with `spec.nodes`
+   covering them). `import` content (DiskImage) is not adopted — see
+   GAPS.md.
 4. Writes each manifest under `<kind>/<cluster>/` (cluster-specific output by
    design -- the object was observed on that cluster; promoting something to
    `<kind>/base/` is a deliberate human refactoring decision, never done by
    adopt).
-5. **Gap reporting**: every PVE `/config` key pveconform does not model (and
+5. **Gap reporting**: every PVE `/config` key ProxOps does not model (and
    that is not PVE bookkeeping: `digest`, `meta`, `vmgenid`, `smbios1`, ...)
    is listed as a `Gap`. PVE-assigned MACs are not pinned (round-trip
    contract: PVE owns random MACs); things PVE does not report back
@@ -285,10 +285,12 @@ cluster.
    anything in PVE.
 
 The generated YAML is suitable for a **round-trip**: PVE -> adopt -> YAML ->
-`resources.yaml` -> `pveconform diff` -> zero unexpected drift for anything
-pveconform models. The live-only disk fixture (VM 9101's `scsi1` on
-conformance-dev) is captured into `spec.disks` by adopt, so the round-trip
-represents *both* disks instead of silently losing the anomaly.
+`resources.yaml` -> `proxops diff` -> zero unexpected drift for anything
+ProxOps models. Live-only data disks are captured into `spec.disks` so the
+round-trip represents them; PVE-owned cloud-init volumes on non-IDE slots
+are deliberately EXCLUDED from `spec.disks` and reported as gaps instead
+(ProxOps cannot recreate such a slot, so claiming it would be a lie the
+planner could not honour).
 
 ### statusx + server
 
@@ -303,14 +305,14 @@ the multi-cluster object table; `GET /healthz` is ready once a full
 pveclient + reconciler pair **per configured cluster** (deterministic
 sorted order), one HTTP server. Command surface:
 
-- `pveconform run` -- daemon: every tick, all clusters in order; a cluster's
+- `proxops run` -- daemon: every tick, all clusters in order; a cluster's
   abort does not block the others.
-- `pveconform diff` -- read-only plan per cluster, labelled
+- `proxops diff` -- read-only plan per cluster, labelled
   `=== <cluster> ===`.
-- `pveconform apply` -- one converge cycle per cluster; non-zero exit when
+- `proxops apply` -- one converge cycle per cluster; non-zero exit when
   any cluster aborts.
-- `pveconform status` -- per-cluster convergence table.
-- `pveconform adopt --cluster <name>` -- PVE -> YAML for exactly one named
+- `proxops status` -- per-cluster convergence table.
+- `proxops adopt --cluster <name>` -- PVE -> YAML for exactly one named
   cluster (required flag; no implicit default). `--dry-run`/`--diff` still
   exist on `apply`.
 

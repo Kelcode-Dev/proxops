@@ -1,4 +1,4 @@
-// Package statusx is pveconform's in-memory convergence status store.
+// Package statusx is proxops's in-memory convergence status store.
 //
 // There is no on-disk state (plan §7): the store is rebuilt from git + PVE
 // each process start and reflects only the live process's reconcile results.
@@ -31,7 +31,7 @@ const (
 	Pruned State = "pruned"
 	// Skipped: not acted on this cycle (deferred / untagged / read-only).
 	Skipped State = "skipped"
-	// Anomalous: live-only PVE devices that pveconform intentionally does
+	// Anomalous: live-only PVE devices that proxops intentionally does
 	// NOT auto-delete; surfaced to the operator on /status.
 	Anomalous State = "anomalous"
 	// InProgress: an action is underway.
@@ -164,7 +164,7 @@ func (s *Store) BumpPruneDeferred() {
 }
 
 // BumpAnomaly increments the anomaly counter on the current cycle.
-// Anomalies are live-only-slot observations pveconform intentionally did
+// Anomalies are live-only-slot observations proxops intentionally did
 // not act on (non-destructive by design).
 func (s *Store) BumpAnomaly() {
 	s.mu.Lock()

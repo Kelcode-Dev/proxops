@@ -1,5 +1,5 @@
-// Package adopt implements `pveconform adopt`: the reverse-engineering
-// path from live PVE back into pveconform manifests.
+// Package adopt implements `proxops adopt`: the reverse-engineering
+// path from live PVE back into proxops manifests.
 //
 // adopt is READ-ONLY with respect to PVE. It performs no create, update,
 // delete, template, or tag mutations on PVE objects — only the GET
@@ -8,15 +8,15 @@
 //
 // The generated YAML is placed under <kind>/<cluster>/ in the git work
 // tree so that it is cluster-specific: the live object was observed on a
-// concrete cluster, and pveconform's M8 model scopes reconciliation by
+// concrete cluster, and proxops's M8 model scopes reconciliation by
 // cluster. A resource that can be shared across clusters (a "base") is a
 // HUMAN refactoring decision made after review — adopt never promotes a
 // live object to <kind>/base/ on its own.
 //
-// The gap report: a live PVE object may carry configuration pveconform
+// The gap report: a live PVE object may carry configuration proxops
 // does not model (PVE replication, VM pools, firewalls, ...). adopt must
 // not silently lose that configuration: every key that appears in the
-// live /config that pveconform does not understand is surfaced in a
+// live /config that proxops does not understand is surfaced in a
 // GAPS section of the output and (in an operator-visible message) named
 // in the summary. docs/GAPS.md is the project-level compatibility
 // backlog seeded from these discoveries — adopt does NOT edit GAPS.md
@@ -42,7 +42,7 @@ type Result struct {
 	// Wrote is the per-kind list of manifest files written under
 	// <kind>/<cluster>/ in the git root, in deterministic order.
 	Wrote []WroteManifest
-	// Gaps is the union of "live key pveconform does not model" findings
+	// Gaps is the union of "live key proxops does not model" findings
 	// across all adopted objects, deduplicated and ordered.
 	Gaps []Gap
 	// Warnings are human-readable per-object notes (unsupported config,
@@ -55,7 +55,7 @@ type Result struct {
 	// because a live value could not be recovered (typically LXC
 	// spec.root.size, unreported by PVE's /config). The operator must
 	// review + complete these before listing anything in a
-	// clusters/<cluster>/resources.yaml: pveconform treats a composition
+	// clusters/<cluster>/resources.yaml: proxops treats a composition
 	// that references a non-validating manifest as a parse error and aborts
 	// the whole cluster cycle (fail-closed), so an incomplete manifest
 	// silently listed would take the cluster down.
@@ -77,7 +77,7 @@ type WroteManifest struct {
 }
 
 // SkippedObject is one live PVE object that adopt DELIBERATELY did not turn
-// into a manifest (template VMs / LXC templates: pveconform has no
+// into a manifest (template VMs / LXC templates: proxops has no
 // template-VM resource kind and must not claim ownership of a clone
 // source). The census stays complete: a skipped object is reported, not
 // silently dropped.
@@ -94,11 +94,11 @@ func (s SkippedObject) String() string {
 	return fmt.Sprintf("%s %s#%d (%q): %s", kindLabel(s.Kind), s.Node, s.ID, s.Name, s.Reason)
 }
 
-// Gap is one "supported live config pveconform does not model" finding.
+// Gap is one "supported live config proxops does not model" finding.
 // It is the raw material for docs/GAPS.md. adopt emits these for review;
 // it does not rewrite GAPS.md.
 type Gap struct {
-	// Kind is the pveconform kind (VM / LXC / ISO / CTTemplate).
+	// Kind is the proxops kind (VM / LXC / ISO / CTTemplate).
 	Kind schema.Kind
 	// Node is the PVE node the gap was observed on.
 	Node string
@@ -109,7 +109,7 @@ type Gap struct {
 	// Value is the live value as a PVE string.
 	Value string
 	// Note explains, as compactly as adopt can, what the key means and
-	// why pveconform does not model it today. Kept stable across runs so
+	// why proxops does not model it today. Kept stable across runs so
 	// operators can diff the gap set.
 	Note string
 }
@@ -184,9 +184,9 @@ func (r Result) Summary() string {
 	return b.String()
 }
 
-// nameForPVE derives a pveconform metadata.name from a PVE-reported display /
+// nameForPVE derives a proxops metadata.name from a PVE-reported display /
 // hostname + id fallback: PVE names are not guaranteed to be valid
-// pveconform identifiers ("prod web 01" / empty / i18n), so adopt falls back
+// proxops identifiers ("prod web 01" / empty / i18n), so adopt falls back
 // to "vm-<id>" / "ct-<id>" when nothing usable remains (id >= 0 only;
 // artifacts have no PVE numeric id and keep the sanitized label).
 func nameForPVE(pveName string, id int, prefix string) string {

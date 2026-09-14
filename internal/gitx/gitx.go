@@ -1,4 +1,4 @@
-// Package gitx is pveconform's git source of truth. It wraps go-git to keep
+// Package gitx is proxops's git source of truth. It wraps go-git to keep
 // a local clone of the configured repository and read out the desired
 // manifest tree.
 //
@@ -31,7 +31,7 @@ import (
 type Options struct {
 	// URL is the HTTPS repository. Mutually exclusive with Local.
 	URL string
-	// Token is the basic-auth secret (env PVECONFORM_GIT_TOKEN preferred).
+	// Token is the basic-auth secret (env PROXOPS_GIT_TOKEN preferred).
 	Token string
 	// User is the basic-auth username; default "git".
 	User string
@@ -291,7 +291,7 @@ func isRepoDir(p string) bool {
 func homeShareDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "/tmp/pveconform"
+		return "/tmp/proxops"
 	}
-	return filepath.Join(home, ".local", "share", "pveconform")
+	return filepath.Join(home, ".local", "share", "proxops")
 }

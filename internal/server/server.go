@@ -27,7 +27,7 @@ type Info struct {
 	PVEAge time.Duration
 }
 
-// Server is the HTTP surface for one pveconform process.
+// Server is the HTTP surface for one proxops process.
 type Server struct {
 	registry *prometheus.Registry
 	store    *statusx.Store
@@ -52,7 +52,7 @@ func (s *Server) Handle() http.Handler {
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte("pveconform — endpoints: /healthz /metrics /status\n"))
+		_, _ = w.Write([]byte("proxops — endpoints: /healthz /metrics /status\n"))
 	})
 	return mux
 }

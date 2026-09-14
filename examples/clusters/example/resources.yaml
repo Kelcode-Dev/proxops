@@ -1,6 +1,6 @@
-# pveconform composition for the "example" cluster (M8 GitOps model).
+# ProxOps composition for the "example" cluster (GitOps model).
 #
-# This is NOT a Kustomization — pveconform does not use Kustomize. It is an
+# This is NOT a Kustomization — proxops does not use Kustomize. It is an
 # explicit, per-cluster list of the resource definitions the "example"
 # cluster consumes. Paths are relative to this directory.
 #
@@ -17,9 +17,9 @@
 #     git work tree,
 #  2. keep exactly one cluster (here: "example") declared in both
 #     clusters/example/ (this file lists its resources) AND
-#     pve.clusters (in your pveconform config, with its endpoint + node
+#     pve.clusters (in your proxops config, with its endpoint + node
 #     allowlist),
-#  3. point pveconform at the tree: pveconform diff --config ./.config.yaml
+#  3. point proxops at the tree: proxops diff --config ./.config.yaml
 #
 # Do not add another clusters/ dir until you also add that cluster to
 # pve.clusters — a composition with no configured endpoint fails closed

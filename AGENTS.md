@@ -2,7 +2,7 @@
 
 ## Project identity
 
-PVE Conform is a standalone, stateless GitOps daemon/operator for
+ProxOps is a standalone, stateless GitOps daemon/operator for
 Proxmox VE.
 
 The fundamental model is:
@@ -12,7 +12,7 @@ The fundamental model is:
 - Reconciliation is deterministic and idempotent.
 - The process may manage multiple independent PVE clusters.
 
-This repository contains the **PVE Conform software**. It is not the
+This repository contains the **ProxOps software**. It is not the
 separate infrastructure/GitOps repository that supplies manifests.
 
 Do not introduce Kubernetes, Kustomize, Terraform, or another orchestration

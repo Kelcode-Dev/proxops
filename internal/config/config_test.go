@@ -68,7 +68,7 @@ reconcile:
   task-timeout: 5m
   prune-budget: 7
 `)
-	f := filepath.Join(t.TempDir(), "pveconform.yaml")
+	f := filepath.Join(t.TempDir(), "proxops.yaml")
 	if err := os.WriteFile(f, y, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestLoadExpandsTilde(t *testing.T) {
 	if err != nil {
 		t.Skip("no home dir")
 	}
-	y := []byte("data-dir: ~/" + "share/pveconform\npve:\n  ca-file: ~/pve/ca.pem\n")
+	y := []byte("data-dir: ~/" + "share/proxops\npve:\n  ca-file: ~/pve/ca.pem\n")
 	f := filepath.Join(t.TempDir(), "tilde.yaml")
 	if err := os.WriteFile(f, y, 0o644); err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestLoadExpandsTilde(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDataDir := filepath.Join(home, "share/pveconform")
+	wantDataDir := filepath.Join(home, "share/proxops")
 	if c.DataDir != wantDataDir {
 		t.Errorf("DataDir = %q, want %q", c.DataDir, wantDataDir)
 	}
@@ -165,7 +165,7 @@ func TestLoadExpandsTilde(t *testing.T) {
 	}
 
 	// Non-tilde paths pass through unchanged.
-	y3 := []byte("data-dir: /var/lib/pveconform\n")
+	y3 := []byte("data-dir: /var/lib/proxops\n")
 	f3 := filepath.Join(t.TempDir(), "tilde3.yaml")
 	if err := os.WriteFile(f3, y3, 0o600); err != nil {
 		t.Fatal(err)
@@ -174,7 +174,7 @@ func TestLoadExpandsTilde(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c3.DataDir != "/var/lib/pveconform" {
+	if c3.DataDir != "/var/lib/proxops" {
 		t.Errorf("DataDir = %q", c3.DataDir)
 	}
 }
@@ -282,7 +282,7 @@ func TestValidatePassesForValidConfigs(t *testing.T) {
 	c := Defaults()
 	c.Git.URL = "https://git.example.com/repo"
 	c.PVE.User = "root@pam"
-	c.PVE.TokenID = "pveconform"
+	c.PVE.TokenID = "proxops"
 	c.PVE.Token = "deadbeef"
 	c.PVE.Clusters["dev"] = PVECluster{BaseURL: "https://pve.example:8006"}
 	if err := c.Validate(); err != nil {
@@ -293,7 +293,7 @@ func TestValidatePassesForValidConfigs(t *testing.T) {
 	c3 := Defaults()
 	c3.Git.URL = "https://git.example.com/repo"
 	c3.PVE.User = "root@pam"
-	c3.PVE.TokenValue = "root@pam!pveconform=deadbeef"
+	c3.PVE.TokenValue = "root@pam!proxops=deadbeef"
 	c3.PVE.Clusters["dev"] = PVECluster{BaseURL: "https://pve.example:8006"}
 	if err := c3.Validate(); err != nil {
 		t.Fatalf("token-value mode should validate: %v", err)
@@ -396,9 +396,9 @@ func TestValidClusterName(t *testing.T) {
 }
 
 func TestEnvOverrides(t *testing.T) {
-	t.Setenv("PVECONFORM_PVE_TOKEN", "from-env")
-	t.Setenv("PVECONFORM_PVE_PASSWORD", "from-env")
-	t.Setenv("PVECONFORM_GIT_TOKEN", "git-from-env")
+	t.Setenv("PROXOPS_PVE_TOKEN", "from-env")
+	t.Setenv("PROXOPS_PVE_PASSWORD", "from-env")
+	t.Setenv("PROXOPS_GIT_TOKEN", "git-from-env")
 	c := Defaults()
 	c.PVE.User = "u@pve"
 	c.PVE.Token = "from-yaml"

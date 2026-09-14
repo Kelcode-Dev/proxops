@@ -47,7 +47,7 @@ func (c Checksum) Valid() bool {
 //     declared URL.
 //   - never delete ISOs (MVP)
 //
-// PVE id: none. pveconform identity = metadata.name; per-node placement =
+// PVE id: none. proxops identity = metadata.name; per-node placement =
 // `(node, storage, filename)` on PVE.
 //
 // Multi-node placement:
@@ -127,12 +127,12 @@ func (i *ISO) ID() int { return 0 }
 // DesiredState is always "" for artifacts.
 func (i *ISO) DesiredState() string { return "" }
 
-// Deps implements Resource — ISOs have no pveconform-side references.
+// Deps implements Resource — ISOs have no proxops-side references.
 func (i *ISO) Deps() []Ref { return nil }
 
 // DriftAnomalies always returns nil: an ISO is a storage artifact, not a
 // PVE object with per-slot live devices. There is no "live-only ISO" shape
-// pveconform would have to surface.
+// proxops would have to surface.
 func (i *ISO) DriftAnomalies(current map[string]any) []string { return nil }
 
 // Validate implements Resource.

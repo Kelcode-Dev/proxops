@@ -1,5 +1,5 @@
 ---
-description: Perform a conservative PVE Conform security review
+description: Perform a conservative ProxOps security review
 ---
 
 Review the current change for production safety and security.

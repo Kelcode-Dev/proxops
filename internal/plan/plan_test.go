@@ -12,7 +12,7 @@ func TestPlanMemoryDriftNeedsStop(t *testing.T) {
 	// running. A memory change on PVE requires the VM to be stopped → StopFirst.
 	desired := map[string]any{
 		"cpu": "host", "cores": "2", "memory": "4096",
-		"tags": []any{"pveconform"}, "scsihw": "virtio-scsi",
+		"tags": []any{"proxops"}, "scsihw": "virtio-scsi",
 	}
 	live := &plan.LiveInventory{
 		Configs: map[string]map[string]any{

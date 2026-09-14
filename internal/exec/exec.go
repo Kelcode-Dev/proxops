@@ -36,13 +36,13 @@ type Executor struct {
 	log         *slog.Logger
 	// taskInterval is the polling cadence for task status; default 2s.
 	taskInterval time.Duration
-	// cluster is the pveconform cluster this executor reconciles; every
+	// cluster is the proxops cluster this executor reconciles; every
 	// statusx.Object it writes is tagged with it so a multi-cluster agent
 	// keeps per-cluster records.
 	cluster string
 }
 
-// SetCluster pins the pveconform cluster identity on the executor. The agent
+// SetCluster pins the proxops cluster identity on the executor. The agent
 // composition root calls it once per cluster before any cycle runs.
 func (e *Executor) SetCluster(c string) { e.cluster = c }
 
@@ -141,7 +141,7 @@ func (e *Executor) deferByDependency(a plan.Action, dep string) {
 			PruneReason: a.Reason,
 		})
 	}
-	e.log.Warn("pveconform.action.deferred",
+	e.log.Warn("proxops.action.deferred",
 		slog.String("kind", string(a.Kind)),
 		slog.String("name", a.Name),
 		slog.String("node", a.Node),
@@ -189,7 +189,7 @@ func (e *Executor) execute(ctx context.Context, a plan.Action) Result {
 		if ok {
 			level = slog.LevelInfo
 		}
-		e.log.Log(ctx, level, "pveconform.action",
+		e.log.Log(ctx, level, "proxops.action",
 			slog.String("kind", string(a.Kind)),
 			slog.String("name", a.Name),
 			slog.Int("id", a.ID),
@@ -227,7 +227,7 @@ func (e *Executor) apply(ctx context.Context, a plan.Action) (didStop bool, err 
 			return false, cErr
 		}
 		return false, e.waitTask(ctx, a.Node, upid)
-	// M11: mark an existing qemu VM as a PVE template. pveconform's
+	// M11: mark an existing qemu VM as a PVE template. proxops's
 	// executor POSTs /qemu/{id}/template (PVE's one-way-only endpoint:
 	// PVE 9.2 has no /qemu/{id}/untemplate — 501 "not implemented",
 	// probed on conformance-dev 2026-09-11). The planner emits a
@@ -339,8 +339,8 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 		mupid, mErr := e.client.VM().MarkTemplate(ctx, a.Node, a.ID)
 		if mErr != nil {
 			// A partially-created VM with a failed mark is visible as a
-			// drift on the next cycle (pveconform's VM↔TemplateVM
-			// mismatch rule fires on a pveconform TV desired vs a live
+			// drift on the next cycle (proxops's VM↔TemplateVM
+			// mismatch rule fires on a proxops TV desired vs a live
 			// VM that is not yet template). No automatic retry: the
 			// operator must investigate the PVE-side half-state.
 			return mupid, fmt.Errorf("create template-mark: %w (created VM left un-marked)", mErr)
@@ -357,7 +357,7 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 }
 
 // markTemplate performs a PVE-side VM template-mark for an already-existing
-// qemu object (M11 desired TemplateVM vs. live pveconform-created VM that
+// qemu object (M11 desired TemplateVM vs. live proxops-created VM that
 // is not yet PVE-templatel). PVE 9.2's mark endpoint is POST-only;
 // there is no untemplate endpoint (501 "not implemented", probed
 // conformance-dev 2026-09-11).

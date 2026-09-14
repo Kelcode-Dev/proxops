@@ -17,7 +17,7 @@ func YAMLTo(s string, target any) error {
 
 // YAMLOut encodes v into YAML with 2-space indentation. The GitOps repo
 // pins `spaces: 2` in .yamllint.yaml (see promox-gitops .yamllint.yaml
-// `indentation` rule); pveconform-generated manifests must pass that rule
+// `indentation` rule); proxops-generated manifests must pass that rule
 // so they can be committed straight from adopt without re-formatting. The
 // default yaml.v3 indent (4) would fail yamllint on every generated
 // manifest.

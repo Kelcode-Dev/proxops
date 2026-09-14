@@ -82,7 +82,7 @@ func TestTokenCredentialReachesWire(t *testing.T) {
 		PVE: pveclient.PVEParams{
 			User:    "root@pam",
 			Auth:    "token",
-			TokenID: "pveconform",
+			TokenID: "proxops",
 			Token:   "deadbeef00",
 		},
 		BaseURL:     srv.URL,
@@ -99,7 +99,7 @@ func TestTokenCredentialReachesWire(t *testing.T) {
 		t.Fatal("no recorded request")
 	}
 	got := records[0].Auth
-	want := "PVEAPIToken=root@pam!pveconform=deadbeef00"
+	want := "PVEAPIToken=root@pam!proxops=deadbeef00"
 	if got != want {
 		t.Fatalf("Authorization header = %q, want %q", got, want)
 	}
@@ -148,7 +148,7 @@ func TestTokenUnderSpecFails(t *testing.T) {
 		PVE: pveclient.PVEParams{
 			User:    "root@pam",
 			Auth:    "token",
-			TokenID: "pveconform",
+			TokenID: "proxops",
 			// no Token
 		},
 		BaseURL:     srv.URL,

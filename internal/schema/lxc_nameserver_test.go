@@ -8,7 +8,7 @@ import (
 
 // TestLXCNameserverSpaceFormNoDrift: PVE accepts comma-separated CSV on
 // create/update ("1.1.1.1,8.8.8.8") but reports space-separated on /config
-// ("1.1.1.1 8.8.8.8"). pveconform must treat these as equal so re-reads do
+// ("1.1.1.1 8.8.8.8"). proxops must treat these as equal so re-reads do
 // not trip drift.
 func TestLXCNameserverSpaceFormNoDrift(t *testing.T) {
 	lxcRaw := "apiVersion: proxops/v1alpha1\n" +
@@ -28,7 +28,7 @@ func TestLXCNameserverSpaceFormNoDrift(t *testing.T) {
 		"memory":       int64(1024),
 		"cores":        1,
 		"name":         "lxc", // PVE's display-name field (auto-set from hostname)
-		"tags":         []any{"pveconform"},
+		"tags":         []any{"proxops"},
 		"hostname":     "lxc",
 		"nameserver":   "1.1.1.1 8.8.8.8", // PVE normalizes CSV → spaces
 		"searchdomain": "example.com",
@@ -60,7 +60,7 @@ func TestLXCNameserverDriftsOnRealChange(t *testing.T) {
 	}
 	live := map[string]any{
 		"memory": int64(1024), "cores": 1,
-		"tags": []any{"pveconform"}, "hostname": "lxc",
+		"tags": []any{"proxops"}, "hostname": "lxc",
 		"nameserver": "1.1.1.1 8.8.8.8", // PVE's current state: does not match
 		"rootfs":     "local:vm-9200-disk-0,size=4G",
 		"net0":       "name=net0,bridge=vmbr0",

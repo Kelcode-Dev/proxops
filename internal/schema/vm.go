@@ -10,7 +10,7 @@ import (
 
 // PveOwnershipTag is the PVE tag the agent adds to every object it manages.
 // Pruning only ever acts on tagged objects (see plan §10).
-const PveOwnershipTag = "pveconform"
+const PveOwnershipTag = "proxops"
 
 // Cpu is PVE's `cpu`,`cores`,`args` triad.
 type Cpu struct {
@@ -28,14 +28,14 @@ type Disk struct {
 	Storage string `yaml:"storage" json:"storage"`
 	// Size is the disk size, e.g. "50GiB". Required unless Image is set
 	// (an image-seeded disk takes its size from the image — PVE derives it
-	// at import time and pveconform does not own the number).
+	// at import time and proxops does not own the number).
 	Size string `yaml:"size" json:"size"`
 	// Image references a DiskImage artifact by metadata.name. When set,
-	// pveconform seeds this disk at create via PVE 9's
+	// proxops seeds this disk at create via PVE 9's
 	// `<pool>:0,import-from=<storage>:import/<filename>` form (the only
 	// supported way to boot a VM from a cloud image without a template).
 	// Image-seeded disks are imported ONCE (at create or when the slot is
-	// empty); pveconform never re-imports over a live volume (data loss).
+	// empty); proxops never re-imports over a live volume (data loss).
 	Image string `yaml:"image,omitempty" json:"image,omitempty"`
 	// Slot is the PVE slot, e.g. "scsi0". Defaults to scsi<i> in order.
 	// Named "interface" in the declarative YAML to match user docs.
@@ -70,9 +70,9 @@ type NIC struct {
 }
 
 // CDDrive is PVE's `cdrom` device. It can either:
-//   - mount an ISO declared as another pveconform resource
+//   - mount an ISO declared as another proxops resource
 //     (spec.iso = the ISO's metadata.name), or
-//   - be "none" (no CD attached), in which case iso is empty and pveconform
+//   - be "none" (no CD attached), in which case iso is empty and proxops
 //     renders `cdrom=none`.
 //
 // The ISO reference creates an inferred dependency only in the attach
@@ -80,9 +80,9 @@ type NIC struct {
 const CDROMNone = "none"
 
 type CDDrive struct {
-	// Iso is a pveconform ISO metadata.name, or the CDROMNone sentinel.
+	// Iso is a proxops ISO metadata.name, or the CDROMNone sentinel.
 	// An empty Iso is used only when the manifest has an intentionally
-	// empty `hardware.cdrom` block — pveconform then treats the PVE IDE
+	// empty `hardware.cdrom` block — proxops then treats the PVE IDE
 	// cdrom slot as not owned.
 	Iso string `yaml:"iso,omitempty" json:"iso,omitempty"`
 	// Media is PVE's `media=` option on the cdrom ("cdrom" default).
@@ -107,14 +107,14 @@ type EFIDisk struct {
 }
 
 // CloudInit models PVE's cloud-init drive on `ide2` and optional cicustom.
-// When Enabled, pveconform renders `ide2:<storage>:cloudinit,size=<size>`
+// When Enabled, proxops renders `ide2:<storage>:cloudinit,size=<size>`
 // at create and manages PVE's auto-named cloud-init drive idempotently.
 //
 // This is the cloud-init DRIVE (ide2 storage volume). It is distinct from
 // the top-level cloud-init DATA fields that PVE's cloud-init generates
 // configdrive content from — see CloudInitData below.
 type CloudInit struct {
-	// Enabled turns cloud-init on; when disabled pveconform does not
+	// Enabled turns cloud-init on; when disabled proxops does not
 	// manage a cloud-init device at all.
 	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Storage is the PVE storage backend for the cloud-init drive
@@ -124,25 +124,25 @@ type CloudInit struct {
 	Size string `yaml:"size,omitempty" json:"size,omitempty"`
 }
 
-// CloudInitRedactedSentinel is the marker pveconform uses in ssh-keys entries
-// to signal "PVE owns this value; pveconform must not overwrite it". adopt
+// CloudInitRedactedSentinel is the marker proxops uses in ssh-keys entries
+// to signal "PVE owns this value; proxops must not overwrite it". adopt
 // uses it for ssh-keys when PVE reports a non-empty value (public-key
 // material is treated as credential-adjacent; M10 redaction rule).
 //
 // Semantics on wire:
 //   - ToCreateParams omits the sshkeys field entirely when the sole ssh-keys
 //     entry is the sentinel (or when ssh-keys is empty): the VM is created
-//     without a pveconform-owned cloud-init sshkeys set, and PVE's existing
+//     without a proxops-owned cloud-init sshkeys set, and PVE's existing
 //     value survives untouched.
 //   - Drift is a no-op on sshkeys whenever the desired contains the sentinel:
-//     pveconform will not write over PVE's keys.
+//     proxops will not write over PVE's keys.
 //
 // The sentinel is a single character that operators search for in committed
 // manifests: `ssh-keys: ["*"]` means "fill me in before apply; until then
-// pveconform does not touch PVE's sshkeys".
+// proxops does not touch PVE's sshkeys".
 const CloudInitRedactedSentinel = "*"
 
-// CloudInitIPConfig is one PVE `ipconfig<N>` entry. pveconform's declarative
+// CloudInitIPConfig is one PVE `ipconfig<N>` entry. proxops's declarative
 // form: NIC (int, PVE's "ipconfig<N>" — i.e. which physical NIC index the
 // static-IP applies to), IP (CIDR like "192.168.192.199/18") and optional
 // Gateway (like "192.168.192.5"). PVE also supports `ipconfig<N>=dhcp`
@@ -153,7 +153,7 @@ type CloudInitIPConfig struct {
 	// Default when zero: 0.
 	NIC int `yaml:"nic,omitempty" json:"nic,omitempty"`
 	// IP is a CIDR (e.g. "192.168.192.199/18"). Empty → no static IP for
-	// this NIC slot (pveconform will not write ipconfig<N> at all).
+	// this NIC slot (proxops will not write ipconfig<N> at all).
 	IP string `yaml:"ip,omitempty" json:"ip,omitempty"`
 	// Gateway is the default-gateway address (e.g. "192.168.192.5").
 	// Empty → omitted from the wire value (PVE only sets static IP).
@@ -173,13 +173,13 @@ type CloudInitIPConfig struct {
 //	searchdomain  (space-separated IPv4/IPv6 CSV)
 //	ipconfig<N>   ("ip=<cidr>[,gw=<addr>]" static or "dhcp")
 //
-// pveconform owns these fields on a VM manifest only when the corresponding
-// struct value is non-empty. Empty desired values mean "pveconform does not
+// proxops owns these fields on a VM manifest only when the corresponding
+// struct value is non-empty. Empty desired values mean "proxops does not
 // own this PVE key; PVE's live state survives untouched".
 //
 // Not modelled in M11 (documented in GAPS.md): cipassword, cicustom,
 // ciupgrade. cipassword is a secret (AGENTS.md no-secret rule + PVE stores
-// it in plaintext — pveconform will not round-trip secrets through git).
+// it in plaintext — proxops will not round-trip secrets through git).
 // cicustom is a storage-backed keyset (PVE-side); ciupgrade is a PVE-only
 // guest-agent knob.
 type CloudInitData struct {
@@ -198,7 +198,7 @@ type CloudInitData struct {
 	// Empty → not owned.
 	SearchDomains []string `yaml:"search-domains,omitempty" json:"search-domains,omitempty"`
 	// IPConfigs is PVE's `ipconfig<N>` static-IP set — one entry per NIC slot
-	// pveconform wants a cloud-init static IP on. Empty NIC defaults to 0.
+	// proxops wants a cloud-init static IP on. Empty NIC defaults to 0.
 	IPConfigs []CloudInitIPConfig `yaml:"ipconfigs,omitempty" json:"ipconfigs,omitempty"`
 }
 
@@ -268,7 +268,7 @@ type VMSpec struct {
 	PveName string `yaml:"pve-name,omitempty" json:"pve-name,omitempty"`
 	// PveDescription is PVE's `description` field.
 	PveDescription string `yaml:"pve-description,omitempty" json:"pve-description,omitempty"`
-	// Tags are PVE user tags (in addition to the pveconform tag).
+	// Tags are PVE user tags (in addition to the proxops tag).
 	Tags []string `yaml:"tags,omitempty" json:"tags,omitempty"`
 
 	// CPU configures PVE cpu/cores/args.
@@ -288,7 +288,7 @@ type VMSpec struct {
 	// CloudInitData are PVE's top-level cloud-init DATA fields (ciuser,
 	// sshkeys, nameserver, searchdomain, ipconfig<N>). M11. Distinct from
 	// spec.hardware.cloud-init (which owns the cloud-init DRIVE on ide2).
-	// Empty values mean pveconform does not own that PVE key.
+	// Empty values mean proxops does not own that PVE key.
 	CloudInitData CloudInitData `yaml:"cloud-init-data,omitempty" json:"cloud-init-data,omitempty"`
 
 	// Extra is a freeform PVE key=value map (escape hatch for anything not
@@ -518,8 +518,8 @@ func (v *VM) Validate() error {
 	// CIDRs, gateways plain IPs.
 	{
 		// A sentinel "*" is exclusive: either the slice is exactly {"*"}
-		// (PVE owns the live sshkeys; pveconform must not write) or the
-		// slice has zero sentinels (pveconform writes the manifest's keys).
+		// (PVE owns the live sshkeys; proxops must not write) or the
+		// slice has zero sentinels (proxops writes the manifest's keys).
 		// Any mix is ambiguous → fail closed at parse time.
 		sentinelCount := 0
 		for _, k := range v.Spec.CloudInitData.SSHKeys {
@@ -528,7 +528,7 @@ func (v *VM) Validate() error {
 			}
 		}
 		if sentinelCount > 0 && sentinelCount != len(v.Spec.CloudInitData.SSHKeys) {
-			return fmt.Errorf("%s: spec.cloud-init-data.ssh-keys mixes the redacted sentinel %q with real keys; use ONLY the sentinel (PVE owns the value) or ONLY real keys (pveconform writes them)", v.Ref(), CloudInitRedactedSentinel)
+			return fmt.Errorf("%s: spec.cloud-init-data.ssh-keys mixes the redacted sentinel %q with real keys; use ONLY the sentinel (PVE owns the value) or ONLY real keys (proxops writes them)", v.Ref(), CloudInitRedactedSentinel)
 		}
 	}
 	for i, c := range v.Spec.CloudInitData.IPConfigs {
@@ -586,7 +586,7 @@ func (v *VM) Validate() error {
 			return fmt.Errorf("%s: spec.extra key %q conflicts with a structured field; remove it", v.Ref(), k)
 		}
 		if strings.HasPrefix(k, "ipconfig") {
-			// ipconfig<N> is the dynamic cloud-init static-IP slot pveconform
+			// ipconfig<N> is the dynamic cloud-init static-IP slot proxops
 			// owns via spec.cloud-init-data.ipconfigs (M11).
 			return fmt.Errorf("%s: spec.extra key %q conflicts with a structured field (use spec.cloud-init-data.ipconfigs); remove it", v.Ref(), k)
 		}
@@ -656,12 +656,12 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 	if hw.CloudInit.Enabled {
 		p["ide2"] = fmt.Sprintf("%s:cloudinit,size=%s", hw.CloudInit.Storage, hw.CloudInit.Size)
 	}
-	// cdrom slot: pveconform only owns the IDE cdrom slot when
+	// cdrom slot: proxops only owns the IDE cdrom slot when
 	// spec.hardware.cdrom is declared. When declared and iso=<artifact>,
-	// pveconform emits the resolved PVE volid (or the ISO name when
+	// proxops emits the resolved PVE volid (or the ISO name when
 	// ResolveArtifactRefs hasn't run yet — unit tests); when declared
-	// and iso=none, pveconform emits "none" (detach). When the manifest
-	// has no cdrom block, pveconform leaves the PVE slot alone.
+	// and iso=none, proxops emits "none" (detach). When the manifest
+	// has no cdrom block, proxops leaves the PVE slot alone.
 	//
 	// PVE 9.2: always ide2 regardless of cloud-init placement (verified
 	// via the cdrom= alias on i440fx AND q35, both with+without
@@ -705,8 +705,8 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 	}
 	// M11: top-level cloud-init DATA fields.
 	//
-	// pveconform uses "empty = not owned" semantics: if a CloudInitData
-	// value is empty, pveconform will NOT send the PVE key AND will NOT
+	// proxops uses "empty = not owned" semantics: if a CloudInitData
+	// value is empty, proxops will NOT send the PVE key AND will NOT
 	// rewrite an existing PVE value (Drift below enforces the same).
 	// `ssh-keys` containing only the sentinel `*` is owned-but-do-not-
 	// write (adopt fills the sentinel for PVE-owned sshkeys so the
@@ -747,7 +747,7 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 //
 // The "boot" form-value is the PVE `boot=order=scsi0;ide2;net0` list,
 // which is only emitted when the user declares a spec.options.boot-order.
-// When boot-order is not declared, pveconform does not manage PVE's
+// When boot-order is not declared, proxops does not manage PVE's
 // `boot` key (PVE picks its own default: the primary boot disk order +
 // any media devices). This is the owned-field projection invariant.
 func (v *VM) optionsWire() map[string]any {
@@ -801,10 +801,10 @@ func (v *VM) cdromSlot() string {
 // cloud-init → ide3 rule).
 func (v *VM) CdromSlot() string { return v.cdromSlot() }
 
-// DriftAnomalies surfaces live-only disk and NIC slots that pveconform's
+// DriftAnomalies surfaces live-only disk and NIC slots that proxops's
 // manifest does not declare but PVE reports on this VM. These are
 // "manual drift" — a human added a drive/NIC in the PVE GUI that the
-// manifest doesn't know about. pveconform NEVER auto-deletes them:
+// manifest doesn't know about. proxops NEVER auto-deletes them:
 //
 //   - PVE's `scsiN=none` detach does not delete the LVM volume
 //     (probe-verified on PVE 9.2) — the only reliable deletion is
@@ -813,7 +813,7 @@ func (v *VM) CdromSlot() string { return v.cdromSlot() }
 //   - Deleting a NIC is less destructive but still user-visible.
 //
 // The planner records each anomaly as a `Skipped` action so the
-// operator sees it on /status and /metrics without pveconform changing
+// operator sees it on /status and /metrics without proxops changing
 // PVE. Removing the live-only device is a separate, explicit operator
 // step (e.g. `qm set` or `pvesm` in the PVE Web UI).
 func (v *VM) DriftAnomalies(current map[string]any) []string {
@@ -835,7 +835,7 @@ func (v *VM) DriftAnomalies(current map[string]any) []string {
 		switch {
 		case isDiskSlot(k):
 			if !wantDisks[k] && !isNoneSlot(pveStr(raw)) {
-				out = append(out, fmt.Sprintf("live-only disk slot %s=%s is not in spec.disks; pveconform will not automatically remove a live-only disk", k, pveStr(raw)))
+				out = append(out, fmt.Sprintf("live-only disk slot %s=%s is not in spec.disks; proxops will not automatically remove a live-only disk", k, pveStr(raw)))
 			}
 		case isNICSlot(k):
 			want := map[string]bool{}
@@ -847,12 +847,12 @@ func (v *VM) DriftAnomalies(current map[string]any) []string {
 				want[slot] = true
 			}
 			if !want[k] {
-				out = append(out, fmt.Sprintf("live-only NIC slot %s=%s is not in spec.networks; pveconform will not automatically remove it", k, pveStr(raw)))
+				out = append(out, fmt.Sprintf("live-only NIC slot %s=%s is not in spec.networks; proxops will not automatically remove it", k, pveStr(raw)))
 			}
 		}
 	}
 	// Disk pool/size drift on live data volumes is non-destructive too:
-	// pveconform will not auto-resize/re-pool. Surface alongside
+	// proxops will not auto-resize/re-pool. Surface alongside
 	// live-only-slot anomalies.
 	if _, _, danoms := v.diskSlotDrift(current); danoms != nil {
 		out = append(out, danoms...)
@@ -871,7 +871,7 @@ func (v *VM) DriftAnomalies(current map[string]any) []string {
 // isDiskSlot matches PVE's QEMU data-disk slot naming: scsi*, virtio*, sata*.
 // `ide0`/`ide1` are cloud-init + EFI-vars slots; `ide2`/`ide3` are CD/DVD
 // slots and are matched by DriftAnomalies only via the CDDrive state
-// machine (pveconform models cdrom via `spec.hardware.cdrom`, never via a
+// machine (proxops models cdrom via `spec.hardware.cdrom`, never via a
 // disk entry), so we exclude them here.
 func isDiskSlot(k string) bool {
 	for _, prefix := range []string{"scsi", "virtio", "sata"} {
@@ -944,7 +944,7 @@ func (v *VM) cdromManagedState() (managed bool, hasISO bool) {
 	return true, true
 }
 
-// CdromWireValue returns the full PVE cdrom wire value pveconform will put
+// CdromWireValue returns the full PVE cdrom wire value proxops will put
 // on the IDE slot, mirroring ToCreateParams:
 //   - attach (iso: <ref>)  → "<src>,media=<m>" where <src> is the resolved
 //     PVE volid (or the spec name when ResolveArtifactRefs hasn't run) and
@@ -1021,7 +1021,7 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 	// preserves PVE's volume id. This class therefore:
 	//   - NEW slot (no live volume)          -> safe CREATE-form write
 	//   - pool/size/storage CHANGED on a live slot -> NON-destructive anomaly
-	//     (pveconform will NOT auto-resize/re-pool a data-bearing disk; the
+	//     (proxops will NOT auto-resize/re-pool a data-bearing disk; the
 	//     operator must do it deliberately, e.g. `qm set` + `qmresize`)
 	//   - iothread toggled, pool+size same   -> safe LIVE-form write (volume
 	//     id preserved)
@@ -1131,15 +1131,15 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 
 	// M11: top-level cloud-init DATA fields.
 	//
-	// Ownership rule: pveconform owns a PVE key only when the desired
-	// value is non-empty. Empty desired → pveconform does not write AND
+	// Ownership rule: proxops owns a PVE key only when the desired
+	// value is non-empty. Empty desired → proxops does not write AND
 	// does NOT surface drift against a live PVE value (live may hold a
-	// PVE-side value that pveconform has no way of knowing was set by
+	// PVE-side value that proxops has no way of knowing was set by
 	// qm/cloud-init; treating it as drift would flap or clobber it).
 	//
 	// sshkeys: the sentinel `*` means "PVE owns this; do not write". A
 	// live value of any shape coexists with the sentinel without drift.
-	// Empty desired means "pveconform does not model this" too (same as
+	// Empty desired means "proxops does not model this" too (same as
 	// sentinel, no write, no anomaly).
 	//
 	// Nameservers / search-domains / ipconfig: set-based comparison when
@@ -1179,9 +1179,9 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 	// regardless of cloud-init placement — verified via the `cdrom=<vol>,
 	// media=cdrom` form alias on i440fx AND q35 machines, both with and
 	// without a cloud-init drive). PVE reports the cdrom with a PVE-assigned
-	// `media=` option + a size token. pveconform owns pool + filename +
+	// `media=` option + a size token. proxops owns pool + filename +
 	// media when spec.hardware.cdrom is declared; when the manifest has no
-	// cdrom block, pveconform does NOT own the PVE slot.
+	// cdrom block, proxops does NOT own the PVE slot.
 	//
 	// Three-state:
 	//   1. cdromManaged=false (absent)            → skip
@@ -1192,7 +1192,7 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 	//                                       when PVE still has a CD on it.
 	// cdrom: PVE 9.2 cdrom slots are ALWAYS ide2 regardless of cloud-init
 	// placement (verified live). PVE reports cdrom with a PVE-assigned
-	// `media=` option + `size=` token. pveconform owns the slot when
+	// `media=` option + `size=` token. proxops owns the slot when
 	// `cdrom` is declared; not owned when absent. Three-state:
 	//   1. managed=false (absent)               → skip
 	//   2. managed=true, hasISO=true            → compare resolved volid
@@ -1472,7 +1472,7 @@ func (v *VM) diskSlotDrift(current map[string]any) (map[string]any, bool, []stri
 			continue
 		}
 		// Live allocation present at the slot: a pool/size/storage rewrite
-		// would recreate the volume and destroy its data, so pveconform
+		// would recreate the volume and destroy its data, so proxops
 		// reports it (poolChanged/sizeChanged below) instead of writing.
 		poolChanged := cur.pool != want.pool
 		sizeChanged := want.sizeSet && (cur.sizeSet && cur.sizeBytes != want.sizeBytes)
@@ -1482,7 +1482,7 @@ func (v *VM) diskSlotDrift(current map[string]any) (map[string]any, bool, []stri
 				desiredSize = "from image " + d.Image
 			}
 			anoms = append(anoms, fmt.Sprintf(
-				"disk %s storage/size drift (live=%q; desired pool=%s size=%s); pveconform will NOT auto-resize or re-pool a live data disk (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE (qm set/qmresize) or via a new disk, then update the manifest",
+				"disk %s storage/size drift (live=%q; desired pool=%s size=%s); proxops will NOT auto-resize or re-pool a live data disk (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE (qm set/qmresize) or via a new disk, then update the manifest",
 				slot, curRaw, want.pool, desiredSize))
 			continue
 		}
@@ -1643,7 +1643,7 @@ func parseNICFields(s string) nicFields {
 }
 
 // cloudInitSSHKeysWire renders PVE's `sshkeys` wire value from the
-// declarative SSHKeys slice. Empty → "" (pveconform does not own the PVE key).
+// declarative SSHKeys slice. Empty → "" (proxops does not own the PVE key).
 // A single `*` sentinel entry → "" (PVE owns the live value; do not write).
 //
 // PVE 9.2 wire grammar (probed on conformance-dev 2026-09-13): the sshkeys
@@ -1746,7 +1746,7 @@ func sshKeySet(v string) map[string]bool {
 // declarative IPConfigs. Only slots with a non-empty CIDR are owned.
 //
 // PVE static-IP form: "ip=<cidr>[,gw=<addr>]".
-// PVE also accepts the "dhcp" token: pveconform does NOT model that form
+// PVE also accepts the "dhcp" token: proxops does NOT model that form
 // in M11 (documented — operators use spec.extra if they want dhcp
 // semantics per-NIC).
 func cloudInitIPConfigWire(cd CloudInitData) map[string]string {

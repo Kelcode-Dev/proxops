@@ -33,12 +33,12 @@ spec:
     # bios: ovmf       # seabios (PVE default) | ovmf
     # display: std     # PVE `vga` (default)
     # cdrom — three states:
-    #   (block absent)          pveconform does NOT own the PVE IDE slot; PVE
+    #   (block absent)          proxops does NOT own the PVE IDE slot; PVE
     #                           keeps its default
-    #   cdrom:                  pveconform owns the slot and attaches the
+    #   cdrom:                  proxops owns the slot and attaches the
     #     iso: base-iso         referenced ISO. Creates a structured VM->ISO
     #                           dependency (planner orders the download).
-    #   cdrom:                  pveconform owns the slot and DETACHES it
+    #   cdrom:                  proxops owns the slot and DETACHES it
     #     iso: none             (emits `ide<N>=none`). Use to model "no CD
     #                           ever", or to remove an ISO ref previously.
     # efi-disk:                 # valid only when bios=ovmf

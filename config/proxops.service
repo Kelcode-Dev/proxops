@@ -1,52 +1,52 @@
 [Unit]
-Description=pveconform — Git → Proxmox GitOps reconciler
+Description=proxops — Git → Proxmox GitOps reconciler
 Documentation=https://github.com/GizzmoShifu/proxmox-operator
 After=network-online.target
 Wants=network-online.target
 # Do NOT start if no PVE API credentials are configured — the agent would
 # abort every cycle. Override with `EnvironmentFile=` or a drop-in.
-ConditionPathExists=/etc/pveconform/pveconform.yaml
+ConditionPathExists=/etc/proxops/proxops.yaml
 
 [Service]
 Type=simple
-User=pveconform
-Group=pveconform
+User=proxops
+Group=proxops
 # Binary + config. Adjust paths to your install layout.
-ExecStart=/usr/local/bin/pveconform run --config /etc/pveconform/pveconform.yaml
+ExecStart=/usr/local/bin/proxops run --config /etc/proxops/proxops.yaml
 Restart=on-failure
 RestartSec=5s
 
 # Secrets come only from the environment (see docs/OPERATIONS.md).
 #
-# M8 bootstrap (env credentials):
+# Bootstrap (env credentials):
 # Option A: an env file (root-only 0600):
-EnvironmentFile=-/etc/pveconform/pveconform.env
-# /etc/pveconform/pveconform.env (0600 root:pveconform), e.g.:
-#   PVECONFORM_PVE_TOKEN_VALUE=root@pam!pveconform=<uuid>
-#   PVECONFORM_GIT_TOKEN=<ghp_...>
+EnvironmentFile=-/etc/proxops/proxops.env
+# /etc/proxops/proxops.env (0600 root:proxops), e.g.:
+#   PROXOPS_PVE_TOKEN_VALUE=root@pam!proxops=<uuid>
+#   PROXOPS_GIT_TOKEN=<ghp_...>
 # Option B: an inline drop-in:
-#   echo 'Environment="PVECONFORM_PVE_TOKEN_VALUE=root@pam!pveconform=..."' > \
-#         /etc/systemd/system/pveconform.service.d/cred.conf
-#   echo 'Environment="PVECONFORM_GIT_TOKEN=..."' >> same file
+#   echo 'Environment="PROXOPS_PVE_TOKEN_VALUE=root@pam!proxops=..."' > \
+#         /etc/systemd/system/proxops.service.d/cred.conf
+#   echo 'Environment="PROXOPS_GIT_TOKEN=..."' >> same file
 #
-# M9 (SOPS-backed cluster-local config, recommended):
+# SOPS-backed cluster-local config (recommended):
 # point ExecStart at the cluster-local config inside the GitOps checkout,
 # and supply the private age key by path (OUTSIDE the repository):
-#   ExecStart=/usr/local/bin/pveconform run \
-#     --config /var/lib/pveconform/gitops/clusters/conformance-dev/config.yaml
-#   /var/lib/pveconform/age/conformance-dev.age (0600 pveconform:pveconform)
-#   Environment=SOPS_AGE_KEY_FILE=/var/lib/pveconform/age/conformance-dev.age
+#   ExecStart=/usr/local/bin/proxops run \
+#     --config /var/lib/proxops/gitops/clusters/conformance-dev/config.yaml
+#   /var/lib/proxops/age/conformance-dev.age (0600 proxops:proxops)
+#   Environment=SOPS_AGE_KEY_FILE=/var/lib/proxops/age/conformance-dev.age
 # The repo's clusters/<name>/secrets.sops.yaml carries only the ENCRYPTED
 # values + the public age recipient (sops metadata) — never the private key.
 # Requires sops + age on PATH (see docs/OPERATIONS.md → "Per-cluster SOPS
-# secrets (M9)").
+# secrets").
 
 # Hardening
 NoNewPrivileges=true
-ProtectHome=read-only      # agent's git cache lives under /home/pveconform
+ProtectHome=read-only      # agent's git cache lives under /home/proxops
 PrivateTmp=true
 ProtectSystem=full         # read-only /usr /boot /efi /etc; home + tmp writable
-ReadWritePaths=/home/pveconform/.local/share/pveconform
+ReadWritePaths=/home/proxops/.local/share/proxops
 
 # The agent exposes /healthz (2 min staleness window) — enable watchdogs if
 # you prefer liveness via the endpoint; keep the default 45s timeout above.

@@ -2,15 +2,15 @@ package schema
 
 // This file exposes a small, adopt-only surface for turning PVE wire
 // representations (as returned by GET /qemu/{id}/config and
-// GET /lxc/{id}/config) back into pveconform schema fields.
+// GET /lxc/{id}/config) back into proxops schema fields.
 //
 // The helpers are intentionally narrow: they only cover the fields that
-// pveconform actually models. Anything PVE reports but pveconform does not
+// proxops actually models. Anything PVE reports but proxops does not
 // understand is out of scope and surfaces on docs/GAPS.md instead.
 //
 // Naming convention: <Kind>Pve<Thing>. Each function takes a PVE raw value
-// and returns (pveconform-friendly form, ok). ok=false means the value
-// could not be mapped to a pveconform field.
+// and returns (proxops-friendly form, ok). ok=false means the value
+// could not be mapped to a proxops field.
 
 import (
 	"sort"
@@ -21,7 +21,7 @@ import (
 // --- VM ---
 
 // PveMemoryToGiB converts PVE's reported memory (integer MiB, as a string or
-// int) to a pveconform "human GiB" string ("4GiB", "0.5GiB"). PVE reports
+// int) to a proxops "human GiB" string ("4GiB", "0.5GiB"). PVE reports
 // memory MiB values in /config (integer, not bytes — see MemoryMiB).
 //
 // PVE 9.2 reports memory in MiB on /config. The input may arrive as int
@@ -34,7 +34,7 @@ func PveMemoryToHuman(v any) (string, bool) {
 	return HumanFromBytes(b)
 }
 
-// PveDisksFromPVE parses PVE's VM /config report into pveconform disks.
+// PveDisksFromPVE parses PVE's VM /config report into proxops disks.
 //
 // PVE reports data disks in the form "local-lvm:vm-9101-disk-0,iothread=1,
 // size=8G" (pool:volume[,iothread=1],size=<binary>). This helper extracts
@@ -51,7 +51,7 @@ func PveDisksFromPVE(current map[string]any) ([]Disk, bool) {
 		}
 		raw := pveStr(v)
 		if isNewStorageSlot(raw) {
-			continue // detached/none slot; pveconform does not model it
+			continue // detached/none slot; proxops does not model it
 		}
 		info := parseDiskInfo(raw)
 		if info.pool == "" {
@@ -66,7 +66,7 @@ func PveDisksFromPVE(current map[string]any) ([]Disk, bool) {
 			if s, ok := HumanFromBytes(info.sizeBytes); ok {
 				d.Size = s
 			} else {
-				// Not representable in pveconform quantity grammar.
+				// Not representable in proxops quantity grammar.
 				d.Size = ""
 			}
 		}
@@ -84,7 +84,7 @@ func PveDisksFromPVE(current map[string]any) ([]Disk, bool) {
 	return out, len(out) > 0
 }
 
-// PveNICsFromPVE parses PVE's VM /config report into pveconform NICs.
+// PveNICsFromPVE parses PVE's VM /config report into proxops NICs.
 //
 // PVE reports NICs as "virtio=52:54:00:E6:5D:C7,bridge=vmbr0[,firewall=0]".
 // The owned fields are: model, bridge, MAC (only when pinned), vlan, rate,
@@ -126,7 +126,7 @@ func PveNICsFromPVE(current map[string]any) ([]NIC, bool) {
 // "media" token if PVE reports one, else "". Adopt uses this to detect
 // PVE's cloud-init volume on non-IDE slots (probe-verified on
 // prod-a: "vm-NNN-cloudinit,media=cdrom" on scsi1 of every VM that
-// was provisioned with qm cloud-init) which pveconform does not own in its
+// was provisioned with qm cloud-init) which proxops does not own in its
 // schema (cloud-init attaches to ide2/ide3 only).
 func PveDiskMedia(vmid int, current map[string]any, slot string) string {
 	_ = vmid
@@ -164,7 +164,7 @@ func PveCDROMFromPVE(current map[string]any) (string, bool) {
 			continue
 		}
 		// Return the pve volid (pool:iso/filename); the caller resolves it
-		// to a pveconform ISO metadata.name.
+		// to a proxops ISO metadata.name.
 		return c.pool + ":iso/" + c.filename, true
 	}
 	return "", false
@@ -181,14 +181,14 @@ func PveCpuCores(current map[string]any) int { return pveInt(current["cores"]) }
 
 // --- M11: cloud-init DATA fields (reverse-translation) ---
 //
-// These helpers read PVE's /config cloud-init data keys back into pveconform
+// These helpers read PVE's /config cloud-init data keys back into proxops
 // CloudInitData. Ownership + redaction follow the schema contract:
 //   - ciuser / nameserver / searchdomain / ipconfig<N>: adopted verbatim.
 //   - sshkeys: PVE stores public-key material; M10 redaction rule applies.
 //     adopt returns a single-entry {"*"} sentinel slice when PVE reported a
 //     non-empty sshkeys, so the committed manifest shows the shape
 //     (ssh-keys: ["*"]) without leaking the keys. The operator replaces the
-//     sentinel with real keys before first apply; pveconform refuses to mix
+//     sentinel with real keys before first apply; proxops refuses to mix
 //     sentinel + real keys at parse time.
 //   - cipassword / cicustom / ciupgrade: NOT adopted (secret / PVE-owned /
 //     out-of-model) — they stay in the gap report by default.
@@ -362,7 +362,7 @@ func PveVMOptionsFromPVE(current map[string]any) VMOpts {
 
 // PveVMHardwareFromPVE extracts the owned hardware PVE reports. Fields that
 // PVE defaults to (machine=i440fx, bios=seabios, vga=std, sockets=1) are NOT
-// included when uninteresting; adopt only sets them when pveconform would
+// included when uninteresting; adopt only sets them when proxops would
 // own them.
 func PveVMHardwareFromPVE(current map[string]any) VMHardware {
 	h := VMHardware{}
@@ -381,7 +381,7 @@ func PveVMHardwareFromPVE(current map[string]any) VMHardware {
 			h.EFIDisk = info
 		}
 	}
-	// cloud-init (ide2): PVE owns the ide2 cloud-init slot. pveconform's
+	// cloud-init (ide2): PVE owns the ide2 cloud-init slot. proxops's
 	// schema declares spec.hardware.cloud-init.{enabled,storage,size}. We
 	// only adopt it when PVE reports the PVE-managed cloud-init pool token
 	// (":cloudinit") on ide2.
@@ -417,13 +417,13 @@ func PveVMHardwareFromPVE(current map[string]any) VMHardware {
 func PveLXCMemoryToHuman(v any) (string, bool) { return PveMemoryToHuman(v) }
 func PveLXCSwapToHuman(v any) (string, bool)   { return PveMemoryToHuman(v) }
 
-// LXC mount shapes pveconform's adopt knows about.
+// LXC mount shapes proxops's adopt knows about.
 type LXCDiskShape struct {
 	Root    LXCRoot
 	Mounts  []LXCMount
 	HasRoot bool
 	// BindMountSlots are mp slots PVE reports as host-path bind mounts
-	// ("mp0=/mnt/host-share:/srv/data"). pveconform does not model bind
+	// ("mp0=/mnt/host-share:/srv/data"). proxops does not model bind
 	// mountpoints (GAPS.md: LXC bind mounts); adopt reports them so the
 	// operator sees them as explicit Gaps, not silently dropped. Each
 	// entry carries the slot + PVE wire value for the gap text.
@@ -444,11 +444,11 @@ type LXCBindMount struct {
 //   - "local-lvm:vm-9200-disk-0,size=4G"  (pool+volid + explicit size)
 //
 // The size token appears when PVE wrote an explicit size and re-echoes it back
-// in the /config report — e.g. after pveconform's LXC create form
+// in the /config report — e.g. after proxops's LXC create form
 // ("local-lvm:4", PVE's documented GiB-integer allocation form). The live
 // PVE state on conformance-dev confirms both spellings.
 //
-// pveconform owns `root.storage` + `root.size` and, for each mount point,
+// proxops owns `root.storage` + `root.size` and, for each mount point,
 // `storage` + `size` + `mount-point`. When PVE did not report a size token,
 // the caller (adopt) should fall back to a PVE storage-list lookup keyed on
 // the volid.
@@ -492,7 +492,7 @@ func pveLXCDisksFromPVEInternal(current map[string]any) lxcDiskShapeInternal {
 			continue
 		}
 		// Host-path bind mount ("mp0=/mnt/host-share:/srv/data"): the value
-		// starts with a host path, not a "pool:" storage token. pveconform
+		// starts with a host path, not a "pool:" storage token. proxops
 		// does not model bind mounts (docs/GAPS.md: LXC bind-mount mpN) —
 		// report it, never drop it.
 		if isLXCBindMount(raw) {
@@ -535,7 +535,7 @@ func pveLXCDisksFromPVEInternal(current map[string]any) lxcDiskShapeInternal {
 // storage volume ("mpN=<pool>:<volid>[,mp=<guestpath>]"). The discriminator
 // is that the storage form's first token contains a colon AND has a valid
 // storage-id prefix before it; the host-path form is either a bare path or a
-// "<path>:<path>" pair. pveconform's owned LXC mpN shape is allocated
+// "<path>:<path>" pair. proxops's owned LXC mpN shape is allocated
 // volumes only (docs/GAPS.md); bind mounts are reported by adopt, not owned.
 func isLXCBindMount(raw string) bool {
 	trim := strings.TrimSpace(raw)
@@ -576,10 +576,10 @@ func isLXCBindMount(raw string) bool {
 	return false
 }
 
-// PveLXCNetworksFromPVE parses PVE's LXC /config report into pveconform LXC
+// PveLXCNetworksFromPVE parses PVE's LXC /config report into proxops LXC
 // networks. PVE reports "name=wired0,bridge=vmbr0,hwaddr=BC:...,type=veth".
 //
-// pveconform owns bridge and optionally vlan/rate/firewall/hwaddr. adopt
+// proxops owns bridge and optionally vlan/rate/firewall/hwaddr. adopt
 // does NOT pin PVE's auto-generated hwaddr (would cause churn), and does
 // not own `type` (PVE normalizes to veth).
 func PveLXCNetworksFromPVE(current map[string]any) ([]LXCNetwork, bool) {
@@ -599,7 +599,7 @@ func PveLXCNetworksFromPVE(current map[string]any) ([]LXCNetwork, bool) {
 		// ip=/gw= are user-set static addressing PVE reports back when a
 		// container has them (probe-verified on prod-a LXC 110/111:
 		// net0=...,ip=192.168.192.110/18,gw=192.168.192.5, type=veth).
-		// They are OWNED by pveconform — PVE does not auto-assign them — so
+		// They are OWNED by proxops — PVE does not auto-assign them — so
 		// adopt captures them faithfully.
 		if f.ip != "" {
 			n.Ip = f.ip
@@ -620,7 +620,7 @@ func PveLXCNetworksFromPVE(current map[string]any) ([]LXCNetwork, bool) {
 //
 // PVE /config PUT accepts `features=nesting=1` to update it (probe-verified
 // on conformance-dev 2026-09-10), but the top-level `nesting=` form is
-// rejected there with "property is not defined in schema". So pveconform's
+// rejected there with "property is not defined in schema". So proxops's
 // LXC.Drift must also emit `features=` (handled separately).
 func parseLXCFeaturesNesting(current map[string]any) bool {
 	s := pveStr(current["features"])
@@ -643,7 +643,7 @@ func parseLXCFeaturesNesting(current map[string]any) bool {
 //
 // PVE stores:
 //
-//	hostname:     the guest kernel hostname (pveconform's spec.dns.hostname)
+//	hostname:     the guest kernel hostname (proxops's spec.dns.hostname)
 //	nameserver:   space/comma separated IPs (spec.dns.nameservers)
 //	searchdomain: the DNS search domain (spec.dns.domain)
 func PveLXCDNSFromPVE(current map[string]any) (LXCDNS, bool) {
@@ -771,16 +771,16 @@ func parseEFIDiskPVE(s string) *EFIDisk {
 
 // parsePVECloudInitIDE2 extracts the CloudInit block from PVE's /config
 // "ide2" value. PVE owns a cloud-init slot when the value contains the
-// ":cloudinit" pool token that pveconform emitted at create
+// ":cloudinit" pool token that proxops emitted at create
 // ("<pool>:cloudinit,size=<n>"). The live report form is
-// "<pool>:<vmid>/<vmid>-cloudinit.qcow2,...", which pveconform recognises
+// "<pool>:<vmid>/<vmid>-cloudinit.qcow2,...", which proxops recognises
 // via the pool + ":cloudinit" create token OR the ".qcow2" + ",size="
 // pair on the live form. We only adopt when PVE actually stores a
 // cloud-init volume; an ide2 with a plain ISO (media=cdrom) is NOT
 // cloud-init.
 //
 // The size is PVE-reported in binary suffixes ("4K"). adopt maps it to
-// pveconform's human form.
+// proxops's human form.
 func parsePVECloudInitIDE2(s string) (CloudInit, bool) {
 	out := CloudInit{}
 	s = strings.TrimSpace(s)
@@ -812,7 +812,7 @@ func parsePVECloudInitIDE2(s string) (CloudInit, bool) {
 		}
 	}
 	if out.Size == "" {
-		// PVE default cloud-init volume is 4M — pveconform's Validate
+		// PVE default cloud-init volume is 4M — proxops's Validate
 		// requires a size; adopt uses the PVE default.
 		out.Size = "4MiB"
 	}
@@ -820,9 +820,9 @@ func parsePVECloudInitIDE2(s string) (CloudInit, bool) {
 }
 
 // pveDiskSizeBytesHuman converts PVE's binary-suffix size token ("4K", "4M",
-// "8G", "0.5G") to a pveconform quantity ("4KiB", "4MiB", "8GiB"). PVE's
+// "8G", "0.5G") to a proxops quantity ("4KiB", "4MiB", "8GiB"). PVE's
 // pve-size suffixes are binary (K=2^10, M=2^20, G=2^30, T=2^40), matching
-// pveconform's ParseBytes binary units; this helper just converts to bytes
+// proxops's ParseBytes binary units; this helper just converts to bytes
 // and re-renders.
 func pveDiskSizeBytesHuman(s string) (string, bool) {
 	b, ok := pveDiskSizeBytes(s)
@@ -834,8 +834,8 @@ func pveDiskSizeBytesHuman(s string) (string, bool) {
 
 // --- shared helpers ---
 
-// HumanFromBytes converts a byte count to a pveconform-friendly quantity
-// string ("4GiB", "512MiB", "512KiB"). pveconform's ParseBytes accepts
+// HumanFromBytes converts a byte count to a proxops-friendly quantity
+// string ("4GiB", "512MiB", "512KiB"). proxops's ParseBytes accepts
 // binary KiB/MiB/GiB/TiB suffixes. ok=false when the value is zero or
 // negative; otherwise the largest exact binary unit is chosen.
 func HumanFromBytes(b int64) (string, bool) {
@@ -858,7 +858,7 @@ func HumanFromBytes(b int64) (string, bool) {
 	case b%kib == 0:
 		return strconv.FormatInt(b/kib, 10) + "KiB", true
 	default:
-		// Non-round value: fall back to bytes. pveconform's ParseBytes
+		// Non-round value: fall back to bytes. proxops's ParseBytes
 		// accepts a bare integer as bytes, so this is round-trippable.
 		return strconv.FormatInt(b, 10), true
 	}

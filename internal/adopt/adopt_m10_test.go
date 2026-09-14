@@ -150,7 +150,7 @@ func TestAdopt_ZeroWritesOnProdFixtureEquivalent(t *testing.T) {
 		}
 	}
 
-	// M11: the template VM MUST be ADOPTED as a pveconform TemplateVM
+	// M11: the template VM MUST be ADOPTED as a proxops TemplateVM
 	// manifest (replacing M10's "skipped + census" contract). PVE-side
 	// sshkeys are redacted to the "*" sentinel in the committed manifest;
 	// cipassword / cicustom stay in the gap report.
@@ -264,7 +264,7 @@ func TestAdopt_ZeroWritesOnProdFixtureEquivalent(t *testing.T) {
 	// Owned options must NOT be gaps.
 	for _, owned := range []string{"console", "features", "nesting", "unprivileged", "protection", "onboot"} {
 		if gapFields[owned] {
-			t.Errorf("%s must not surface as a gap — pveconform M10 owns it via LXCOptions", owned)
+			t.Errorf("%s must not surface as a gap — proxops M10 owns it via LXCOptions", owned)
 		}
 	}
 	if gapFields["ostype"] {
@@ -372,7 +372,7 @@ func TestAdopt_CloudInitOnSATAAlsoExcluded(t *testing.T) {
 
 // TestAdopt_PlainDataDiskStillAdopted pins that the M10 cloud-init
 // exclusion is NARROW: a normal second data disk (no media=cdrom token, no
-// -cloudinit volume name) is pveconform-owned and MUST appear in
+// -cloudinit volume name) is proxops-owned and MUST appear in
 // spec.disks.
 func TestAdopt_PlainDataDiskStillAdopted(t *testing.T) {
 	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
@@ -407,12 +407,12 @@ func TestAdopt_PlainDataDiskStillAdopted(t *testing.T) {
 	}
 	vm := m10ReadVM(t, root, vmPath)
 	if len(vm.Spec.Disks) != 2 {
-		t.Fatalf("disks = %d, want 2 (both scsi data disks are pveconform-owned); got %+v", len(vm.Spec.Disks), vm.Spec.Disks)
+		t.Fatalf("disks = %d, want 2 (both scsi data disks are proxops-owned); got %+v", len(vm.Spec.Disks), vm.Spec.Disks)
 	}
 }
 
 // TestAdopt_TemplateVMsAdoptedAsTemplateVMManifest pins the M11 adoption
-// contract: PVE-template VMs are reverse-translated to pveconform
+// contract: PVE-template VMs are reverse-translated to proxops
 // TemplateVM manifests (kind=TemplateVM, under templatevm/<cluster>/)
 // rather than M10's "skipped + census" contract. The zero-write
 // guarantee is preserved (adopt issues only GETs).
@@ -456,7 +456,7 @@ func TestAdopt_TemplateVMsAdoptedAsTemplateVMManifest(t *testing.T) {
 		t.Fatalf("mock PVE observed %d write requests", m.WritesObserved())
 	}
 	// M11: PVE-template VMs are no longer "skipped + census": they are adopted
-	// into pveconform TemplateVM manifests (kind=TemplateVM). PVE 9.2's
+	// into proxops TemplateVM manifests (kind=TemplateVM). PVE 9.2's
 	// wire-semantic change (one-way-only /template endpoint; 501 on
 	// /untemplate) makes the manifest the right representation of
 	// owner-controlled state.
@@ -675,7 +675,7 @@ func TestAdopt_ClusterNameValidation(t *testing.T) {
 // (mpN=/host:path) are EXPLICITLY reported as gaps and NOT silently dropped
 // into spec.mount-points (which would fail Validate) or lost from the
 // adopt report (which would hide live configuration). GAPS.md: LXC bind
-// mounts are not modelled by pveconform today.
+// mounts are not modelled by proxops today.
 func TestAdopt_LXCBindMountsReported(t *testing.T) {
 	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
 	t.Cleanup(m.Close)
@@ -814,7 +814,7 @@ func m10ReadVM(t *testing.T, root, rel string) *schema.VM {
 	}
 	var vm schema.VM
 	if err := schema.YAMLTo(string(raw), &vm); err != nil {
-		t.Fatalf("manifest %s is not a parseable pveconform VM: %v", rel, err)
+		t.Fatalf("manifest %s is not a parseable proxops VM: %v", rel, err)
 	}
 	return &vm
 }
@@ -827,7 +827,7 @@ func m10ReadLXC(t *testing.T, root, rel string) *schema.LXC {
 	}
 	var lxc schema.LXC
 	if err := schema.YAMLTo(string(raw), &lxc); err != nil {
-		t.Fatalf("manifest %s is not a parseable pveconform LXC: %v", rel, err)
+		t.Fatalf("manifest %s is not a parseable proxops LXC: %v", rel, err)
 	}
 	return &lxc
 }

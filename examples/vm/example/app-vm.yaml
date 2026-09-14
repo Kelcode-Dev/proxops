@@ -3,7 +3,7 @@
 # Two independent mechanisms build this VM's prerequisites:
 #
 #  1. STRUCTURED (inferred): spec.hardware.cdrom.iso names an ISO manifest
-#     ("talos-1-8-0"). pveconform derives an ISO -> VM edge from it, so the
+#     ("talos-1-8-0"). proxops derives an ISO -> VM edge from it, so the
 #     installer ISO is downloaded before the VM is created. No annotation
 #     required.
 #  2. ANNOTATION (escape hatch): the proxops/depends-on edge declares

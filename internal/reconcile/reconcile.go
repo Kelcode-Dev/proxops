@@ -1,4 +1,4 @@
-// Package reconcile is the pveconform pipeline glue: one reconcile cycle.
+// Package reconcile is the proxops pipeline glue: one reconcile cycle.
 //
 // A cycle is:
 //  1. git sync (ADVISORY): on failure keep the last-good tree, flag
@@ -47,7 +47,7 @@ type Reconciler struct {
 	Fetcher Fetcher
 	Budget  plan.Budget
 	Store   *statusx.Store
-	// Cluster is the pveconform cluster name this reconciler owns. It is
+	// Cluster is the proxops cluster name this reconciler owns. It is
 	// part of every statusx.Object written so a multi-cluster agent keeps
 	// per-cluster records in one store.
 	Cluster string
@@ -251,10 +251,10 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 	}
 
 	// Anomalies: non-destructive live-only-slot observations. NEVER PVE
-	// writes — pveconform deliberately does not auto-delete a disk or
+	// writes — proxops deliberately does not auto-delete a disk or
 	// mount point the manifest does not declare (PVE's scsiN=none only
 	// detaches; the underlying LVM volume remains). They are surfaced on
-	// /status (state=anomalous), /metrics (pveconform_anomalies_total{
+	// /status (state=anomalous), /metrics (proxops_anomalies_total{
 	// type="live_only_slot"}), and this log — the operator removes them
 	// manually if that is the intended move.
 	// Record EVERY desired object in /status so the operator sees the full
@@ -305,7 +305,7 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 			State: statusx.Anomalous, LastAction: string(an.What),
 			LastError: an.Reason,
 		})
-		r.log.Warn("pveconform.anomaly",
+		r.log.Warn("proxops.anomaly",
 			slog.String("kind", string(an.Kind)),
 			slog.String("name", an.Name),
 			slog.String("node", an.Node),

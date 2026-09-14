@@ -63,11 +63,11 @@ func ResolveArtifactRefs(resources []Resource) error {
 // resolveCDrom binds the VM's spec.hardware.cdrom.iso reference to the
 // referenced ISO's PVE volid and records the IDE slot PVE will wire it at.
 // Three states:
-//   - iso empty            → cdromManaged=false (pveconform does NOT own the slot)
+//   - iso empty            → cdromManaged=false (proxops does NOT own the slot)
 //   - iso = CDROMNone      → cdromManaged=true, cdromVolid="none"
 //   - iso = <ISO name>     → cdromManaged=true, cdromVolid="<storage>:iso/<filename>[,media=X]"
 //
-// When iso=<ISO name>, pveconform also validates that the ISO is
+// When iso=<ISO name>, proxops also validates that the ISO is
 // placed on the VM's node (the ISO must be downloaded before the VM's
 // cdrom is attached at create time).
 func (v *VM) resolveCDrom(byRef map[Ref]Resource) error {

@@ -17,7 +17,7 @@ import (
 //	- PVE's /qemu/{id}/resize and /lxc/{id}/resize JSON endpoints return
 //	  501 on PVE 9.2, so there is no safe API resize path.
 //
-// pveconform therefore classifies: pool/size/storage drift on a live
+// proxops therefore classifies: pool/size/storage drift on a live
 // disk -> NON-destructive anomaly; iothread toggle -> safe in-place
 // write; brand-new slot -> safe create write.
 
@@ -51,7 +51,7 @@ const liveDisk8G = "local-lvm:vm-100-disk-0,size=8G"
 // liveBaseline is a PVE /config report that fully converges with
 // vmWithOneDisk EXCEPT the disk-under-test passed in (scsi0). It carries the
 // other owned fields (memory, cpu, cores, scsihw, net0, tags) so that any
-// drift pveconform reports in a test is attributable to the disk, not to
+// drift proxops reports in a test is attributable to the disk, not to
 // unrelated fields.
 func liveBaseline(disk string) map[string]any {
 	return map[string]any{
@@ -61,7 +61,7 @@ func liveBaseline(disk string) map[string]any {
 		"scsihw": "virtio-scsi-single",
 		"scsi0":  disk,
 		"net0":   "virtio=AA:BB:CC:00:00:01,bridge=vmbr0",
-		"tags":   []any{"pveconform"},
+		"tags":   []any{"proxops"},
 	}
 }
 
@@ -74,7 +74,7 @@ func TestVMDiskSizeDriftIsAnomalyNotWrite(t *testing.T) {
 	live := liveBaseline("local-lvm:vm-100-disk-0,size=16G")
 	upd, _, changed := vm.Drift(live)
 	if changed {
-		t.Fatalf("Drift wrote a config for a live-disk size drift; pveconform must NOT auto-resize a data-bearing disk")
+		t.Fatalf("Drift wrote a config for a live-disk size drift; proxops must NOT auto-resize a data-bearing disk")
 	}
 	if _, ok := upd["scsi0"]; ok {
 		t.Fatalf("Drift emitted scsi0=%v; must not write desired size over a live disk", upd["scsi0"])
@@ -105,7 +105,7 @@ func TestVMDiskPoolDriftIsAnomalyNotWrite(t *testing.T) {
 }
 
 // TestVMDiskIothreadDriftIsSafeInPlaceWrite: an iothread toggle on a live
-// disk IS safe; pveconform rewrites the slot in PVE's LIVE form (keeping
+// disk IS safe; proxops rewrites the slot in PVE's LIVE form (keeping
 // the PVE-assigned volume id + exact size token) so PVE updates the option
 // in place rather than recreating the volume.
 func TestVMDiskIothreadDriftIsSafeInPlaceWrite(t *testing.T) {
@@ -146,7 +146,7 @@ func TestVMDiskNewSlotIsSafeCreateWrite(t *testing.T) {
 }
 
 // TestLXCRootfsSizeDriftIsAnomaly: the same data-loss guard applies to
-// LXC rootfs - pveconform must not auto-resize a live LXC volume.
+// LXC rootfs - proxops must not auto-resize a live LXC volume.
 func TestLXCRootfsSizeDriftIsAnomaly(t *testing.T) {
 	src := "apiVersion: " + schema.APIVersion + "\n" +
 		"kind: LXC\n" +
@@ -168,7 +168,7 @@ func TestLXCRootfsSizeDriftIsAnomaly(t *testing.T) {
 		"memory": "512", "cores": "1",
 		"rootfs": "local-lvm:vm-200-disk-0,mp=/,size=8G",
 		"net0":   "net0,bridge=vmbr0,type=veth",
-		"tags":   []any{"pveconform"},
+		"tags":   []any{"proxops"},
 	}
 	upd, _, _ := lxc.Drift(live)
 	if _, ok := upd["rootfs"]; ok {
@@ -189,7 +189,7 @@ func TestLXCRootfsSizeDriftIsAnomaly(t *testing.T) {
 // TestDiskLiveOnlyBareVolumeIsAnomalyNotWrite: PVE reports a bare
 // "local-lvm:4G" (no volume name) at scsi0; manifest wants 8G local-lvm.
 // The size mismatch on a live slot must be a non-destructive anomaly, and
-// pveconform must NOT emit a scsi0 write (which would recreate the volume).
+// proxops must NOT emit a scsi0 write (which would recreate the volume).
 func TestDiskLiveOnlyBareVolumeIsAnomalyNotWrite(t *testing.T) {
 	vm := vmWithOneDisk(t, false) // wants scsi0 local-lvm 8GiB
 	// PVE reports a bare numeric allocation "local-lvm:4" (pool + GiB size,
@@ -197,7 +197,7 @@ func TestDiskLiveOnlyBareVolumeIsAnomalyNotWrite(t *testing.T) {
 	live := liveBaseline("local-lvm:4")
 	upd, _, _ := vm.Drift(live)
 	if v, ok := upd["scsi0"]; ok {
-		t.Fatalf("pveconform must NOT write scsi0 over a bare live volume; got %v", v)
+		t.Fatalf("proxops must NOT write scsi0 over a bare live volume; got %v", v)
 	}
 	anoms := vm.DriftAnomalies(live)
 	if len(anoms) == 0 {
@@ -250,11 +250,11 @@ func TestLXCRootfsBareFormSizeDriftIsAnomaly(t *testing.T) {
 		"cores":  1,
 		"rootfs": "local-lvm:8",
 		"net0":   "veth=VETH",
-		"tags":   []any{"pveconform"},
+		"tags":   []any{"proxops"},
 	}
 	upd, _, _ := lxc.Drift(live)
 	if v, ok := upd["rootfs"]; ok {
-		t.Fatalf("pveconform must NOT write rootfs over a bare live LXC volume; got %v", v)
+		t.Fatalf("proxops must NOT write rootfs over a bare live LXC volume; got %v", v)
 	}
 	anoms := lxc.DriftAnomalies(live)
 	if len(anoms) == 0 {
@@ -285,7 +285,7 @@ func TestLXCRootfsAbsentIsEmptyNewSlot(t *testing.T) {
 		"memory": 512,
 		"cores":  1,
 		"net0":   "veth=VETH",
-		"tags":   []any{"pveconform"},
+		"tags":   []any{"proxops"},
 		// no rootfs key
 	}
 	upd, _, changed := lxc.Drift(live)
@@ -302,7 +302,7 @@ func TestLXCRootfsAbsentIsEmptyNewSlot(t *testing.T) {
 
 // TestDiskBareFormMatchingIsConvergedNoOp: PVE reports the bare numeric form
 // "local-lvm:8" matching the desired pool+size (no volume name). This is a
-// LIVE allocation that pveconform "owns" (pool+size match): converged, no
+// LIVE allocation that proxops "owns" (pool+size match): converged, no
 // write, no anomaly, no stop. Pins that bare forms don't false-flap.
 func TestDiskBareFormMatchingIsConvergedNoOp(t *testing.T) {
 	vm := vmWithOneDisk(t, false)       // scsi0 local-lvm 8GiB
@@ -345,7 +345,7 @@ func TestLXCRootfsBareFormMatchingIsConverged(t *testing.T) {
 		"net0":         "name=net0,bridge=vmbr0",
 		"ostype":       "linux",
 		"unprivileged": "0",
-		"tags":         []any{"pveconform"},
+		"tags":         []any{"proxops"},
 	}
 	upd, stop, changed := lxc.Drift(live)
 	if changed {

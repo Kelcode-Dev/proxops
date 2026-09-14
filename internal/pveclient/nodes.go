@@ -6,7 +6,7 @@ import (
 )
 
 // This file adds the read-only "list" surfaces needed by `adopt` (reverse
-// engineering live PVE into pveconform YAML):
+// engineering live PVE into proxops YAML):
 //
 //   - the PVE node list (adopt scans only the configured node allowlist);
 //   - per-node VM / LXC listings;
@@ -27,7 +27,7 @@ type VMListEntry struct {
 //
 // PVE's LXC listing uses the shared PVE object-id namespace: the key is
 // `vmid` (even though some LXC config endpoints use `cid` elsewhere). The
-// mock PVE mirrors this so pveconform can consume one shape.
+// mock PVE mirrors this so proxops can consume one shape.
 type LXCListEntry struct {
 	CID    int    `json:"vmid"`
 	Name   string `json:"name"`

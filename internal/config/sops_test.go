@@ -55,12 +55,12 @@ func gitRepoPath(t *testing.T) string {
 	return root
 }
 
-// writePVEconformConfig lays out a single-cluster pveconform config + a fake
+// writeProxOpsConfig lays out a single-cluster proxops config + a fake
 // SOPS-encrypted file next to it, under a git worktree marker. The
 // `secretsKeysYAML` is the `secrets:` block inside the cluster.
 // extraPVEYAML is optional extra top-level pve.* body lines (for bootstrap
 // credential testing).
-func writePVEconformConfig(t *testing.T, cluster, secretsFile, secretsKeysYAML, extraPVEYAML string) (root, cfgPath string) {
+func writeProxOpsConfig(t *testing.T, cluster, secretsFile, secretsKeysYAML, extraPVEYAML string) (root, cfgPath string) {
 	t.Helper()
 	root = gitRepoPath(t)
 	clDir := filepath.Join(root, "clusters", cluster)
@@ -74,7 +74,7 @@ func writePVEconformConfig(t *testing.T, cluster, secretsFile, secretsKeysYAML, 
 		t.Fatal(err)
 	}
 	var b strings.Builder
-	b.WriteString("# pveconform test config (M9 SOPS)\n")
+	b.WriteString("# proxops test config (M9 SOPS)\n")
 	b.WriteString("log:\n  level: info\n")
 	b.WriteString("pve:\n  auth: token\n  clusters:\n")
 	b.WriteString("    " + cluster + ":\n")
@@ -104,9 +104,9 @@ func writePVEconformConfig(t *testing.T, cluster, secretsFile, secretsKeysYAML, 
 // the M9 fixture document carries.
 func fullSopsKeys() string {
 	return "        pve:\n" +
-		"          user: pveconform-user\n" +
-		"          token-id: pveconform-token-id\n" +
-		"          token: pveconform-token\n" +
+		"          user: proxops-user\n" +
+		"          token-id: proxops-token-id\n" +
+		"          token: proxops-token\n" +
 		"        git:\n" +
 		"          token: pve-git-token\n"
 }
@@ -116,12 +116,12 @@ func fullSopsKeys() string {
 func TestResolveSOPSSuccess(t *testing.T) {
 	const cluster = "alpha"
 	stubSOPS(t, map[string]string{
-		"pveconform-user":     sopsUser,
-		"pveconform-token-id": sopsTokenID,
-		"pveconform-token":    sopsToken,
-		"pve-git-token":       sopsGitToken,
+		"proxops-user":     sopsUser,
+		"proxops-token-id": sopsTokenID,
+		"proxops-token":    sopsToken,
+		"pve-git-token":    sopsGitToken,
 	})
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -161,12 +161,12 @@ func TestResolveSOPSSuccess(t *testing.T) {
 func TestPVEParamsFromDecryptedCredential(t *testing.T) {
 	const cluster = "alpha"
 	stubSOPS(t, map[string]string{
-		"pveconform-user":     sopsUser,
-		"pveconform-token-id": sopsTokenID,
-		"pveconform-token":    sopsToken,
-		"pve-git-token":       sopsGitToken,
+		"proxops-user":     sopsUser,
+		"proxops-token-id": sopsTokenID,
+		"proxops-token":    sopsToken,
+		"pve-git-token":    sopsGitToken,
 	})
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -190,10 +190,10 @@ func TestResolveSOPSNoSecretsFile(t *testing.T) {
 	invoked := 0
 	restore := secrets.SetTestDecrypter(func(string) (map[string]string, error) {
 		invoked++
-		return map[string]string{"pveconform-token": sopsToken}, nil
+		return map[string]string{"proxops-token": sopsToken}, nil
 	})
 	t.Cleanup(restore)
-	_, cfgPath := writePVEconformConfig(t, cluster, "", "", "  user: bootstrap@pve\n  token-id: bootstrap-id\n  token: bootstrap-tok\n")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "", "", "  user: bootstrap@pve\n  token-id: bootstrap-id\n  token: bootstrap-tok\n")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -215,12 +215,12 @@ func TestResolveSOPSNoSecretsFile(t *testing.T) {
 // §12 "missing secret reference fails clearly").
 func TestResolveSOPSMissingKeyFails(t *testing.T) {
 	const cluster = "alpha"
-	// Stub omits `pveconform-token` but the config references it.
+	// Stub omits `proxops-token` but the config references it.
 	stubSOPS(t, map[string]string{
-		"pveconform-user":     sopsUser,
-		"pveconform-token-id": sopsTokenID,
+		"proxops-user":     sopsUser,
+		"proxops-token-id": sopsTokenID,
 	})
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(),
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(),
 		// Deliberate bootstrap creds that MUST NOT be silently used.
 		"  user: bootstrap@pve\n  token-id: bootstrap-id\n  token: bootstrap-tok\n")
 	c, err := config.Load(cfgPath)
@@ -229,9 +229,9 @@ func TestResolveSOPSMissingKeyFails(t *testing.T) {
 	}
 	err = c.ResolveSOPS()
 	if err == nil {
-		t.Fatal("ResolveSOPS: want error for missing pveconform-token key, got nil (silent fallback would violate §6)")
+		t.Fatal("ResolveSOPS: want error for missing proxops-token key, got nil (silent fallback would violate §6)")
 	}
-	if !strings.Contains(err.Error(), "pveconform-token") {
+	if !strings.Contains(err.Error(), "proxops-token") {
 		t.Fatalf("error must name the failing SOPS key: %v", err)
 	}
 	// The SOPS reference that DID resolve must NOT be populated: a failed
@@ -246,18 +246,18 @@ func TestResolveSOPSMissingKeyFails(t *testing.T) {
 func TestResolveSOPSEmptyValueFails(t *testing.T) {
 	const cluster = "alpha"
 	stubSOPS(t, map[string]string{
-		"pveconform-user":     sopsUser,
-		"pveconform-token-id": sopsTokenID,
-		"pveconform-token":    "   ", // whitespace-only = empty
+		"proxops-user":     sopsUser,
+		"proxops-token-id": sopsTokenID,
+		"proxops-token":    "   ", // whitespace-only = empty
 	})
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if err := c.ResolveSOPS(); err == nil {
 		t.Fatal("ResolveSOPS: want fail-closed error for an empty SOPS token value")
-	} else if !strings.Contains(err.Error(), "pveconform-token") {
+	} else if !strings.Contains(err.Error(), "proxops-token") {
 		t.Fatalf("error must name the empty SOPS key: %v", err)
 	}
 }
@@ -271,7 +271,7 @@ func TestSOPSUnencryptedFileFails(t *testing.T) {
 		return nil, secrets.ErrUnencryptedSecrets
 	})
 	t.Cleanup(restore)
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -295,7 +295,7 @@ func TestSOPSWrongIdentityFails(t *testing.T) {
 		return nil, secrets.ErrIdentityMismatch
 	})
 	t.Cleanup(restore)
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -317,7 +317,7 @@ func TestSOPSNoIdentityFails(t *testing.T) {
 		return nil, secrets.ErrNoIdentity
 	})
 	t.Cleanup(restore)
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -343,7 +343,7 @@ func TestSOPSNoPlaintextInErrorText(t *testing.T) {
 		return nil, secrets.ErrMalformedDocument
 	})
 	t.Cleanup(restore)
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -370,12 +370,12 @@ func TestSOPSNoPlaintextInErrorText(t *testing.T) {
 func TestSOPSNoPlaintextInConfigJSON(t *testing.T) {
 	const cluster = "alpha"
 	stubSOPS(t, map[string]string{
-		"pveconform-user":     sopsUser,
-		"pveconform-token-id": sopsTokenID,
-		"pveconform-token":    sopsToken,
-		"pve-git-token":       sopsGitToken,
+		"proxops-user":     sopsUser,
+		"proxops-token-id": sopsTokenID,
+		"proxops-token":    sopsToken,
+		"pve-git-token":    sopsGitToken,
 	})
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -401,15 +401,15 @@ func TestSOPSNoPlaintextInConfigJSON(t *testing.T) {
 func TestSOPSPrecedenceSopsBeatsEnvBeatsYAML(t *testing.T) {
 	const cluster = "alpha"
 	stubSOPS(t, map[string]string{
-		"pveconform-user":     sopsUser,
-		"pveconform-token-id": sopsTokenID,
-		"pveconform-token":    sopsToken,
-		"pve-git-token":       sopsGitToken,
+		"proxops-user":     sopsUser,
+		"proxops-token-id": sopsTokenID,
+		"proxops-token":    sopsToken,
+		"pve-git-token":    sopsGitToken,
 	})
 	// Env-var values distinct from the YAML values.
-	t.Setenv("PVECONFORM_PVE_USER", "envuser@pam")
-	t.Setenv("PVECONFORM_PVE_TOKEN", "envtok-0000")
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(),
+	t.Setenv("PROXOPS_PVE_USER", "envuser@pam")
+	t.Setenv("PROXOPS_PVE_TOKEN", "envtok-0000")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(),
 		"  user: yamluser@pam\n  token-id: yamlid\n  token: yamltok-1111\n")
 	c, err := config.Load(cfgPath)
 	if err != nil {
@@ -441,12 +441,12 @@ func TestSOPSPrecedenceEnvBeatsYAML_Bootstrap(t *testing.T) {
 	invoked := 0
 	restore := secrets.SetTestDecrypter(func(string) (map[string]string, error) {
 		invoked++
-		return map[string]string{"pveconform-token": sopsToken}, nil
+		return map[string]string{"proxops-token": sopsToken}, nil
 	})
 	t.Cleanup(restore)
-	t.Setenv("PVECONFORM_PVE_USER", "envuser@pam")
-	t.Setenv("PVECONFORM_PVE_TOKEN", "envtok-0000")
-	_, cfgPath := writePVEconformConfig(t, cluster, "", "",
+	t.Setenv("PROXOPS_PVE_USER", "envuser@pam")
+	t.Setenv("PROXOPS_PVE_TOKEN", "envtok-0000")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "", "",
 		"  user: yamluser@pam\n  token-id: yamlid\n  token: yamltok-1111\n")
 	c, err := config.Load(cfgPath)
 	if err != nil {
@@ -506,7 +506,7 @@ func TestSOPSNoCrossClusterLeak(t *testing.T) {
 		"    beta:\n      base-url: https://b.example:8006\n      nodes: [b1]\n      secrets-file: " + bSops + "\n      secrets:\n" +
 		"        pve:\n          user: beta-user\n          token-id: beta-id\n          token: beta-tok\n" +
 		"git:\n  branch: main\n  path: .\nlisten: 127.0.0.1:0\n"
-	rootCfg := filepath.Join(root, "pveconform.yaml")
+	rootCfg := filepath.Join(root, "proxops.yaml")
 	_ = os.WriteFile(rootCfg, []byte(cfg), 0o600)
 	c, err := config.Load(rootCfg)
 	if err != nil {
@@ -544,12 +544,12 @@ func TestValidate_SOPSOnlyConfigFailsWithoutResolve(t *testing.T) {
 	// Stub so that ResolveSOPS, if called, would succeed — but we do NOT
 	// call it here.
 	stubSOPS(t, map[string]string{
-		"pveconform-user":     sopsUser,
-		"pveconform-token-id": sopsTokenID,
-		"pveconform-token":    sopsToken,
-		"pve-git-token":       sopsGitToken,
+		"proxops-user":     sopsUser,
+		"proxops-token-id": sopsTokenID,
+		"proxops-token":    sopsToken,
+		"pve-git-token":    sopsGitToken,
 	})
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -575,7 +575,7 @@ func TestValidate_SOPSResolveFails_StaysFailing(t *testing.T) {
 		return nil, secrets.ErrNoIdentity
 	})
 	t.Cleanup(restore)
-	_, cfgPath := writePVEconformConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
+	_, cfgPath := writeProxOpsConfig(t, cluster, "secrets.sops.yaml", fullSopsKeys(), "")
 	c, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)

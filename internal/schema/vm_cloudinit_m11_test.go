@@ -19,15 +19,15 @@ func baseCloudInitVM(name string) *VM {
 
 func baseLiveVM(id, name string) map[string]any {
 	return map[string]any{
-		// PVE stores tags as a comma-joined string on /config; pveconform
-		// appends its ownership tag "pveconform" at write time. Include
+		// PVE stores tags as a comma-joined string on /config; proxops
+		// appends its ownership tag "proxops" at write time. Include
 		// it here so Drift() does not emit a spurious tags-update.
 		"memory": "1024",
 		"cpu":    "host",
 		"cores":  "1",
 		"vmid":   id,
 		"name":   name,
-		"tags":   "pveconform",
+		"tags":   "proxops",
 		"scsi0":  "local-lvm:vm-" + id + "-disk-0,size=4G",
 		"net0":   "virtio=52:54:00:FF:00:01,bridge=vmbr0",
 	}

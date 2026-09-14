@@ -1,4 +1,4 @@
-// Package composition is the multi-cluster GitOps boundary for pveconform (M8).
+// Package composition is the multi-cluster GitOps boundary for proxops (M8).
 //
 // The repository is the source of truth. Its shape:
 //
@@ -89,12 +89,12 @@ func (c *Composition) SortedFiles() []string {
 // cluster).
 //
 // configuredClusters is the set of cluster names present in pve.clusters of
-// the pveconform config. Both directions are checked so nothing is silently
+// the proxops config. Both directions are checked so nothing is silently
 // dropped:
 //   - a composition without a configured PVE endpoint fails closed (unknown
 //     cluster names must fail closed);
 //   - a configured PVE endpoint without a composition fails closed (there is
-//     nothing pveconform can reconcile on it — and pruning off an unknown
+//     nothing proxops can reconcile on it — and pruning off an unknown
 //     desired set is exactly the footgun the composition exists to prevent).
 //
 // An empty resources: list for a configured cluster is a valid, safe
@@ -134,7 +134,7 @@ func AllCompositions(root string, configuredClusters []string) (map[string]*Comp
 	}
 	for name := range compositions {
 		if !configured[name] {
-			errs = append(errs, fmt.Sprintf("composition clusters/%s declares resources but pve.clusters has no entry for %q; add the cluster to the pveconform config (unknown cluster names fail closed)", name, name))
+			errs = append(errs, fmt.Sprintf("composition clusters/%s declares resources but pve.clusters has no entry for %q; add the cluster to the proxops config (unknown cluster names fail closed)", name, name))
 		}
 	}
 	for name := range configured {

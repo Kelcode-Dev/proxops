@@ -10,17 +10,17 @@ const (
 	KindISO        Kind = "ISO"
 	// KindDiskImage is a downloadable disk-image storage artifact (PVE 9
 	// `import` content pool: qcow2/vmdk/raw). It is the third ArtifactKind
-	// and is what lets a pveconform VM boot a real OS via create-time
+	// and is what lets a proxops VM boot a real OS via create-time
 	// `import-from` without a template. Referenced by VM spec.disks[].image.
 	KindDiskImage Kind = "DiskImage"
 	// KindTemplateVM is a PVE qemu VM that has been marked as a
-	// template (PVE `template=1`). pveconform manages its lifecycle as
+	// template (PVE `template=1`). proxops manages its lifecycle as
 	// a first-class object (M11): create + mark-template, config drift,
 	// ownership-tag prunes, and — because PVE 9.2 does not implement
-	// /qemu/{id}/untemplate — a non-destructive anomaly when a pveconform
+	// /qemu/{id}/untemplate — a non-destructive anomaly when a proxops
 	// VM desired matches a PVE-side template.
 	//
-	// Wire shape: identical to VM. pveconform shares PVE's per-node qm
+	// Wire shape: identical to VM. proxops shares PVE's per-node qm
 	// id space with VM, so a TemplateVM and a VM cannot co-exist on the
 	// same PVE id on the same node. PVE's /cluster/resources reports
 	// both with type="qm"; the template flag in the per-object /config
@@ -106,14 +106,14 @@ type Resource interface {
 	// actual encodings, which is how "diff(apply(X)) == 0" is testable.
 	Drift(current map[string]any) (updateParams map[string]any, stopRequired, changed bool)
 
-	// DriftAnomalies reports live-only devices that pveconform owns the
+	// DriftAnomalies reports live-only devices that proxops owns the
 	// manifest but does not want to auto-delete:
 	//   - VM: PVE disk slots (scsi*, virtio*, sata*) present on the live
 	//     object with no matching entry in spec.disks. A live-only disk
 	//     means somebody hand-added a drive; PVE's `scsiN=none` detach
 	//     does NOT delete the underlying LVM volume (probe-verified on
 	//     PVE 9.2), and deleting an arbitrary manifest-author-unaware
-	//     volume would be a data-loss feature. So pveconform surfaces
+	//     volume would be a data-loss feature. So proxops surfaces
 	//     the anomaly on /status + /metrics without taking action.
 	//   - LXC: PVE mp* slots present on the live object with no matching
 	//     entry in spec.mount-points. Same semantics.

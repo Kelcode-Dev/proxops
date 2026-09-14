@@ -1,4 +1,4 @@
-// Package config holds the pveconform runtime configuration.
+// Package config holds the proxops runtime configuration.
 //
 // Precedence (lowest to highest): built-in defaults, then the YAML config
 // file (--config), then explicit command-line flags, then selected
@@ -61,7 +61,7 @@ type PVECluster struct {
 	// When empty, no allowlist check is performed for that cluster.
 	Nodes []string `yaml:"nodes"`
 	// SecretsFile is the path to this cluster's SOPS-encrypted secret file.
-	// A relative path resolves against the DIRECTORY OF THE PVECONFORM
+	// A relative path resolves against the DIRECTORY OF THE PROXOPS
 	// CONFIG FILE, not the CWD (task §5 — same config works from any CWD).
 	// Empty means "this cluster does not use SOPS": the shared pve.-level
 	// bootstrap credentials + env overlay apply, as they did in M8.
@@ -69,23 +69,23 @@ type PVECluster struct {
 	// The SOPS file shape is flat under a top-level `secrets:` mapping:
 	//
 	//	secrets:
-	//	  pveconform-user: root@pam
-	//	  pveconform-token-id: pveconform
-	//	  pveconform-token: <the PVE API token value>
-	//	  pveconform-password: <only when the cluster's pve.auth=ticket>
-	//	  pveconform-git-token: <the git fetch token, if git.mode=url>
+	//	  proxops-user: root@pam
+	//	  proxops-token-id: proxops
+	//	  proxops-token: <the PVE API token value>
+	//	  proxops-password: <only when the cluster's pve.auth=ticket>
+	//	  proxops-git-token: <the git fetch token, if git.mode=url>
 	//
 	// The age recipient (public key) is recorded in the SOPS file's `sops:`
 	// metadata and may be committed (task §7 "the repository may contain the
 	// public age recipient configuration required to encrypt secrets");
 	// the age identity (PRIVATE key) MUST come from OUTSIDE the encrypted
 	// repository — the standard SOPS age identity mechanism on the
-	// pveconform host's process environment
+	// proxops host's process environment
 	// (SOPS_AGE_KEY_FILE / SOPS_AGE_KEY / AGE_KEY_FILE — task §7, §8).
-	// pveconform decrypts into memory only and never writes the plaintext
+	// proxops decrypts into memory only and never writes the plaintext
 	// to disk (task §2, §13).
 	SecretsFile string `yaml:"secrets-file"`
-	// Secrets references which decrypted SOPS keys carry which pveconform
+	// Secrets references which decrypted SOPS keys carry which proxops
 	// credential fields for this cluster. The reference shape is the
 	// "small, explicit" block (task §3 "a configuration concept such as...
 	// may be appropriate"):
@@ -93,16 +93,16 @@ type PVECluster struct {
 	//	secrets-file: secrets.sops.yaml
 	//	secrets:
 	//	  pve:
-	//	    user: pveconform-user
-	//	    token-id: pveconform-token-id
-	//	    token: pveconform-token
+	//	    user: proxops-user
+	//	    token-id: proxops-token-id
+	//	    token: proxops-token
 	//	  git:
-	//	    token: pveconform-git-token
+	//	    token: proxops-git-token
 	//
 	// When SecretsFile is set but the reference is missing for a field,
-	// pveconform falls back to the shared pve.-level bootstrap YAML/env
+	// proxops falls back to the shared pve.-level bootstrap YAML/env
 	// value for that field. A field that IS referenced but has a
-	// missing/empty value in the SOPS file FAILS CLOSED — pveconform never
+	// missing/empty value in the SOPS file FAILS CLOSED — proxops never
 	// silently substitutes a lower-precedence source for a field the
 	// operator asked SOPS to carry (task §6 "do not allow an empty/missing
 	// SOPS secret to silently result in an unintended credential being
@@ -111,7 +111,7 @@ type PVECluster struct {
 }
 
 // PVECredRefs is the per-cluster reference block: which SOPS file keys
-// supply which pveconform credential fields. The shape is closed and
+// supply which proxops credential fields. The shape is closed and
 // explicit (task §3, §14 "small, explicit secret format" — no template
 // language, no glob, no interpolation).
 type PVECredRefs struct {
@@ -156,13 +156,13 @@ type PVEConfig struct {
 	// TokenID is the PVE API token name (the part before '=' in the
 	// user@realm!tokenid=uuid credential). Preferred over TokenValue.
 	TokenID string `yaml:"token-id"`
-	// Token is the API token UUID (token auth). Prefer env PVECONFORM_PVE_TOKEN.
+	// Token is the API token UUID (token auth). Prefer env PROXOPS_PVE_TOKEN.
 	Token string `yaml:"token"`
 	// TokenValue, when set, overrides TokenID+Token with a fully-composed
-	// "user@realm!tokenid=uuid" credential. Prefer env PVECONFORM_PVE_TOKEN_VALUE.
+	// "user@realm!tokenid=uuid" credential. Prefer env PROXOPS_PVE_TOKEN_VALUE.
 	TokenValue string `yaml:"token-value"`
 	// Password is the user's password (ticket auth only).
-	// Prefer env PVECONFORM_PVE_PASSWORD.
+	// Prefer env PROXOPS_PVE_PASSWORD.
 	Password string `yaml:"password"`
 	// CAFile optionally points at a PVE cluster self-signed CA. It applies
 	// to every cluster endpoint in this configuration; per-cluster CAs come
@@ -206,7 +206,7 @@ func (c *PVEConfig) Cluster(name string) (PVECluster, bool) {
 type GitConfig struct {
 	// URL is the git repository (https preferred). Mutually exclusive with Path.
 	URL string `yaml:"url"`
-	// Token authenticates git fetches. Prefer env PVECONFORM_GIT_TOKEN.
+	// Token authenticates git fetches. Prefer env PROXOPS_GIT_TOKEN.
 	Token string `yaml:"token"`
 	// Branch is the ref to reconcile from. Default "main".
 	Branch string `yaml:"branch"`
@@ -225,14 +225,14 @@ type ReconcileConfig struct {
 	PruneBudget int `yaml:"prune-budget"`
 }
 
-// Config is the complete pveconform configuration.
+// Config is the complete proxops configuration.
 type Config struct {
 	Log     LogConfig       `yaml:"log"`
 	PVE     PVEConfig       `yaml:"pve"`
 	Git     GitConfig       `yaml:"git"`
 	Rec     ReconcileConfig `yaml:"reconcile"`
 	Listen  string          `yaml:"listen"`   // HTTP endpoint for /healthz /metrics /status
-	DataDir string          `yaml:"data-dir"` // git cache, CA pinning; default ~/.local/share/pveconform
+	DataDir string          `yaml:"data-dir"` // git cache, CA pinning; default ~/.local/share/proxops
 
 	// SopsResolved holds the IN-MEMORY, decrypted SOPS secret values for
 	// every cluster that declared a SOPS reference. It is populated by
@@ -248,8 +248,8 @@ type Config struct {
 }
 
 // SopsClusterSecrets holds the decrypted, in-memory PVE credentials for one
-// cluster, keyed by the PVE credential fields pveconform needs. The git
-// fetch token is shared (not per-cluster) because pveconform has a single
+// cluster, keyed by the PVE credential fields proxops needs. The git
+// fetch token is shared (not per-cluster) because proxops has a single
 // git source (URL mode) that serves every cluster.
 type SopsClusterSecrets struct {
 	User     string
@@ -281,19 +281,19 @@ func Defaults() *Config {
 //
 // Path resolution (M9):
 //   - relative `pve.clusters.<name>.secrets-file` paths resolve against
-//     the DIRECTORY OF THE PVECONFORM CONFIG FILE, not the CWD. Same
+//     the DIRECTORY OF THE PROXOPS CONFIG FILE, not the CWD. Same
 //     cluster-local config → same SOPS file, regardless of where
-//     pveconform is invoked from (task §5, §18).
+//     proxops is invoked from (task §5, §18).
 //   - `git.path: "."` is a sentinel that resolves to the nearest `.git`
 //     ancestor of the config file's directory; the config path itself is
 //     canonicalised to absolute first so that CWD-relative `--config
 //     clusters/<name>/config.yaml` works. If no `.git` ancestor is found,
-//     Load fails closed: pveconform does not guess the git tree
+//     Load fails closed: proxops does not guess the git tree
 //     (task §5 "no implicit magic").
 //
 // Load does NOT decrypt anything. SOPS happens in Config.ResolveSOPS
 // (called by app.New after Load + OverlayFromEnv), so that hosts running
-// pveconform without SOPS credentials never invoke the sops binary
+// proxops without SOPS credentials never invoke the sops binary
 // (task §16).
 func Load(path string) (*Config, error) {
 	c := Defaults()
@@ -325,13 +325,13 @@ func Load(path string) (*Config, error) {
 	}
 	// YAML is a plain string format; "~" at the start of a filesystem path
 	// must be expanded manually (go's os.UserHomeDir doesn't do this for us).
-	// Without this, `data-dir: ~/.local/share/pveconform` produces a stale
+	// Without this, `data-dir: ~/.local/share/proxops` produces a stale
 	// `./~` directory under $PWD.
 	c.DataDir = expandTilde(c.DataDir)
 	c.PVE.CAFile = expandTilde(c.PVE.CAFile)
 
 	// M9: resolve per-cluster secrets-file paths. Relative paths are
-	// resolved against the DIRECTORY OF THE PVECONFORM CONFIG FILE. This
+	// resolved against the DIRECTORY OF THE PROXOPS CONFIG FILE. This
 	// keeps the GitOps layout self-contained: clusters/<name>/config.yaml
 	// + clusters/<name>/secrets.sops.yaml live side by side, and the
 	// agent's SOPS call is independent of process CWD.
@@ -347,18 +347,18 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
-	// M9: the git.path sentinel. "git.path: ." means "this pveconform config
+	// M9: the git.path sentinel. "git.path: ." means "this proxops config
 	// lives inside the GitOps repo; use the repo that contains this config
 	// file as the git work tree". Load walks upward from the config file's
 	// directory to the nearest .git marker. If no such ancestor exists, Load
-	// fails closed with a clear error: pveconform never silently picks a git
+	// fails closed with a clear error: proxops never silently picks a git
 	// tree for the operator (task §5: no implicit magic, no silent
 	// selection).
 	if c.Git.Path == "." {
 		if root := walkUpForGitRoot(filepath.Dir(path)); root != "" {
 			c.Git.Path = root
 		} else {
-			return nil, fmt.Errorf("git.path: \".\" was set in %s but no .git worktree was found in any ancestor directory; pveconform will not guess the git tree — cd into the GitOps repository and retry, or set an explicit git.path", path)
+			return nil, fmt.Errorf("git.path: \".\" was set in %s but no .git worktree was found in any ancestor directory; proxops will not guess the git tree — cd into the GitOps repository and retry, or set an explicit git.path", path)
 		}
 	}
 	return c, nil
@@ -396,7 +396,7 @@ func walkUpForGitRoot(dir string) string {
 //   - A cluster with no SecretsFile is skipped (bootstrap credentials
 //     apply; M8 behaviour).
 //   - A cluster whose named SOPS key is missing/empty in the decrypted
-//     file errors (pveconform never silently substitutes a lower-
+//     file errors (proxops never silently substitutes a lower-
 //     precedence source for a field the operator asked SOPS to carry).
 //   - An unencrypted/invalid SOPS file errors (secrets.ErrUnencryptedSecrets /
 //     secrets.ErrMalformedDocument).
@@ -405,7 +405,7 @@ func walkUpForGitRoot(dir string) string {
 //
 // The SOPS age identity (private key) comes from OUTSIDE the encrypted
 // repository — the operator's process environment (SOPS_AGE_KEY_FILE / SOPS_
-// AGE_KEY / AGE_KEY_FILE). pveconform never sets or reads it itself
+// AGE_KEY / AGE_KEY_FILE). proxops never sets or reads it itself
 // (task §8).
 func (c *Config) ResolveSOPS() error {
 	c.SopsResolved = map[string]SopsClusterSecrets{}
@@ -461,7 +461,7 @@ func (c *Config) ResolveSOPS() error {
 }
 
 func sopsKeyMissingErr(cluster, file, key, field string) error {
-	return fmt.Errorf("cluster %s: SOPS file %s declares key %q for %s, but that key is missing or empty in the decrypted SOPS document; pveconform fails closed rather than falling back to a bootstrap credential for that field — add the key to the encrypted file or drop the reference from config.yaml",
+	return fmt.Errorf("cluster %s: SOPS file %s declares key %q for %s, but that key is missing or empty in the decrypted SOPS document; proxops fails closed rather than falling back to a bootstrap credential for that field — add the key to the encrypted file or drop the reference from config.yaml",
 		cluster, shortenPath(file), key, field)
 }
 
@@ -475,37 +475,37 @@ func shortenPath(p string) string {
 	return p
 }
 
-// OverlayFromEnv applies pveconform's credential-override env vars onto a
+// OverlayFromEnv applies proxops's credential-override env vars onto a
 // config. Called by the CLI AFTER flag overlays, so the precedence chain is:
 // defaults < YAML < flags < env.
 //
 // Semantics (highest precedence first, only when the env var is set
 // non-empty):
 //
-//	PVECONFORM_PVE_TOKEN_VALUE  -> PVE.TokenValue (overrides user+id+token)
-//	PVECONFORM_PVE_TOKEN        -> PVE.Token
-//	PVECONFORM_PVE_PASSWORD     -> PVE.Password
-//	PVECONFORM_PVE_USER         -> PVE.User
-//	PVECONFORM_GIT_TOKEN        -> Git.Token
+//	PROXOPS_PVE_TOKEN_VALUE  -> PVE.TokenValue (overrides user+id+token)
+//	PROXOPS_PVE_TOKEN        -> PVE.Token
+//	PROXOPS_PVE_PASSWORD     -> PVE.Password
+//	PROXOPS_PVE_USER         -> PVE.User
+//	PROXOPS_GIT_TOKEN        -> Git.Token
 //
-// PVECONFORM_PVE_USER is deliberately honored as an override (not just a
+// PROXOPS_PVE_USER is deliberately honored as an override (not just a
 // fallback): the documented model is "the environment carries credentials,
 // the YAML carries non-secrets". An operator who set it in the env expects
 // it to reach the PVE client.
 func OverlayFromEnv(c *Config) {
-	if v := os.Getenv("PVECONFORM_PVE_TOKEN_VALUE"); v != "" {
+	if v := os.Getenv("PROXOPS_PVE_TOKEN_VALUE"); v != "" {
 		c.PVE.TokenValue = v
 	}
-	if v := os.Getenv("PVECONFORM_PVE_TOKEN"); v != "" {
+	if v := os.Getenv("PROXOPS_PVE_TOKEN"); v != "" {
 		c.PVE.Token = v
 	}
-	if v := os.Getenv("PVECONFORM_PVE_PASSWORD"); v != "" {
+	if v := os.Getenv("PROXOPS_PVE_PASSWORD"); v != "" {
 		c.PVE.Password = v
 	}
-	if v := os.Getenv("PVECONFORM_PVE_USER"); v != "" {
+	if v := os.Getenv("PROXOPS_PVE_USER"); v != "" {
 		c.PVE.User = v
 	}
-	if v := os.Getenv("PVECONFORM_GIT_TOKEN"); v != "" {
+	if v := os.Getenv("PROXOPS_GIT_TOKEN"); v != "" {
 		c.Git.Token = v
 	}
 }
@@ -541,7 +541,7 @@ func (c *Config) Validate() error {
 					errs = append(errs, "pve.token-id missing")
 				}
 				if c.PVE.Token == "" {
-					errs = append(errs, "pve.token missing (set PVECONFORM_PVE_TOKEN)")
+					errs = append(errs, "pve.token missing (set PROXOPS_PVE_TOKEN)")
 				}
 			}
 		}
@@ -555,7 +555,7 @@ func (c *Config) Validate() error {
 				errs = append(errs, "pve.user is required for ticket auth")
 			}
 			if c.PVE.Password == "" {
-				errs = append(errs, "pve.password missing (set PVECONFORM_PVE_PASSWORD)")
+				errs = append(errs, "pve.password missing (set PROXOPS_PVE_PASSWORD)")
 			}
 		}
 	default:
@@ -597,17 +597,17 @@ func (c *Config) Validate() error {
 		switch c.PVE.Auth {
 		case AuthToken:
 			if eUser == "" {
-				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE user after credential resolution (SOPS user reference + pve.user + PVECONFORM_PVE_USER all empty); pveconform fails closed", name))
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE user after credential resolution (SOPS user reference + pve.user + PROXOPS_PVE_USER all empty); proxops fails closed", name))
 			}
 			if eVal == "" && (eTokID == "" || eTok == "") {
-				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE token after credential resolution (need a SOPS pve token reference, or pve.token-id+pve.token, or PVECONFORM_PVE_TOKEN_VALUE); pveconform fails closed", name))
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE token after credential resolution (need a SOPS pve token reference, or pve.token-id+pve.token, or PROXOPS_PVE_TOKEN_VALUE); proxops fails closed", name))
 			}
 		case AuthTicket:
 			if eUser == "" {
-				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE user for ticket auth; pveconform fails closed", name))
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE user for ticket auth; proxops fails closed", name))
 			}
 			if ePsw == "" {
-				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE password for ticket auth (SOPS pve.password reference or PVECONFORM_PVE_PASSWORD required); pveconform fails closed", name))
+				errs = append(errs, fmt.Sprintf("pve.clusters.%s: no effective PVE password for ticket auth (SOPS pve.password reference or PROXOPS_PVE_PASSWORD required); proxops fails closed", name))
 			}
 		}
 	}
@@ -739,9 +739,9 @@ func expandTilde(p string) string {
 
 func defaultDataDir() string {
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".local", "share", "pveconform")
+		return filepath.Join(home, ".local", "share", "proxops")
 	}
-	return "/tmp/pveconform-data"
+	return "/tmp/proxops-data"
 }
 
 func joinErrs(errs []string) string {

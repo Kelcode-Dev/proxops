@@ -7,7 +7,7 @@ import (
 
 // DiskImage is a downloadable disk-image storage artifact (PVE 9 `import`
 // content pool: qcow2 / vmdk / raw). It is the third ArtifactKind alongside
-// ISO and CTTemplate, and it is what makes a pveconform `kind: VM` able to
+// ISO and CTTemplate, and it is what makes a proxops `kind: VM` able to
 // boot a real OS: PVE's create-time `import-from` seeds a VM disk from an
 // image volume instead of allocating an empty one.
 //
@@ -28,7 +28,7 @@ import (
 //     afterwards (`local-lvm:vm-N-disk-0,size=3G`), i.e. the import-from
 //     option is create-time bookkeeping and is NOT re-reported.
 //
-// Identity on PVE: (node, storage, filename). Identity on pveconform:
+// Identity on PVE: (node, storage, filename). Identity on proxops:
 // metadata.name. Multi-node placement via spec.nodes, exactly like ISO/CTT.
 // Never pruned (artifact rule).
 //
@@ -84,7 +84,7 @@ func (d *DiskImage) ID() int { return 0 }
 // DesiredState is always "" for artifacts.
 func (d *DiskImage) DesiredState() string { return "" }
 
-// Deps implements Resource — DiskImages have no pveconform-side references.
+// Deps implements Resource — DiskImages have no proxops-side references.
 func (d *DiskImage) Deps() []Ref { return nil }
 
 // DriftAnomalies always returns nil: a DiskImage is a storage artifact.

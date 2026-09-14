@@ -11,14 +11,14 @@ import (
 )
 
 // This file converts PVE /qemu/{id}/config and /lxc/{cid}/config reports into
-// pveconform VM / LXC manifests. The conversion covers only the fields
-// pveconform actually models (the "owned-field" surface of the schema). Every
+// proxops VM / LXC manifests. The conversion covers only the fields
+// proxops actually models (the "owned-field" surface of the schema). Every
 // PVE key that appears in the /config report but is not (a) owned by
-// pveconform or (b) PVE bookkeeping (digest, meta, ...) is surfaced on
+// proxops or (b) PVE bookkeeping (digest, meta, ...) is surfaced on
 // Result.Gaps so operators see exactly what is not represented in the
 // generated YAML.
 
-// VMKeysOwned lists every PVE /config key that pveconform's VM schema models
+// VMKeysOwned lists every PVE /config key that proxops's VM schema models
 // (used for gap detection: a key NOT in this set AND NOT in
 // PVEBookkeepingKeys becomes a Gap). Dynamic disk / NIC slots ("scsi0",
 // "virtio4", "net1", ...) are matched by prefix in VMKeyIsDynamic, not
@@ -39,7 +39,7 @@ var VMKeysOwned = map[string]bool{
 	"efidisk0":    true,
 	"tpm0":        true,
 	"serial0":     true,
-	"ide2":        true, // cloud-init OR cdrom (pveconform's 3-state)
+	"ide2":        true, // cloud-init OR cdrom (proxops's 3-state)
 	"ide3":        true, // cdrom when cloud-init is on ide2
 	"onboot":      true,
 	"startup":     true,
@@ -54,7 +54,7 @@ var VMKeysOwned = map[string]bool{
 }
 
 // VMKeyIsDynamic reports whether a PVE /config key is a dynamic device slot
-// pveconform owns: scsiN / virtioN / sataN / netN. The "ide" slots are
+// proxops owns: scsiN / virtioN / sataN / netN. The "ide" slots are
 // handled statically (cdrom + cloud-init are the two owned shapes).
 func VMKeyIsDynamic(k string) bool {
 	for _, p := range []string{"scsi", "virtio", "sata", "net"} {
@@ -74,7 +74,7 @@ func VMKeyIsDynamic(k string) bool {
 	return false
 }
 
-// LXCKeysOwned lists every PVE /lxc/{id}/config key that pveconform's LXC
+// LXCKeysOwned lists every PVE /lxc/{id}/config key that proxops's LXC
 // schema models. mpN (dynamic) and netN are handled by LXCKeyIsDynamic.
 //
 // M10 additions (prod-a live-verified):
@@ -109,7 +109,7 @@ var LXCKeysOwned = map[string]bool{
 }
 
 // LXCKeyIsDynamic reports whether a PVE LXC /config key is a dynamic device
-// slot pveconform owns: mpN / netN.
+// slot proxops owns: mpN / netN.
 func LXCKeyIsDynamic(k string) bool {
 	return isMPSlotKey(k) || isNICSlotKey(k)
 }
@@ -138,13 +138,13 @@ func isNICSlotKey(k string) bool {
 	return true
 }
 
-// adoptVM reads one VM's /config and writes a single pveconform manifest
+// adoptVM reads one VM's /config and writes a single proxops manifest
 // under vm/<cluster>/. Returns nil on success; an error when PVE's /config
 // could not be read.
 //
 // PVE template VMs (raw "template" == 1) are NEVER adopted as manifests:
-// pveconform has no template-VM resource kind and the VM's disks are the
-// clone source data that a pveconform-managed manifest would wrongly
+// proxops has no template-VM resource kind and the VM's disks are the
+// clone source data that a proxops-managed manifest would wrongly
 // claim ownership of. The template VM is recorded on Result.Skipped so the
 // fleet census stays complete.
 func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VMListEntry) error {
@@ -158,7 +158,7 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 	}
 
 	// M11: PVE reports a template (template=1); reverse-translate it to
-	// an adoption of the pveconform TemplateVM kind. See M10 Skipped
+	// an adoption of the proxops TemplateVM kind. See M10 Skipped
 	// census notes in docs/GAPS.md: M11 REPLACES the M10 "skip + record
 	// SkippedObject" behavior by producing a first-class manifest.
 	if pveTemplateValue(raw["template"]) {
@@ -187,9 +187,9 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 	// disks. PVE's cloud-init volume on non-IDE slots (probe-verified on
 	// prod-a: "vm-999-cloudinit,media=cdrom" on scsi1 on every VM
 	// with cloud-init configured via qm) is a PVE-managed cdrom that
-	// pveconform does not own in its schema (cloud-init attaches to
+	// proxops does not own in its schema (cloud-init attaches to
 	// ide2/ide3 only). Excluding it from spec.disks keeps the manifest
-	// valid without pretending pveconform owns a volume it cannot
+	// valid without pretending proxops owns a volume it cannot
 	// recreate. The exclusion is recorded below if PVE reported one.
 	rawDisks, ok := schema.PveDisksFromPVE(raw)
 	if ok {
@@ -211,7 +211,7 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 				ID:    e.VMID,
 				Field: d.Slot,
 				Value: pveStr(raw[d.Slot]),
-				Note:  "PVE reports a cloud-init / cdrom-style volume on a pveconform non-owned slot (" + d.Slot + "). pveconform does not own non-IDE cdrom slots; this disk is excluded from spec.disks. Review whether it matters for your workload — if PVE's cloud-init is on IDE (ide2/ide3), it is owned via spec.hardware.cloud-init and no action is needed.",
+				Note:  "PVE reports a cloud-init / cdrom-style volume on a proxops non-owned slot (" + d.Slot + "). proxops does not own non-IDE cdrom slots; this disk is excluded from spec.disks. Review whether it matters for your workload — if PVE's cloud-init is on IDE (ide2/ide3), it is owned via spec.hardware.cloud-init and no action is needed.",
 			})
 		}
 	}
@@ -224,16 +224,16 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 	// hardware.
 	hw := schema.PveVMHardwareFromPVE(raw)
 	// cdrom: resolved against artifact names so the reference is a
-	// pveconform ISO metadata.name (the M8 composition cross-reference).
+	// proxops ISO metadata.name (the M8 composition cross-reference).
 	// An empty volid means PVE reports an explicit detach
-	// ("ide2 = none" form) → pveconform's 3-state iso: none.
+	// ("ide2 = none" form) → proxops's 3-state iso: none.
 	if isoVolid, cdromOK := schema.PveCDROMFromPVE(raw); cdromOK {
 		if isoVolid == "" {
 			hw.Cdrom = schema.CDDrive{Iso: schema.CDROMNone}
 		} else if isoName, known := ac.names.iso[isoVolid]; known {
 			hw.Cdrom.Iso = isoName
 		} else {
-			// PVE reports a cdrom that references an ISO with no pveconform
+			// PVE reports a cdrom that references an ISO with no proxops
 			// manifest in this compose set: surface it as a gap so the
 			// operator adds the ISO first.
 			ac.res.Gaps = append(ac.res.Gaps, Gap{
@@ -242,7 +242,7 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 				ID:    e.VMID,
 				Field: "ide2/ide3",
 				Value: isoVolid,
-				Note:  "PVE reports a cdrom that references an ISO with no pveconform manifest in this adopt pass; generate the ISO first, then re-point spec.hardware.cdrom.iso to it",
+				Note:  "PVE reports a cdrom that references an ISO with no proxops manifest in this adopt pass; generate the ISO first, then re-point spec.hardware.cdrom.iso to it",
 			})
 		}
 	}
@@ -251,7 +251,7 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 	// options.
 	vm.Spec.Options = schema.PveVMOptionsFromPVE(raw)
 
-	// tags: strip pveconform's ownership tag (the schema re-appends it).
+	// tags: strip proxops's ownership tag (the schema re-appends it).
 	if tags := pveStr(raw["tags"]); tags != "" {
 		kept := []string{}
 		for _, t := range strings.Split(tags, ",") {
@@ -271,7 +271,7 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 
 	// ipconfig<N>, nameserver, searchdomain + sshkeys on any VM that
 
-	// has ever had cloud-init configured. pveconform adopts them:
+	// has ever had cloud-init configured. proxops adopts them:
 
 	//   - ciuser / nameserver / searchdomain / ipconfig<N>: as-is.
 
@@ -281,7 +281,7 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 
 	//     replace the sentinel with their real public key(s) before
 
-	//     first apply. pveconform refuses to write sshkeys while
+	//     first apply. proxops refuses to write sshkeys while
 
 	//     the sentinel is present (schema.CloudInitRedactedSentinel).
 
@@ -295,7 +295,7 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 		return wErr
 	}
 
-	// Gap detection: every PVE /config key pveconform does not model AND
+	// Gap detection: every PVE /config key proxops does not model AND
 	// is not PVE bookkeeping is a finding.
 	//
 	// PVE-assigned MACs (PVE's random "hwaddr=...") are intentionally NOT
@@ -313,20 +313,20 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 		if VMKeyIsDynamic(k) {
 			continue
 		}
-		// M11: cloud-init data keys owned by pveconform (ciuser, sshkeys,
+		// M11: cloud-init data keys owned by proxops (ciuser, sshkeys,
 		// nameserver, searchdomain, ipconfig*) are NOT gaps; they are
 		// represented in the manifest under spec.cloud-init-data.
 		if isM11OwnedCloudInitDataKey(k) {
 			continue
 		}
-		gap := Gap{Kind: schema.KindVM, Node: node, ID: e.VMID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE config pveconform does not model for VMs; not represented in the generated manifest")}
+		gap := Gap{Kind: schema.KindVM, Node: node, ID: e.VMID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE config proxops does not model for VMs; not represented in the generated manifest")}
 		gaps = append(gaps, gap)
 	}
 	ac.res.Gaps = append(ac.res.Gaps, gaps...)
 	return nil
 }
 
-// adoptLXC reads one LXC's /config and writes a single pveconform manifest
+// adoptLXC reads one LXC's /config and writes a single proxops manifest
 // under lxc/<cluster>/.
 func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.LXCListEntry) error {
 	cfg, gErr := ac.pve.LXC().Get(ctx, node, e.CID)
@@ -461,7 +461,7 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 	}
 	lxc.Spec.MountPoints = mps
 	// Bind mounts: PVE reports host-path bind mp's ("mpN=/host:path") that
-	// pveconform does not model (docs/GAPS.md: LXC bind-mount mpN). They
+	// proxops does not model (docs/GAPS.md: LXC bind-mount mpN). They
 	// never appear in spec.mount-points, so surface them explicitly as a
 	// gap (the LXCKeyIsDynamic check would otherwise silently drop them).
 	for _, slot := range mpslots(raw) {
@@ -472,7 +472,7 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 				ID:    e.CID,
 				Field: slot,
 				Value: redactGapValue(slot, v),
-				Note:  "LXC mount-point is a host-path bind mount; pveconform does not model bind mpN (docs/GAPS.md). Remove/re-host this bind on PVE before listing the LXC in resources.yaml, or add an explicit bind-mount shape to the schema.",
+				Note:  "LXC mount-point is a host-path bind mount; proxops does not model bind mpN (docs/GAPS.md). Remove/re-host this bind on PVE before listing the LXC in resources.yaml, or add an explicit bind-mount shape to the schema.",
 			})
 		}
 	}
@@ -527,7 +527,7 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 				ID:    e.CID,
 				Field: "spec.template",
 				Value: voltmpl,
-				Note:  "PVE reports an ostemplate that has no pveconform CTTemplate manifest in this adopt pass; generate the CTTemplate first, then re-point spec.template to it",
+				Note:  "PVE reports an ostemplate that has no proxops CTTemplate manifest in this adopt pass; generate the CTTemplate first, then re-point spec.template to it",
 			})
 		}
 	} else {
@@ -561,7 +561,7 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 		if LXCKeyIsDynamic(k) {
 			continue
 		}
-		gap := Gap{Kind: schema.KindLXC, Node: node, ID: e.CID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE LXC config pveconform does not model; not represented in the generated manifest")}
+		gap := Gap{Kind: schema.KindLXC, Node: node, ID: e.CID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE LXC config proxops does not model; not represented in the generated manifest")}
 		gaps = append(gaps, gap)
 	}
 	ac.res.Gaps = append(ac.res.Gaps, gaps...)
@@ -590,10 +590,10 @@ func mpslots(raw map[string]any) []string {
 	return out
 }
 
-// pveStatusToState maps PVE's live power state to pveconform's desired-state
+// pveStatusToState maps PVE's live power state to proxops's desired-state
 // grammar ("started" | "stopped"). PVE reports "running", "stopped", "paused";
 // any value not clearly "running" maps to "stopped" (fail-closed: a paused
-// VM / LXC is not running, so pveconform will plan a start to converge).
+// VM / LXC is not running, so proxops will plan a start to converge).
 func pveStatusToState(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "running", "started":
@@ -624,10 +624,10 @@ func pveStr(v any) string {
 }
 
 // adoptTemplateVM (M11): a PVE-templated qemu object is reverse-translated
-// into a pveconform TemplateVM manifest. This REPLACES M10's "skip + record
-// in Skipped" behavior: pveconform now owns the template lifecycle
+// into a proxops TemplateVM manifest. This REPLACES M10's "skip + record
+// in Skipped" behavior: proxops now owns the template lifecycle
 // (create + mark, config drift, ownership-tag prunes) and the manifest
-// captures the same owned-field surface as a regular pveconform VM,
+// captures the same owned-field surface as a regular proxops VM,
 // PLUS M11's cloud-init data fields.
 //
 // PVE-side sshkeys are redacted: PveCISshKeysFromPVE returns a single
@@ -640,7 +640,7 @@ func pveStr(v any) string {
 // template; DesiredState() returns "stopped" unconditionally — see
 // schema.TemplateVM).
 func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pveclient.VMListEntry, raw map[string]any) error {
-	// M11: PVE-templated object. Emit a pveconform TemplateVM manifest
+	// M11: PVE-templated object. Emit a proxops TemplateVM manifest
 	// (not a VM manifest) so the parse layer routes through the TemplateVM
 	// kind + plan/exec use kind=TemplateVM.
 	t := schema.NewTemplateVM()
@@ -663,7 +663,7 @@ func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pvec
 	// disks: exclude PVE-side cloud-init / cdrom-style volumes on
 	// data buses (same rule adoptVM uses; PVE owns the non-IDE
 	// cloud-init CDROM that qm cloud-init sets on the template's own
-	// data-bus slot, and pveconform cannot recreate it — see M10 GAP entry
+	// data-bus slot, and proxops cannot recreate it — see M10 GAP entry
 	// "VM: cloud-init volume on a non-IDE slot is PVE-owned").
 	rawDisks, ok := schema.PveDisksFromPVE(raw)
 	if ok {
@@ -685,7 +685,7 @@ func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pvec
 				ID:    e.VMID,
 				Field: d.Slot,
 				Value: pveStr(raw[d.Slot]),
-				Note:  "PVE reports a cloud-init / cdrom-style volume on a data-bus slot (" + d.Slot + "). pveconform does not own non-IDE cloud-init slots; this disk is excluded from spec.disks. Review whether it matters for your workload — if PVE's cloud-init is on IDE (ide2/ide3), it is owned via spec.hardware.cloud-init and no action is needed.",
+				Note:  "PVE reports a cloud-init / cdrom-style volume on a data-bus slot (" + d.Slot + "). proxops does not own non-IDE cloud-init slots; this disk is excluded from spec.disks. Review whether it matters for your workload — if PVE's cloud-init is on IDE (ide2/ide3), it is owned via spec.hardware.cloud-init and no action is needed.",
 			})
 		}
 	}
@@ -707,14 +707,14 @@ func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pvec
 				ID:    e.VMID,
 				Field: "ide2/ide3",
 				Value: isoVolid,
-				Note:  "PVE reports a cdrom that references an ISO with no pveconform manifest in this adopt pass; generate the ISO first, then re-point spec.hardware.cdrom.iso to it",
+				Note:  "PVE reports a cdrom that references an ISO with no proxops manifest in this adopt pass; generate the ISO first, then re-point spec.hardware.cdrom.iso to it",
 			})
 		}
 	}
 	t.Spec.Hardware = hw
 	// options.
 	t.Spec.Options = schema.PveVMOptionsFromPVE(raw)
-	// tags: strip pveconform's ownership tag (the schema re-appends it).
+	// tags: strip proxops's ownership tag (the schema re-appends it).
 	if tags := pveStr(raw["tags"]); tags != "" {
 		kept := []string{}
 		for _, tk := range strings.Split(tags, ",") {
@@ -737,9 +737,9 @@ func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pvec
 		return wErr
 	}
 
-	// Gap detection: every PVE /config key pveconform does not model AND
+	// Gap detection: every PVE /config key proxops does not model AND
 	// is not PVE bookkeeping. "template" = "1" is explicitly owned by the
-	// pveconform TemplateVM kind (this function is only called when PVE
+	// proxops TemplateVM kind (this function is only called when PVE
 	// reports template=1), so it is NOT a gap. Cloud-init data keys owned
 	// by M11 (ciuser, sshkeys, nameserver, searchdomain, ipconfig*<N>)
 	// are also not gaps. cipassword / cicustom / ciupgrade are M11's
@@ -753,12 +753,12 @@ func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pvec
 			continue
 		}
 		if k == "template" {
-			// M11: pveconform's TemplateVM kind IS the PVE-side template
+			// M11: proxops's TemplateVM kind IS the PVE-side template
 			// flag. Owned.
 			continue
 		}
 		if isM11OwnedCloudInitDataKey(k) {
-			// M11: pveconform's cloud-init data surface owns these keys.
+			// M11: proxops's cloud-init data surface owns these keys.
 			// (sshkeys IS adopted, via the "*" sentinel; cipassword /
 			// cicustom / ciupgrade are M10 PII / PVE-side fields,
 			// deliberately not modelled in M11.)
@@ -767,7 +767,7 @@ func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pvec
 		if VMKeyIsDynamic(k) {
 			continue
 		}
-		gap := Gap{Kind: schema.KindTemplateVM, Node: node, ID: e.VMID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE config pveconform does not model for TemplateVMs; not represented in the generated manifest")}
+		gap := Gap{Kind: schema.KindTemplateVM, Node: node, ID: e.VMID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE config proxops does not model for TemplateVMs; not represented in the generated manifest")}
 		gaps = append(gaps, gap)
 	}
 	ac.res.Gaps = append(ac.res.Gaps, gaps...)

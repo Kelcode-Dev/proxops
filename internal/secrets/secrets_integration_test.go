@@ -104,9 +104,9 @@ func TestDecryptionRoundTrip(t *testing.T) {
 	}
 	testToken := "test-token-000-aaaa-1111-2222-bbbb"
 	plain := filepath.Join(dir, "plain.yaml")
-	if err := os.WriteFile(plain, []byte("secrets:\n  pveconform-token: "+testToken+"\n"+
-		"  pveconform-user: root@pam\n"+
-		"  pveconform-token-id: pveconform\n"), 0o600); err != nil {
+	if err := os.WriteFile(plain, []byte("secrets:\n  proxops-token: "+testToken+"\n"+
+		"  proxops-user: root@pam\n"+
+		"  proxops-token-id: proxops\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cipher := filepath.Join(dir, "secrets.sops.yaml")
@@ -119,19 +119,19 @@ func TestDecryptionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecryptFile: %v", err)
 	}
-	if got, ok := sf.Get("pveconform-token"); !ok || got != testToken {
-		t.Errorf("pveconform-token = %q (ok=%v), want %q", got, ok, testToken)
+	if got, ok := sf.Get("proxops-token"); !ok || got != testToken {
+		t.Errorf("proxops-token = %q (ok=%v), want %q", got, ok, testToken)
 	}
-	if got, ok := sf.Get("pveconform-user"); !ok || got != "root@pam" {
-		t.Errorf("pveconform-user = %q (ok=%v)", got, ok)
+	if got, ok := sf.Get("proxops-user"); !ok || got != "root@pam" {
+		t.Errorf("proxops-user = %q (ok=%v)", got, ok)
 	}
-	if got, ok := sf.Get("pveconform-token-id"); !ok || got != "pveconform" {
-		t.Errorf("pveconform-token-id = %q (ok=%v)", got, ok)
+	if got, ok := sf.Get("proxops-token-id"); !ok || got != "proxops" {
+		t.Errorf("proxops-token-id = %q (ok=%v)", got, ok)
 	}
 }
 
 // TestNoIdentity_ErrNoIdentity verifies: when the SOPS age identity is
-// NOT present in the environment, pveconform returns a fail-closed error
+// NOT present in the environment, proxops returns a fail-closed error
 // with the ErrNoIdentity sentinel, and the plaintext value does NOT appear
 // in the error text (task §12 "missing SOPS identity fails clearly").
 func TestNoIdentity_ErrNoIdentity(t *testing.T) {
@@ -144,7 +144,7 @@ func TestNoIdentity_ErrNoIdentity(t *testing.T) {
 	}
 	testToken := "never-leaked-c7b0-5c0f-1f0f-aaaaaaaaaaaa"
 	plain := filepath.Join(dir, "plain.yaml")
-	if err := os.WriteFile(plain, []byte("secrets:\n  pveconform-token: "+testToken+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(plain, []byte("secrets:\n  proxops-token: "+testToken+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cipher := filepath.Join(dir, "secrets.sops.yaml")
@@ -187,7 +187,7 @@ func TestNoIdentity_ErrNoIdentity(t *testing.T) {
 }
 
 // TestWrongIdentity_ErrIdentityMismatch verifies: when the SOPS age identity
-// IS present but CANNOT DECRYPT the file, pveconform returns the
+// IS present but CANNOT DECRYPT the file, proxops returns the
 // ErrIdentityMismatch sentinel and the plaintext value does NOT appear in
 // the error text (task §12 "wrong age identity fails clearly").
 func TestWrongIdentity_ErrIdentityMismatch(t *testing.T) {
@@ -200,7 +200,7 @@ func TestWrongIdentity_ErrIdentityMismatch(t *testing.T) {
 	}
 	testToken := "wrong-id-xxxx-leaked-should-be-aaaa-bbbb-cccc"
 	plain := filepath.Join(dir, "plain.yaml")
-	if err := os.WriteFile(plain, []byte("secrets:\n  pveconform-token: "+testToken+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(plain, []byte("secrets:\n  proxops-token: "+testToken+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cipher := filepath.Join(dir, "secrets.sops.yaml")
@@ -222,7 +222,7 @@ func TestWrongIdentity_ErrIdentityMismatch(t *testing.T) {
 }
 
 // TestUnencrypted_ErrUnencrypted verifies: when the "SOPS file" is actually a
-// PLAINTEXT YAML (no sops metadata), pveconform returns the
+// PLAINTEXT YAML (no sops metadata), proxops returns the
 // ErrUnencryptedSecrets sentinel and the plaintext value does NOT appear in
 // the error text (task §12 "unencrypted secrets file fails clearly"; task §13
 // "do not silently accept an unencrypted secrets.sops.yaml").
@@ -234,7 +234,7 @@ func TestUnencrypted_ErrUnencrypted(t *testing.T) {
 	}
 	testToken := "plain-text-leak-should-not-appear-deadbeef-aabb-ccdd"
 	plain := filepath.Join(dir, "secrets.yaml")
-	if err := os.WriteFile(plain, []byte("secrets:\n  pveconform-token: "+testToken+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(plain, []byte("secrets:\n  proxops-token: "+testToken+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// DecryptFile on the plain (not-sops-encrypted) file.

@@ -321,7 +321,7 @@ spec:
 	live["cpu"] = "host"
 	live["cores"] = 1
 	live["name"] = "vm-1"
-	live["tags"] = []any{"pveconform"}
+	live["tags"] = []any{"proxops"}
 	// PVE reports the owned scsi0 disk with a PVE-assigned LVM volume name; we
 	// own pool + size only.
 	live["scsi0"] = "local-lvm:vm-100-disk-0,size=4G"
@@ -505,7 +505,7 @@ spec:
 	if _, ok := p["nesting"]; ok {
 		t.Errorf("top-level nesting create key must NOT be emitted (PVE 9.2 rejects it with 400)")
 	}
-	// keyctl / fuse set to false = PVE default; pveconform omits them at
+	// keyctl / fuse set to false = PVE default; proxops omits them at
 	// create.
 	if _, ok := p["keyctl"]; ok {
 		t.Errorf("keyctl=false must be omitted (PVE default; PVE has no off-create form anyway)")
@@ -526,7 +526,7 @@ spec:
 // TestLXCOptionsWire_KeyctlFuseTrueFailClosed pins that a manifest that
 // ENABLES keyctl or fuse cannot be created on PVE 9.x (no accepted wire
 // form: top-level 403, features composite unknown token → 403).
-// pveconform fails closed at create-params rather than submitting a
+// proxops fails closed at create-params rather than submitting a
 // request PVE would reject. The options are adoptable (the live report
 // carries them) so a human can still record the intent, but applying it to
 // a NEW container requires an out-of-band PVE step.
@@ -658,7 +658,7 @@ spec:
 	live := map[string]any{
 		"memory": int64(1024),
 		"cpu":    "host", "cores": 1,
-		"tags":   []any{"pveconform"},
+		"tags":   []any{"proxops"},
 		"scsi0":  "local-lvm:vm-100-disk-0,size=4G",
 		"onboot": "1", "protection": "1",
 	}
@@ -718,7 +718,7 @@ spec:
 	live := map[string]any{
 		"memory": int64(1024),
 		"cpu":    "host", "cores": 1,
-		"tags":  []any{"pveconform"},
+		"tags":  []any{"proxops"},
 		"scsi0": "local-lvm:vm-100-disk-0,size=4G",
 		"ide2":  "local:iso/boot.iso,media=cdrom,size=755M",
 	}
@@ -796,7 +796,7 @@ spec:
 	live := map[string]any{
 		"memory": int64(1024),
 		"cpu":    "host", "cores": 1,
-		"tags":  []any{"pveconform"},
+		"tags":  []any{"proxops"},
 		"scsi0": "local-lvm:vm-100-disk-0,size=4G",
 		"net0":  "virtio=52:54:00:90:0C:59,bridge=vmbr0,firewall=1",
 	}

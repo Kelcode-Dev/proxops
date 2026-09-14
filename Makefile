@@ -9,7 +9,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 all: build
 
 build:
-	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN)/pveconform ./cmd/pveconform
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN)/proxops ./cmd/proxops
 
 test:
 	$(GO) test -count=1 ./...
@@ -19,7 +19,7 @@ vet:
 
 # Static binary for a typical PVE host (no toolchain required there).
 cross:
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/pveconform-linux-amd64 ./cmd/pveconform
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/proxops-linux-amd64 ./cmd/proxops
 
 clean:
 	rm -rf $(BIN) $(DIST)

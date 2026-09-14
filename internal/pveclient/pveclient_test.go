@@ -49,11 +49,11 @@ func newClientTicket(m *mock.Server, user, pass string) *pveclient.Client {
 
 // TestTokenAuthReads: PVEAPIToken is accepted; config read returns stored fields.
 func TestTokenAuthReads(t *testing.T) {
-	m := mock.New(mock.Config{Token: "root@pam!pveconform=deadbeef"})
+	m := mock.New(mock.Config{Token: "root@pam!proxops=deadbeef"})
 	defer m.Close()
 	m.PreloadVM("pve", 100, map[string]string{"name": "present", "memory": "4096"}, "stopped")
 
-	c := newClientToken(m, "root@pam!pveconform=deadbeef")
+	c := newClientToken(m, "root@pam!proxops=deadbeef")
 	cfg, err := c.VM().Get(context.Background(), "pve", 100)
 	if err != nil {
 		t.Fatalf("Get(100): %v", err)

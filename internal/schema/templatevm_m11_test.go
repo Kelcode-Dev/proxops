@@ -64,7 +64,7 @@ func TestTemplateVM_DesiredStateAlwaysStopped(t *testing.T) {
 }
 
 // TestTemplateVM_VerbatimWireShape pins that a TemplateVM manifest yields
-// byte-identical PVE wire form-values as a pveconform VM with the same spec.
+// byte-identical PVE wire form-values as a proxops VM with the same spec.
 // This is the M11 invariant: TemplateVM embeds VM, so the create form is
 // identical; the only PVE-side difference is the follow-up POST
 // /qemu/{id}/template (executed by the executor, not the schema).
@@ -107,7 +107,7 @@ func TestTemplateVM_RefReportsTemplateVMPins(t *testing.T) {
 }
 
 // TestTemplateVM_DriftSharesVmSemantics pins that a TemplateVM's Drift
-// behaves identically to a pveconform VM's Drift on the same wire shape
+// behaves identically to a proxops VM's Drift on the same wire shape
 // (no special-casing of the PVE template flag in Drift - PVE's
 // /qemu/{id}/config endpoint ignores the template flag on reads/writes).
 // The "template" PVE key must NOT appear in Drift's updateParams.
@@ -129,7 +129,7 @@ func TestTemplateVM_DriftSharesVmSemantics(t *testing.T) {
 		"net0":     "virtio=52:54:00:FF:00:00,bridge=vmbr0",
 		"serial0":  "socket",
 		"efidisk0": "local-lvm:vm-940-efidisk,efitype=4m,size=4M",
-		"tags":     "pveconform",
+		"tags":     "proxops",
 		"template": "1",
 		"digest":   "aa",
 		"vmgenid":  "bb",
@@ -139,11 +139,11 @@ func TestTemplateVM_DriftSharesVmSemantics(t *testing.T) {
 	if !changed {
 		t.Fatalf("Drift: changed=false, want true; live=%v", live)
 	}
-	// The "template" PVE key MUST NOT be in updateParams: pveconform never
+	// The "template" PVE key MUST NOT be in updateParams: proxops never
 	// writes the template flag from Drift - it is a PVE-side, mark-template-
 	// only token.
 	if _, got := upd["template"]; got {
-		t.Errorf("Drift updated 'template' = %v, want absent (pveconform never writes this)", upd["template"])
+		t.Errorf("Drift updated 'template' = %v, want absent (proxops never writes this)", upd["template"])
 	}
 	// Check that memory/cores are in the update.
 	for _, k := range []string{"memory", "cores"} {

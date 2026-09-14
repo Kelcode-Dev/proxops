@@ -865,7 +865,7 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 		//   - /lxc/{id}/untemplate  -> 200 + UPID
 		//   - /qemu/{id}/untemplate -> HTTP 501 "not implemented"
 		// The mock mirrors PVE 9.2 exactly: LXC untemplates, qemUs
-		// reject. This locks e2e tests that pin pveconform's
+		// reject. This locks e2e tests that pin proxops's
 		// fail-closed VM<->TemplateVM mismatch rule in plan.PlanActions.
 		if kindStr != "lxc" {
 			writeErr(w, http.StatusNotImplemented,
@@ -890,7 +890,7 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 	case "clone":
 		// PVE clone: POST /{qemu|lxc}/{id}/clone with newid. PVE 9.2
 		// supports both; M11 pins the qemu path (qemu templates are the
-		// pveconform TemplateVM clone source). The mock preserves the
+		// proxops TemplateVM clone source). The mock preserves the
 		// source kind for the clone target (a PVE clone of a qm is a qm,
 		// of a ct is a ct).
 		if r.Method != http.MethodPost {

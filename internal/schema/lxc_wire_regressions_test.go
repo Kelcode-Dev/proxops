@@ -20,7 +20,7 @@ package schema_test
 //	  top-level   protection / onboot / console            → accepted (0 or 1)
 //	  top-level   features                                 → accepted (composite form)
 //
-// These tests pin the pveconform-side consequence:
+// These tests pin the proxops-side consequence:
 //
 //   1. ToCreateParams MUST NOT emit top-level nesting/keyctl/fuse
 //     (PVE rejects). It MUST emit features=nesting=<0|1> when nesting
@@ -146,7 +146,7 @@ func TestLXCDrift_NestingEmitsFeaturesNotTopLevel(t *testing.T) {
 		"hostname": "x",
 		"rootfs":   "local-lvm:vm-100-disk-0,size=4G",
 		"net0":     "name=wired0,bridge=vmbr0",
-		"tags":     "pveconform",
+		"tags":     "proxops",
 		"features": "nesting=0",
 	}
 	upd, stop, _ := lxc.Drift(live)
@@ -178,14 +178,14 @@ func TestLXCDrift_KeyctlTrueLiveOffIsAnomalyNoWrite(t *testing.T) {
 		"hostname": "x",
 		"rootfs":   "local-lvm:vm-100-disk-0,size=4G",
 		"net0":     "name=wired0,bridge=vmbr0",
-		"tags":     "pveconform",
+		"tags":     "proxops",
 		// keyctl absent in live = off
 	}
 	upd, _, changed := lxc.Drift(live)
 	if changed {
 		// The "config drift" flag is not set because keyctl/fuse have no
 		// convergable wire form — they surface as ANOMALIES instead.
-		t.Fatalf("Drift on keyctl=true + live keyctl=absent must NOT claim pveconform can apply a change")
+		t.Fatalf("Drift on keyctl=true + live keyctl=absent must NOT claim proxops can apply a change")
 	}
 	if _, ok := upd["keyctl"]; ok {
 		t.Fatalf("Drift emitted top-level keyctl write (PVE would 400 this)")
@@ -221,7 +221,7 @@ func TestLXCDrift_UnprivilegedTrueLiveOffIsAnomalyNoWrite(t *testing.T) {
 		"hostname":     "x",
 		"rootfs":       "local-lvm:vm-100-disk-0,size=4G",
 		"net0":         "name=wired0,bridge=vmbr0",
-		"tags":         "pveconform",
+		"tags":         "proxops",
 		"unprivileged": "0",
 	}
 	upd, _, _ := lxc.Drift(live)
@@ -255,7 +255,7 @@ func TestLXCDrift_ConsoleIsConvergeable(t *testing.T) {
 		"hostname": "x",
 		"rootfs":   "local-lvm:vm-100-disk-0,size=4G",
 		"net0":     "name=wired0,bridge=vmbr0",
-		"tags":     "pveconform",
+		"tags":     "proxops",
 		// console absent in live = off
 	}
 	upd, _, _ := lxc.Drift(live)

@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// TestVMCdromNoneDetach: "cdrom.iso: none" → detach. pveconform owns the
+// TestVMCdromNoneDetach: "cdrom.iso: none" → detach. proxops owns the
 // IDE slot and renders `ide2=none`. A VM with no cdrom block must NOT
 // manage the slot at all.
 func TestVMCdromNoneDetach(t *testing.T) {
@@ -25,7 +25,7 @@ func TestVMCdromNoneDetach(t *testing.T) {
 		t.Errorf("CdromSlot = %q, want ide2 (no cloud-init)", slot)
 	}
 	if got, _ := p[slot].(string); got != "none" {
-		t.Errorf("%s = %q, want \"none\" (detaching: pveconform owns the slot)", slot, got)
+		t.Errorf("%s = %q, want \"none\" (detaching: proxops owns the slot)", slot, got)
 	}
 	if deps := vm.Deps(); deps != nil {
 		t.Errorf("a detaching VM must own no ISO dep, got %v", deps)

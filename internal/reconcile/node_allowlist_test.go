@@ -35,14 +35,14 @@ func newAllowlistHarness(t *testing.T, manifest string, allowlist []string) *rec
 	}
 
 	// The mock compares the PVEAPIToken header value (user!id=uuid).
-	m := mock.New(mock.Config{Token: "root@pam!pveconform=tok"})
+	m := mock.New(mock.Config{Token: "root@pam!proxops=tok"})
 	t.Cleanup(m.Close)
 	log := slog.Default()
 	pve, err := pveclient.New(pveclient.Options{
 		PVE: pveclient.PVEParams{
 			User:    "root@pam",
 			Auth:    "token",
-			TokenID: "pveconform",
+			TokenID: "proxops",
 			Token:   "tok",
 		},
 		BaseURL:     m.URL(),

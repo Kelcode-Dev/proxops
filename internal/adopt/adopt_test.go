@@ -15,12 +15,12 @@ import (
 	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
 )
 
-const apiToken = "root@pam!pveconform=deadbeef"
+const apiToken = "root@pam!proxops=deadbeef"
 
 func newMockClient(t *testing.T, m *mock.Server) *pveclient.Client {
 	t.Helper()
 	c, err := pveclient.New(pveclient.Options{
-		PVE:         pveclient.PVEParams{User: "root@pam", Auth: "token", TokenID: "pveconform", Token: "deadbeef"},
+		PVE:         pveclient.PVEParams{User: "root@pam", Auth: "token", TokenID: "proxops", Token: "deadbeef"},
 		BaseURL:     m.URL(),
 		HTTPTimeout: 5 * time.Second,
 	}, slog.Default())
@@ -43,7 +43,7 @@ func TestAdoptVMRoundTrip(t *testing.T) {
 		"scsi0":    "local-lvm:vm-100-disk-0,iothread=1,size=8G",
 		"scsi1":    "local-lvm:vm-100-disk-1,size=20G", // the live-only anomaly
 		"net0":     "virtio=52:54:00:E6:5D:C7,bridge=vmbr0",
-		"tags":     "pveconform,env=dev",
+		"tags":     "proxops,env=dev",
 		"smbios1":  "uuid=deadbeef",
 		"vmgenid":  "aa",
 		"digest":   "dd",
@@ -80,7 +80,7 @@ func TestAdoptVMRoundTrip(t *testing.T) {
 	}
 	var vm schema.VM
 	if uerr := schema.YAMLTo(string(raw), &vm); uerr != nil {
-		t.Fatalf("generated manifest is not YAML-parseable into a pveconform VM: %v", uerr)
+		t.Fatalf("generated manifest is not YAML-parseable into a proxops VM: %v", uerr)
 	}
 	if vm.Metadata.Name != "existing-vm" {
 		t.Errorf("name = %q, want existing-vm", vm.Metadata.Name)
@@ -120,7 +120,7 @@ func TestAdoptVMRoundTrip(t *testing.T) {
 	}
 	// Ownership tag is stripped (the schema re-appends it at create time).
 	for _, tag := range vm.Spec.Tags {
-		if tag == "pveconform" {
+		if tag == "proxops" {
 			t.Errorf("generated manifest must not carry the ownership tag in spec.tags")
 		}
 	}
@@ -140,7 +140,7 @@ func TestAdoptVMRoundTrip(t *testing.T) {
 	if !foundUnknown {
 		t.Errorf("unknown PVE keys (soc0 / replicat1) not surfaced on Gaps")
 	}
-	// The generated manifest must be valid pveconform YAML.
+	// The generated manifest must be valid proxops YAML.
 	if vErr := vm.Validate(); vErr != nil {
 		t.Errorf("generated manifest must Validate; got %v", vErr)
 	}
@@ -162,7 +162,7 @@ func TestAdoptLXCRoundTrip(t *testing.T) {
 		"net0":         "name=wired0,bridge=vmbr0,hwaddr=AA:BB:CC:DD:EE:01,type=veth",
 		"nameserver":   "1.1.1.1 8.8.8.8",
 		"searchdomain": "example.com",
-		"tags":         "pveconform",
+		"tags":         "proxops",
 		"ostype":       "debian",
 		"ostemplate":   "local:vztmpl/debian-13.tar.zst",
 		"description":  "cache box\n",
@@ -231,7 +231,7 @@ func TestAdoptLXCRoundTrip(t *testing.T) {
 	if lxc.Spec.Root.Size != "4GiB" {
 		t.Errorf("root.size = %q, want 4GiB (recovered from pve01 content listing)", lxc.Spec.Root.Size)
 	}
-	// The manifest must be usable pveconform YAML.
+	// The manifest must be usable proxops YAML.
 	if vErr := lxc.Validate(); vErr != nil {
 		t.Errorf("LXC manifest Validate: %v", vErr)
 	}
@@ -250,7 +250,7 @@ func TestAdoptLXCRootFSUnknownSize(t *testing.T) {
 		"cores":      "1",
 		"rootfs":     "local-lvm:vm-500-disk-0",
 		"ostemplate": "local:vztmpl/debian-13.tar.zst",
-		"tags":       "pveconform",
+		"tags":       "proxops",
 	}, "stopped")
 	c := newMockClient(t, m)
 	root := t.TempDir()
@@ -388,8 +388,8 @@ func TestAdoptMalformedClusterName(t *testing.T) {
 func TestAdoptDoesNotTouchPVE(t *testing.T) {
 	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
 	t.Cleanup(m.Close)
-	m.PreloadVM("pve01", 100, map[string]string{"name": "v", "memory": "1024", "cpu": "host", "cores": "1", "scsi0": "local:4G", "tags": "pveconform"}, "stopped")
-	m.PreloadLXC("pve01", 500, map[string]string{"name": "l", "hostname": "h", "memory": "512", "cores": "1", "rootfs": "local:4G", "ostemplate": "local:vztmpl/x.tar.zst", "tags": "pveconform"}, "stopped")
+	m.PreloadVM("pve01", 100, map[string]string{"name": "v", "memory": "1024", "cpu": "host", "cores": "1", "scsi0": "local:4G", "tags": "proxops"}, "stopped")
+	m.PreloadLXC("pve01", 500, map[string]string{"name": "l", "hostname": "h", "memory": "512", "cores": "1", "rootfs": "local:4G", "ostemplate": "local:vztmpl/x.tar.zst", "tags": "proxops"}, "stopped")
 	m.PreloadTemplate("pve01", "local", "x.tar.zst")
 
 	c := newMockClient(t, m)

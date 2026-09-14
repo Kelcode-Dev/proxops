@@ -47,10 +47,10 @@ func TestClusterAllowlistExcludesLiveObjectsFromPlan(t *testing.T) {
 	}
 	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
 	t.Cleanup(m.Close)
-	m.PreloadVM("pve01", 100, map[string]string{"name": "in-list-orphan", "tags": "pveconform", "memory": "1024"}, "stopped")
-	m.PreloadVM("pve02", 101, map[string]string{"name": "out-list-orphan", "tags": "pveconform", "memory": "1024"}, "stopped")
+	m.PreloadVM("pve01", 100, map[string]string{"name": "in-list-orphan", "tags": "proxops", "memory": "1024"}, "stopped")
+	m.PreloadVM("pve02", 101, map[string]string{"name": "out-list-orphan", "tags": "proxops", "memory": "1024"}, "stopped")
 	pve, err := pveclient.New(pveclient.Options{
-		PVE:     pveclient.PVEParams{User: "root@pam", Auth: "token", TokenID: "pveconform", Token: "deadbeef"},
+		PVE:     pveclient.PVEParams{User: "root@pam", Auth: "token", TokenID: "proxops", Token: "deadbeef"},
 		BaseURL: m.URL(),
 	}, log)
 	if err != nil {
@@ -78,7 +78,7 @@ func TestClusterAllowlistExcludesLiveObjectsFromPlan(t *testing.T) {
 	if res.Aborted {
 		t.Fatalf("aborted: %s", res.AbortReason)
 	}
-	// Both orphans carry the pveconform tag; 0 desired VMs + 2 tagged live
+	// Both orphans carry the proxops tag; 0 desired VMs + 2 tagged live
 	// = the empty-desired anomaly shape? budget=3, candidates=2 → 2 <= 3 →
 	// NOT the anomaly shape, prunes are allowed. Only the pve01 orphan is a
 	// candidate.
@@ -120,7 +120,7 @@ func TestUnknownClusterProducesNoPVEActions(t *testing.T) {
 	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
 	t.Cleanup(m.Close)
 	pve, err := pveclient.New(pveclient.Options{
-		PVE:     pveclient.PVEParams{User: "root@pam", Auth: "token", TokenID: "pveconform", Token: "deadbeef"},
+		PVE:     pveclient.PVEParams{User: "root@pam", Auth: "token", TokenID: "proxops", Token: "deadbeef"},
 		BaseURL: m.URL(),
 	}, slog.Default())
 	if err != nil {
@@ -199,9 +199,9 @@ spec:
 	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
 	t.Cleanup(m.Close)
 	// Live: the prod VM exists on pve02 (tagged).
-	m.PreloadVM("pve02", 500, map[string]string{"name": "prod-vm", "tags": "pveconform", "memory": "1024"}, "stopped")
+	m.PreloadVM("pve02", 500, map[string]string{"name": "prod-vm", "tags": "proxops", "memory": "1024"}, "stopped")
 	pve, err := pveclient.New(pveclient.Options{
-		PVE:     pveclient.PVEParams{User: "root@pam", Auth: "token", TokenID: "pveconform", Token: "deadbeef"},
+		PVE:     pveclient.PVEParams{User: "root@pam", Auth: "token", TokenID: "proxops", Token: "deadbeef"},
 		BaseURL: m.URL(),
 	}, slog.Default())
 	if err != nil {

@@ -1,4 +1,4 @@
-# M11 example: a pveconform TemplateVM (a PVE qemu object promoted to a
+# ProxOps TemplateVM (a PVE qemu object promoted to a
 # PVE template, template=1).
 #
 # A TemplateVM manifest re-uses every field a kind: VM manifest supports
@@ -7,12 +7,12 @@
 #   2. spec.state must be "stopped" (or absent -> stopped). PVE refuses to
 #      start a template; Validate() rejects "started".
 #
-# Lifecycle pveconform owns: CREATE (POST /qemu + POST /qemu/{id}/template),
+# Lifecycle proxops owns: CREATE (POST /qemu + POST /qemu/{id}/template),
 # UPDATE (POST /qemu/{id}/config), MARK (MarkTemplate action), PRUNE
 # (DELETE /qemu/{id}).
 #
 # ssh-keys is the single "*" redacted sentinel: replace with a real public
-# key before first apply (pveconform never writes ssh-keys while set).
+# key before first apply (proxops never writes ssh-keys while set).
 apiVersion: proxops/v1alpha1
 kind: TemplateVM
 metadata:

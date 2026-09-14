@@ -38,7 +38,7 @@ func makeVM(t *testing.T, disksBlock, networksBlock string) *schema.VM {
 // A PVE-side scsi1 that the manifest does not declare must surface on
 // DriftAnomalies — AND must NOT be auto-deleted by Drift (PVE's
 // `scsi1=none` only detaches; the LVM volume survives; the only safe
-// auto-action is none, so pveconform reports and leaves it alone).
+// auto-action is none, so proxops reports and leaves it alone).
 func TestVMDriftAnomalyLiveOnlyDisk(t *testing.T) {
 	vm := makeVM(t, vmStdDisks, vmStdNics)
 	live := map[string]any{
@@ -48,7 +48,7 @@ func TestVMDriftAnomalyLiveOnlyDisk(t *testing.T) {
 		"scsi0":   "local-lvm:vm-100-disk-0,size=4G",
 		"scsi1":   "local-lvm:vm-100-disk-1,size=2G", // live-only
 		"net0":    "virtio=52:54:00:AA:BB:01,bridge=vmbr0",
-		"tags":    "pveconform",
+		"tags":    "proxops",
 		"smbios1": "uuid=00000000-0000-0000-0000-000000000000",
 		"vmgenid": "00000000-0000-0000-0000-000000000000",
 		"ide2":    "none,media=cdrom",
@@ -67,14 +67,14 @@ func TestVMDriftAnomalyLiveOnlyDisk(t *testing.T) {
 		t.Errorf("anomaly must state the slot is not in spec.disks: %q", anoms[0])
 	}
 	if !strings.Contains(anoms[0], "will not automatically remove") {
-		t.Errorf("anomaly must state pveconform will NOT auto-remove: %q", anoms[0])
+		t.Errorf("anomaly must state proxops will NOT auto-remove: %q", anoms[0])
 	}
 
 	// Drift must NOT emit scsi1=none or any scsi1 update — that would be a
 	// non-reversible data-adjacent write (PVE leaves the LVM volume behind).
 	upd, stop, changed := vm.Drift(live)
 	if v, ok := upd["scsi1"]; ok {
-		t.Errorf("Drift emitted scsi1=%v; pveconform must not auto-touch live-only disks (stop=%v changed=%v)", v, stop, changed)
+		t.Errorf("Drift emitted scsi1=%v; proxops must not auto-touch live-only disks (stop=%v changed=%v)", v, stop, changed)
 	}
 }
 
@@ -87,7 +87,7 @@ func TestVMDriftAnomalyLiveOnlyNIC(t *testing.T) {
 		"scsi0": "local-lvm:vm-100-disk-0,size=4G",
 		"net0":  "virtio=52:54:00:AA:BB:01,bridge=vmbr0",
 		"net1":  "e1000=DD:EE:FF:00:11:22,bridge=vmbr1",
-		"tags":  "pveconform",
+		"tags":  "proxops",
 	}
 	anoms := vm.DriftAnomalies(live)
 	if len(anoms) != 1 {
@@ -108,7 +108,7 @@ func TestVMDriftAnomalyNoneSlotIsNotAnomaly(t *testing.T) {
 		"scsi0": "local-lvm:vm-100-disk-0,size=4G",
 		"scsi1": "none,media=cdrom",
 		"net0":  "virtio=52:54:00:AA:BB:01,bridge=vmbr0",
-		"tags":  "pveconform",
+		"tags":  "proxops",
 	}
 	if anoms := vm.DriftAnomalies(live); len(anoms) != 0 {
 		t.Fatalf("DriftAnomalies = %v, want none (scsi1=none is PVE empty slot)", anoms)
@@ -126,7 +126,7 @@ func TestVMDriftAnomalyDeclaredDiskIsNotAnomaly(t *testing.T) {
 		"scsi0": "local-lvm:vm-100-disk-0,size=4G",
 		"scsi1": "local-lvm:vm-100-disk-1,size=2G",
 		"net0":  "virtio=52:54:00:AA:BB:01,bridge=vmbr0",
-		"tags":  "pveconform",
+		"tags":  "proxops",
 	}
 	if anoms := vm.DriftAnomalies(live); len(anoms) != 0 {
 		t.Fatalf("DriftAnomalies = %v, want none", anoms)
@@ -174,7 +174,7 @@ func TestLXCDriftAnomalyLiveOnlyMP(t *testing.T) {
 		"ostype":       "debian",
 		"ostemplate":   "local:vztmpl/base.tar.zst",
 		"unprivileged": "1",
-		"tags":         "pveconform",
+		"tags":         "proxops",
 	}
 	// Resolve the template ref against a real CTT so the manifest is valid.
 	ctt := schema.NewCTTemplate()
@@ -195,7 +195,7 @@ func TestLXCDriftAnomalyLiveOnlyMP(t *testing.T) {
 	// And Drift must not emit mp1=none.
 	upd, _, _ := lxc.Drift(live)
 	if v, ok := upd["mp1"]; ok {
-		t.Errorf("Drift emitted mp1=%v; pveconform must not auto-remove live-only mount points", v)
+		t.Errorf("Drift emitted mp1=%v; proxops must not auto-remove live-only mount points", v)
 	}
 }
 

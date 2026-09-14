@@ -34,11 +34,11 @@ type LXCRoot struct {
 // type, rate, firewall, ip, gw (see pct.conf(5)); `multi_bridge`/
 // `macvlan_mode` are NOT in PVE's netX schema (PVE 9.2 probe-verified:
 // rejected by the create API). `ip=`/`gw=` are user-set static address /
-// gateway tokens — they are not PVE-assigned, so pveconform may own them.
+// gateway tokens — they are not PVE-assigned, so proxops may own them.
 type LXCNetwork struct {
 	// Iface is PVE's `name=<iface>` (guest-side interface name, e.g.
 	// "wired0" default when PVE's UI creates a net, "net0" legacy). When
-	// empty, pveconform defaults to "net<i>" to be deterministic.
+	// empty, proxops defaults to "net<i>" to be deterministic.
 	Iface string `yaml:"iface,omitempty" json:"iface,omitempty"`
 	// Bridge, e.g. "vmbr0".
 	Bridge string `yaml:"bridge" json:"bridge"`
@@ -133,8 +133,8 @@ type LXCOptions struct {
 	// Startup is PVE's `startup` (e.g. "order=10", "start=1").
 	Startup string `yaml:"startup,omitempty" json:"startup,omitempty"`
 	// TTYCount is PVE's `ttys=` (PVE 9.2 create rejects this; only
-	// settable on /config update). pveconform records the intent and
-	// applies it at update time. When 0, pveconform does NOT send it.
+	// settable on /config update). proxops records the intent and
+	// applies it at update time. When 0, proxops does NOT send it.
 	TTYCount int `yaml:"ttys,omitempty" json:"ttys,omitempty"`
 	// Console enables/updates PVE's `console=` option. nil = PVE decides;
 	// true = `console=1`; false = `console=0`.
@@ -179,7 +179,7 @@ type LXCSpec struct {
 	// VMID is the PVE id (cid) — pinned.
 	VMID int `yaml:"vmid" json:"vmid"`
 
-	// Template is a pveconform CTTemplate metadata.name that bootstraps the
+	// Template is a proxops CTTemplate metadata.name that bootstraps the
 	// container's rootfs. It is REQUIRED on create: PVE's /lxc create needs
 	// an `ostemplate` volume and the declarative schema expresses that as a
 	// reference to a CTTemplate manifest rather than a raw storage path. The
@@ -189,7 +189,7 @@ type LXCSpec struct {
 
 	// PveDescription is PVE's `description` (valid on create + update).
 	PveDescription string `yaml:"pve-description,omitempty" json:"pve-description,omitempty"`
-	// Tags are PVE user tags (pveconform tag is auto-appended).
+	// Tags are PVE user tags (proxops tag is auto-appended).
 	Tags []string `yaml:"tags,omitempty" json:"tags,omitempty"`
 
 	// CPU.
@@ -401,7 +401,7 @@ func (l *LXC) Validate() error {
 //   - `dns`, `ttys`, `hwclock` are also rejected on create (they are PVE
 //     UI helpers that expand to `hostname` + `nameserver` + `searchdomain`);
 //     use the three valid form keys instead.
-//   - `ostemplate=<pool>:vztmpl/<filename>` is required; pveconform does
+//   - `ostemplate=<pool>:vztmpl/<filename>` is required; proxops does
 //     NOT emit it here — the planner resolves LXC.spec.template against
 //     the CTTemplate manifest and injects the value (see plan.resolveDeps).
 //   - net<i> must carry `name=<iface>` first (probe-verified: PVE 9.x
@@ -420,7 +420,7 @@ func (l *LXC) ToCreateParams() (map[string]any, error) {
 	}
 	// ostemplate: REQUIRED on PVE 9.2 /lxc create. When the planner
 	// resolves the LXC's template ref, it sets OstemplateVolid to
-	// "<storage>:vztmpl/<filename>" and pveconform emits it here.
+	// "<storage>:vztmpl/<filename>" and proxops emits it here.
 	if l.ostemplateVolid != "" {
 		p["ostemplate"] = l.ostemplateVolid
 	}
@@ -637,7 +637,7 @@ func parseLXCNetFields(s string) lxcNetFields {
 //   - hwaddr (only when desired pinned it — PVE auto-assigns otherwise)
 func lxcNetMatches(cur string, n LXCNetwork) bool {
 	got := parseLXCNetFields(cur)
-	// iface: if user did not declare one, pveconform defaulted to net<N>
+	// iface: if user did not declare one, proxops defaulted to net<N>
 	// and PVE likely defaulted differently ("wired0" on PVE 9.2 web UI).
 	// We only compare when explicit.
 	if strings.TrimSpace(n.Iface) != "" && got.iface != strings.TrimSpace(n.Iface) {
@@ -665,7 +665,7 @@ func lxcNetMatches(cur string, n LXCNetwork) bool {
 	// have no static addressing" (PVE omits the token when unset, so
 	// comparing empty-desired-vs-absent live = match; empty-desired-vs-
 	// present-live = PVE had a static address we did not want, but that
-	// would be a PVE-side hand-set not pveconform-side: treat as owned
+	// would be a PVE-side hand-set not proxops-side: treat as owned
 	// only when desired was set).
 	if s := strings.TrimSpace(n.Ip); s != "" && got.ip != s {
 		return false
@@ -698,14 +698,14 @@ func lxcValidNetSlot(s string) bool {
 // PVE's LXC /lxc/{cid}/config report uses "hostname", "nameserver",
 // "searchdomain" as field names (probe-verified on PVE 9.2, identical to
 // the create-side keys). This is different from PVE 8, where the report
-// used "name" — pveconform only targets PVE 9.x.
+// used "name" — proxops only targets PVE 9.x.
 
 // lxcDiskSlotDrift classifies one LXC storage slot (rootfs or mpN) against
 // the desired pool/size, applying the same data-loss guard as VM disks:
 //   - no live volume at the slot      -> safe create write
 //   - live volume, different pool/size -> NON-destructive anomaly: PVE
 //     /config re-creates the LVM volume on a pool/size write (the old
-//     volume and its data are deleted). pveconform refuses to do that.
+//     volume and its data are deleted). proxops refuses to do that.
 func (l *LXC) lxcDiskSlotDrift(slot, wantWire, curWire string) (map[string]any, bool, []string) {
 	upd := map[string]any{}
 	anoms := make([]string, 0, 1)
@@ -735,7 +735,7 @@ func (l *LXC) lxcDiskSlotDrift(slot, wantWire, curWire string) (map[string]any, 
 			desiredSize = fmt.Sprintf("%d bytes", want.sizeBytes)
 		}
 		anoms = append(anoms, fmt.Sprintf(
-			"%s storage/size drift (live=%q; desired pool=%s size=%s); pveconform will NOT auto-resize or re-pool a live LXC volume (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE, then update the manifest",
+			"%s storage/size drift (live=%q; desired pool=%s size=%s); proxops will NOT auto-resize or re-pool a live LXC volume (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE, then update the manifest",
 			slot, curWire, desiredPool, desiredSize))
 	}
 	return upd, len(upd) > 0, anoms
@@ -743,7 +743,7 @@ func (l *LXC) lxcDiskSlotDrift(slot, wantWire, curWire string) (map[string]any, 
 
 // DriftAnomalies surfaces live-only LXC mount-point slots (mp*) that the
 // manifest does not declare. Same semantics as VM.DriftAnomalies for disks:
-// pveconform will not automatically delete a live-only mount point (PVE's
+// proxops will not automatically delete a live-only mount point (PVE's
 // `mpN=none` is detach-only, not volume-destroy), and a manifest-author
 // unaware of a hand-added mount point is exactly the shape we want to
 // surface on /status rather than silently delete.
@@ -765,7 +765,7 @@ func (l *LXC) DriftAnomalies(current map[string]any) []string {
 			continue
 		}
 		if !want[k] && !isNoneSlot(pveStr(raw)) {
-			out = append(out, fmt.Sprintf("live-only LXC mountpoint slot %s=%s is not in spec.mount-points; pveconform will not automatically remove it", k, pveStr(raw)))
+			out = append(out, fmt.Sprintf("live-only LXC mountpoint slot %s=%s is not in spec.mount-points; proxops will not automatically remove it", k, pveStr(raw)))
 		}
 	}
 	out = append(out, l.lxcDiskAnoms...)
@@ -821,7 +821,7 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	}
 	// hostname: PVE's wire key is hostname on both create and /config
 	// (probe-verified PVE 9.2). When the user did not declare a hostname,
-	// pveconform sends metadata.name and PVE stores it verbatim, so the
+	// proxops sends metadata.name and PVE stores it verbatim, so the
 	// comparison is exact.
 	wantHost := strings.TrimSpace(l.Spec.DNS.HostName)
 	if wantHost == "" {
@@ -861,7 +861,7 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	// rootfs + mount points: data-loss guard (PVE 9.2, probed 2026-09-08).
 	// Changing a live LXC rootfs/mp pool or size via /config re-creates the
 	// LVM volume (the old one is deleted → data loss). A pool/size drift on a
-	// LIVE volume is therefore reported as a NON-destructive anomaly; pveconform
+	// LIVE volume is therefore reported as a NON-destructive anomaly; proxops
 	// never auto-resizes a data-bearing LXC rootfs/mountpoint. Adding a brand-
 	// new volume (no live one at the slot) is safe and is applied.
 	// Re-derive anomalies on every Drift call (Drift may run more than once
@@ -913,10 +913,10 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	//   - keyctl / fuse: NO accepted wire form at create OR /config on
 	//     PVE 9.2 (403/400; the features composite only carries nesting).
 	//     They are adoptable (reported faithfully) but NOT convergable by
-	//     pveconform.
+	//     proxops.
 	//
-	// Comparison model: pveconform owns a key ONLY when the manifest sets
-	// it (non-nil desired). A nil desired means "PVE decides" — pveconform
+	// Comparison model: proxops owns a key ONLY when the manifest sets
+	// it (non-nil desired). A nil desired means "PVE decides" — proxops
 	// never writes that key, so any live value is PVE-owned and not
 	// drifted. When non-nil, desired "0/1" must equal PVE's effective
 	// value; PVE reports an explicit 0 key when set off (probe: LXC 111
@@ -925,7 +925,7 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 	if o := &l.Spec.Options; o != nil {
 		// unprivileged is PVE 9.x create-only (PUT /config → 500). The
 		// live default when PVE omits the key is unprivileged=1; only an
-		// explicit 0 is "privileged". When it diverges, pveconform cannot
+		// explicit 0 is "privileged". When it diverges, proxops cannot
 		// converge in place — surface a recreate-required anomaly.
 		if o.Unprivileged != nil {
 			effective := true
@@ -933,7 +933,7 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 				effective = pveInt(v) == 1
 			}
 			if effective != *o.Unprivileged {
-				l.lxcDiskAnoms = append(l.lxcDiskAnoms, "spec.options.unprivileged diverges from PVE's live value (effective live="+lxcBoolWire(effective)+"); unprivileged is a PVE 9.x create-only flag (PUT /config returns HTTP 500) — pveconform cannot flip it in place, a recreate is required to converge")
+				l.lxcDiskAnoms = append(l.lxcDiskAnoms, "spec.options.unprivileged diverges from PVE's live value (effective live="+lxcBoolWire(effective)+"); unprivileged is a PVE 9.x create-only flag (PUT /config returns HTTP 500) — proxops cannot flip it in place, a recreate is required to converge")
 			}
 		}
 		compareLXCBoolOption(upd, &stop, "protection", o.Protection, current)
@@ -954,7 +954,7 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 		}
 		// keyctl / fuse: no convergable wire form on PVE 9.2. Desired
 		// false + live off/absent = converged. Any other mismatch is a
-		// non-destructive anomaly (pveconform records the intent but
+		// non-destructive anomaly (proxops records the intent but
 		// cannot apply it).
 		lxcNonconvergableOptionAnomaly(&l.lxcDiskAnoms, "keyctl", o.KeyCtl, current["keyctl"])
 		lxcNonconvergableOptionAnomaly(&l.lxcDiskAnoms, "fuse", o.Fuse, current["fuse"])
@@ -993,7 +993,7 @@ func lxcBoolWire(b bool) string {
 // and is NOT routed through this helper.
 func compareLXCBoolOption(upd map[string]any, stop *bool, field string, want *bool, current map[string]any) {
 	if want == nil {
-		return // pveconform does not own this key.
+		return // proxops does not own this key.
 	}
 	liveStr := pveStr(current[field])
 	if liveStr == "1" || liveStr == "true" {
@@ -1056,16 +1056,16 @@ func lxcFeaturesCreate(nesting *bool) string {
 // lxcNonconvergableOptionAnomaly records a non-destructive anomaly when a
 // desired LXC option (keyctl / fuse) has no PVE 9.2 convergable wire form
 // (probe: top-level 400, features composite 403). Desired=true + live
-// off/absent is a manifest intent pveconform cannot apply; desired=false
+// off/absent is a manifest intent proxops cannot apply; desired=false
 // (or nil) + live on/absent is PVE-owned (not drifted). The anomaly
 // surfaces on /status + /metrics so the operator knows a manual toggle on
 // PVE is required to converge.
 func lxcNonconvergableOptionAnomaly(anoms *[]string, field string, want *bool, live any) {
 	if want == nil || !*want {
-		// nil / false desired: pveconform does NOT own an enabled value
-		// (absent live = PVE default is the only state pveconform can
+		// nil / false desired: proxops does NOT own an enabled value
+		// (absent live = PVE default is the only state proxops can
 		// produce); a present live "1"/"true" would be PVE hand-set and
-		// is surfaced elsewhere. Not a pveconform-convergence concern.
+		// is surfaced elsewhere. Not a proxops-convergence concern.
 		return
 	}
 	// Desired=true.
@@ -1074,7 +1074,7 @@ func lxcNonconvergableOptionAnomaly(anoms *[]string, field string, want *bool, l
 	}
 	// Desired=true but PVE is off/absent: no wire form exists to flip
 	// this on PVE 9.x. Surface an anomaly (non-destructive, no write).
-	*anoms = append(*anoms, "spec.options."+field+"=true has no PVE 9.x convergable wire form: top-level `"+field+"` is rejected by /lxc create AND /config (403/400 probe-verified 2026-09-10), and the PVE 9.x `features` composite only carries `nesting`. Toggle "+field+" on the PVE host (e.g. `pct set <ctid> -"+field+" 1`) and pveconform will observe converged on the next cycle")
+	*anoms = append(*anoms, "spec.options."+field+"=true has no PVE 9.x convergable wire form: top-level `"+field+"` is rejected by /lxc create AND /config (403/400 probe-verified 2026-09-10), and the PVE 9.x `features` composite only carries `nesting`. Toggle "+field+" on the PVE host (e.g. `pct set <ctid> -"+field+" 1`) and proxops will observe converged on the next cycle")
 }
 
 func (l *LXC) allTags() []string {

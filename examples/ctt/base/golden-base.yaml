@@ -1,7 +1,7 @@
 # Golden CTTemplate: a downloadable PVE "vztmpl" container template that
-# pveconform keeps present on every node it declares. New LXCs are
+# proxops keeps present on every node it declares. New LXCs are
 # bootstrapped from this file by PVE itself (via `ostemplate` at create
-# time); pveconform owns only the storage artifact, not the LXC.
+# time); proxops owns only the storage artifact, not the LXC.
 #
 # - No PVE numeric id: CTTemplate is a storage artifact, not a cloneable
 #   PVE LXC. The legacy "clone a CT then mark-as-template" model was

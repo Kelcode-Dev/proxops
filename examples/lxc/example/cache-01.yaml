@@ -4,7 +4,7 @@
 # (the PVE wire key is `cid`, the schema keeps `vmid` for symmetry) must be
 # unique across ALL object kinds on the node.
 #
-# PVE 9.x /lxc create requires `ostemplate`; pveconform models this as
+# PVE 9.x /lxc create requires `ostemplate`; proxops models this as
 # `spec.template: <CTTemplate name>` — the planner resolves it against the
 # CTTemplate manifest in the same tree and injects the PVE wire value at
 # create time.
@@ -48,4 +48,4 @@ spec:
     unprivileged: true
     onboot: true
     startup: "order=10"
-  pve-description: "cache box under pveconform"
+  pve-description: "cache box under proxops"

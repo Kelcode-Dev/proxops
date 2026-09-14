@@ -2,7 +2,7 @@ bin/
 dist/
 *.test
 coverage.out
-pveconform.yaml.local
+proxops.yaml.local
 .env
 .config.yaml
-pveconform
+/proxops

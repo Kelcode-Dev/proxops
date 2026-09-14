@@ -30,7 +30,7 @@ type ContentEntry struct {
 	Format  string `json:"format"`  // "iso" | "tzst" | "dir" | ...
 	Size    int64  `json:"size"`
 	// Note: PVE also reports `ctime`, but its JSON type varies across PVE
-	// builds (string on some, number on others), and pveconform never uses
+	// builds (string on some, number on others), and proxops never uses
 	// it — omit it so the decode stays robust across PVE builds.
 }
 
@@ -89,7 +89,7 @@ func (s *Storage) Content(ctx context.Context, node, storage string) ([]ContentE
 // `GET` on `/download-url` is 501 (POST-only) and that a URL the node
 // cannot fetch still returns 200 + task UPID, with exitstatus
 // `"download failed: exit code 8"` on the task (curl exit 8 = "Could not
-// connect to server"). pveconform therefore always treats a 5xx or task
+// connect to server"). proxops therefore always treats a 5xx or task
 // exitstatus-other-than-OK as a real failure and relies on
 // Storage.HasContent for the eventual convergence test: the file appears
 // on the storage pool after the task succeeds.
@@ -108,7 +108,7 @@ func (s *Storage) Download(ctx context.Context, node, storage, downloadURL, file
 // VolidFilename extracts the filename from a PVE content volid. Forms:
 // "<storage>:iso/<filename>", "<storage>:vztmpl/<filename>",
 // "<storage>:backup/<path>", etc. Exported so adopt can reuse it when
-// reverse-engineering storage listings into pveconform artifact manifests.
+// reverse-engineering storage listings into proxops artifact manifests.
 func VolidFilename(volid, content string) string {
 	if content != "" {
 		probe := ":" + content + "/"

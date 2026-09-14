@@ -1,11 +1,11 @@
-# pveconform manifest schema
+# ProxOps manifest schema
 
 Manifests are YAML documents, one or more per file.
 
-## M8 repository layout
+## Repository layout
 
-Since M8 the manifest tree is organised around the **GitOps composition
-model** (see ARCHITECTURE.md → "Multi-cluster composition"):
+The manifest tree is organised around the **GitOps composition model**
+(see ARCHITECTURE.md → "Multi-cluster composition"):
 
 ```
 clusters/<cluster>/resources.yaml   # what <cluster> consumes (explicit list)
@@ -13,31 +13,31 @@ clusters/<cluster>/resources.yaml   # what <cluster> consumes (explicit list)
                                      #   iso, ctt, templatevm, diskimage
 ```
 
-Since M9 the cluster's pveconform **configuration** and **credentials**
-are committed cluster-locally in the same directory (see
-ARCHITECTURE.md → "M9 (SOPS-backed cluster configuration)"):
+The cluster's ProxOps **configuration** and **credentials** are committed
+cluster-locally in the same directory (see ARCHITECTURE.md →
+"Cluster-local configuration (SOPS)"):
 
 ```
 clusters/<cluster>/
-  config.yaml         # pveconform --config for THIS cluster (full app config
+  config.yaml         # proxops --config for THIS cluster (full app config
                       #   scoped to one pve.clusters.<name> entry + SOPS
                       #   reference). git.path: "." resolves to the worktree
                       #   that contains this file.
   secrets.sops.yaml   # SOPS/age-encrypted PVE + git credentials. Public age
                       #   recipient in sops: metadata; private key OUTSIDE
                       #   the repo (see OPERATIONS.md → "Per-cluster SOPS
-                      #   secrets (M9)").
-  resources.yaml      # M8 composition (unchanged)
+                      #   secrets").
+  resources.yaml      # resource composition
 ```
 
-Resource manifests (under `vm/`, `lxc/`, `iso/`, `ctt/`) do NOT carry
-credentials — a secret is never a spec field on a resource (task §14 "do
-not add secrets to VM/LXC/ISO/CTTemplate resource schemas").
+Resource manifests (under `vm/`, `lxc/`, `iso/`, `ctt/`, `templatevm/`,
+`diskimage/`) do NOT carry credentials — a secret is never a spec field on
+a resource.
 
 A manifest file is only reconciled if some cluster's
 `clusters/<cluster>/resources.yaml` lists it; the cluster boundary is the
-safety model. Resources placed directly under a kind root (the pre-M8
-`vm/foo.yaml` layout) are a **validation error** — pveconform never invents
+safety model. Resources placed directly under a kind root (a flat
+`vm/foo.yaml` layout) are a **validation error** — ProxOps never invents
 a default cluster.
 
 Every manifest has this envelope:
@@ -54,29 +54,31 @@ metadata:
 spec: {...}                      # kind-specific (below)
 ```
 
-`metadata.name` is the pveconform identity within a kind. PVE identity is
+`metadata.name` is the ProxOps identity within a kind. PVE identity is
 additionally pinned by `spec` fields (below) — **the agent never invents PVE
 ids** for objects that have one. The kinds that have **no** PVE numeric id
 (ISO, CTTemplate, and DiskImage — all *storage artifacts*) are identified on
-PVE by `(node, storage, filename)` and on pveconform by `metadata.name`.
+PVE by `(node, storage, filename)` and on ProxOps by `metadata.name`.
 
-The three kinds that carry a PVE numeric id (VM, LXC, and — since M11 —
-TemplateVM) share PVE's per-node integer pool: a `spec.vmid` / `spec.vmid`
-collision inside one cluster's composition is a parse error. A TemplateVM and
-a VM can never claim the same `(node, vmid)`.
+The three kinds that carry a PVE numeric id (VM, LXC, and TemplateVM) share
+PVE's per-node integer pool: a `spec.vmid` collision inside one cluster's
+composition is a parse error. A TemplateVM and a VM can never claim the same
+`(node, vmid)`.
 
 ---
 
 ## Dependencies (inferred + explicit)
 
-pveconform builds a **dependency graph** from two sources and schedules
+ProxOps builds a **dependency graph** from two sources and schedules
 creates topologically so prerequisites finish **before** their dependants:
 
 1. **Structured references (inferred, preferred).** The schema knows about
-   three cross-kind edges:
+   these cross-kind edges:
    - `VM.spec.hardware.cdrom.iso` → an `ISO`
    - `VM.spec.disks[].image` → a `DiskImage`
    - `LXC.spec.template` → a `CTTemplate`
+   - `TemplateVM.spec.hardware.cdrom.iso` → an `ISO` (TemplateVM re-uses the
+     VM surface, so the same edge applies)
 
    These are detected automatically — you do **not** have to repeat them with
    an annotation. The planner downloads the ISO / disk image / container
@@ -92,9 +94,6 @@ creates topologically so prerequisites finish **before** their dependants:
    ```
 
    The value is a comma-separated list of `Kind:name` refs.
-
-M11 adds one more structured edge: a TemplateVM's inherited `cdrom.iso`
-reference (see `kind: TemplateVM` below) resolves exactly like a VM's.
 
 Behaviour:
 
@@ -136,7 +135,7 @@ Behaviour:
 | `spec.options` | no | see Options | VM Options panel (onboot, protection, agent, …). |
 | `spec.pve-name` | no | `name` | Defaults to `metadata.name`. |
 | `spec.pve-description` | no | `description` | PVE description string. |
-| `spec.tags` | no | `tags` | PVE user tags; `pveconform` is added automatically. |
+| `spec.tags` | no | `tags` | PVE user tags; `proxops` is added automatically. |
 | `spec.extra` | no | passthrough | Free-form PVE keys for unmodeled properties. |
 
 ### Disk
@@ -153,9 +152,9 @@ Behaviour:
 Image-seeded disks are imported **once** (at create, or when the slot is
 empty). PVE does not re-report the `import-from` option after create (the
 /config shows a plain `local-lvm:vm-N-disk-0,size=3G`), and the volume size
-comes from the image's virtual size, so pveconform compares only the **pool**
+comes from the image's virtual size, so ProxOps compares only the **pool**
 on a live image-seeded disk. A live volume at a different pool is a
-non-destructive anomaly (the M7 data-loss guard), never a re-import.
+non-destructive anomaly (the data-loss guard), never a re-import.
 
 ### NIC
 
@@ -178,13 +177,15 @@ non-destructive anomaly (the M7 data-loss guard), never a re-import.
 | `display` | no | `vga` | e.g. `std`. |
 | `cdrom` (block) | no | `ide2` / `ide3` | Three-state CD/DVD ownership (see below). |
 | `cdrom.iso` (attach) | no | `ide2`/`ide3` = `<storage>:iso/<filename>,media=cdrom` | **An ISO `metadata.name`.** Attaches the ISO to the CD/DVD slot and creates a structured `VM → ISO` dependency: the VM is not created until the ISO has been downloaded on that node. |
-| `cdrom.iso` = `none` (detach) | no | `ide2`/`ide3` = `none` | **Detach sentinel.** pveconform owns the slot and writes `none`. Use to model "no CD ever", or remove a previously-attached ISO (change `cdrom.iso: <name>` → `cdrom.iso: none`, reconcile to detach). |
-| (block absent) | no | — | pveconform does **not** own the PVE IDE slot; PVE keeps its default. No dependency inferred. |
+| `cdrom.iso` = `none` (detach) | no | `ide2`/`ide3` = `none` | **Detach sentinel.** ProxOps owns the slot and writes `none`. Use to model "no CD ever", or remove a previously-attached ISO (change `cdrom.iso: <name>` → `cdrom.iso: none`, reconcile to detach). |
+| (block absent) | no | — | ProxOps does **not** own the PVE IDE slot; PVE keeps its default. No dependency inferred. |
 | `cdrom.media` | no | `,media=` | `cdrom` (default) \| `disk`. |
-| `efi-disk` | no | `efidisk0` | Valid with `bios: ovmf`. Owns pool + size; PVE volume name not owned. PVE clamps small EFI sizes to 4 MiB. |
-| `cloud-init` | no | `ide2` = `<storage>:cloudinit,size=…` | When enabled, pveconform claims `ide2` for cloud-init and shifts the CD/DVD slot to `ide3` (demonstrated coexistence on PVE 9.2). |
-| `tpm` | no | `tpm0` | `v1.2` \| `v2.0`. With `bios: ovmf` + `machine: q35`. |
+| `efi-disk` | no | `efidisk0` | Valid with `bios: ovmf`. Owns pool + size; PVE volume name not owned. PVE clamps small EFI sizes to 4 MiB. `template` pins the OVMF vars type (`efitype=`: `byos` \| `2m` \| `4m` \| `8m`). `secure-boot` (`required` \| `optional` \| `disabled`) is recorded + validated but NOT sent: PVE 9.2 manages Secure Boot policy through its separate `/qemu/{id}/security` endpoint. |
+| `cloud-init` | no | `ide2` = `<storage>:cloudinit,size=…` | When enabled, ProxOps claims `ide2` for cloud-init and shifts the CD/DVD slot to `ide3` (demonstrated coexistence on PVE 9.2). The storage MUST carry `images` content or the VM fails at start (see GAPS.md). |
+| `tpm` | no | `tpm0` | `version`: `v1.2` \| `v2.0` (default v2.0). With `bios: ovmf` + `machine: q35`. |
 | `serial0` | no | `serial0` | e.g. `socket`. |
+| `sockets` | no | `sockets` | CPU socket count (default 1). |
+| `numa` | no | `numa=1` | Turn PVE NUMA on. |
 
 ### Options
 
@@ -201,31 +202,32 @@ non-destructive anomaly (the M7 data-loss guard), never a re-import.
 | `nested-virt` | no | `nestedvirt=1` | Nested KVM. |
 | `hidden` | no | `hidden=1` | Hide KVM from the guest. |
 
-### Cloud-Init Data (M11)
+### Cloud-Init Data
 
-A pveconform VM's top-level PVE keys `ciuser`, `sshkeys`, `nameserver`,
+A ProxOps VM's top-level PVE keys `ciuser`, `sshkeys`, `nameserver`,
 `searchdomain`, `ipconfig<N>` are modelled under `spec.cloud-init-data`:
 
 | Field | Required | PVE wire | Semantics |
 |---|---|---|---|
 | `ci-user` | no | `ciuser` | PVE cloud-init user. Empty = not owned. |
-| `ssh-keys` | no | `sshkeys` | PVE cloud-init public keys. Empty = not owned. A single `"*"` sentinel = PVE owns the live value; pveconform does not write `sshkeys`. On the wire pveconform percent-encodes the value and joins keys with `%0A` (PVE 9.2 requires the field value itself to be urlencoded — a raw key is rejected with "invalid urlencoded string"; probed on conformance-dev 2026-09-13). Drift compares the **decoded key set**, so a re-encode or key reorder is never drift. |
+| `ssh-keys` | no | `sshkeys` | PVE cloud-init public keys. Empty = not owned. A single `"*"` sentinel = PVE owns the live value; ProxOps does not write `sshkeys`. On the wire ProxOps percent-encodes the value and joins keys with `%0A` (PVE 9.2 requires the field value itself to be urlencoded — a raw key is rejected with "invalid urlencoded string"; probed on conformance-dev 2026-09-13). Drift compares the **decoded key set**, so a re-encode or key reorder is never drift. |
 | `nameservers` | no | `nameserver` (space-separated) | PVE cloud-init DNS server CSV. Set-compared on /config vs. desired — order/duplicates are not semantics. |
 | `search-domains` | no | `searchdomain` (space-separated) | PVE cloud-init DNS search domain CSV. Same set semantics. |
-| `ipconfigs` | no | `ipconfig<N>` (`ip=<cidr>[,gw=<addr>]`) | PVE cloud-init static-IP. One entry per pveconform-owned NIC; `nic` = PVE slot index. PVE's `dhcp` form is **not** modelled. |
+| `ipconfigs` | no | `ipconfig<N>` (`ip=<cidr>[,gw=<addr>]`) | PVE cloud-init static-IP. One entry per proxops-owned NIC; `nic` = PVE slot index. PVE's `dhcp` form is **not** modelled. |
 
-Drift semantics: pveconform owns a PVE key only when the desired field is
-non-empty. Empty desired values mean "pveconform does not write the PVE
+Drift semantics: ProxOps owns a PVE key only when the desired field is
+non-empty. Empty desired values mean "ProxOps does not write the PVE
 key and does NOT surface drift for it" — so a PVE-side `ciuser` that
-pveconform has no way of knowing was set by `qm cloud-init` does not
-flap. The `ssh-keys: ["*"]` sentinel is the same non-write shape:
-pveconform does not write the PVE `sshkeys` field while the sentinel is
-present; PVE's live value survives.
+ProxOps has no way of knowing was set by `qm set` does not flap. The
+`ssh-keys: ["*"]` sentinel is the same non-write shape: ProxOps does not
+write the PVE `sshkeys` field while the sentinel is present; PVE's live
+value survives. Mixing `"*"` with real keys fails `Validate()`
+(ambiguous intent).
 
-Adoption (M11): PVE-side `sshkeys` are redacted to `["*"]` in emitted
-manifests (M10 PII redaction rule generalized to any kind carrying cloud-
-init data). `cipassword` / `cicustom` / `ciupgrade` are NOT adopted —
-secret or PVE-side-only — and stay in the gap report.
+Adoption: PVE-side `sshkeys` are redacted to `["*"]` in emitted
+manifests (public-key material is treated as credential-adjacent). `cipassword` /
+`cicustom` / `ciupgrade` are NOT adopted — secret or PVE-side-only — and
+stay in the gap report.
 
 **Deliberately not modelled:** replication jobs (source/destination/schedule
 is a separate concern — a future dedicated resource), `bootspeed`, `netboot`
@@ -241,31 +243,29 @@ Drift semantics on disks/NICs/hardware:
 
 ---
 
-## `kind: TemplateVM` (M11)
+## `kind: TemplateVM`
 
-A PVE qemu object promoted to a PVE template (PVE `template=1`). M11 makes
-pveconform own the template lifecycle end-to-end: create + mark, config
-drift, ownership-tag prune. The pveconform schema surface is **identical to
+A PVE qemu object promoted to a PVE template (PVE `template=1`). ProxOps
+owns the template lifecycle end-to-end: create + mark, config drift,
+ownership-tag prune. The ProxOps schema surface is **identical to
 `kind: VM`** (a `TemplateVM` manifest re-uses every `spec` field a VM
 manifest supports, plus `spec.state` constrained to "stopped").
 
 Differences from `kind: VM`:
 
-| Concern | pveconform behaviour |
+| Concern | ProxOps behaviour |
 |---|---|
 | `spec.state` | MUST be `stopped` (or absent → "stopped"). PVE refuses to start a template (`state: started` fails `Validate()` at parse time). |
-| PVE id space | PVE's per-node qm id space is shared with `kind: VM` — a TemplateVM and a VM cannot both claim the same `(node, vmid)`. pveconform enforces this as any other in-cluster id collision. |
+| PVE id space | PVE's per-node qm id space is shared with `kind: VM` — a TemplateVM and a VM cannot both claim the same `(node, vmid)`. ProxOps enforces this as any other in-cluster id collision. |
 | PVE /template endpoint | `POST /qemu/{id}/template` (mark). The planner emits a `MarkTemplate` action when a desired TemplateVM matches a PVE object at the same `(node, vmid)` that is NOT template-flagged. |
-| PVE /untemplate endpoint | **PVE 9.2 has no `/qemu/{id}/untemplate` endpoint** (probe-verified `HTTP 501 "not implemented"` on conformance-dev 2026-09-11). The planner therefore surfaces a **non-destructive anomaly** when a pveconform `kind: VM` desired matches a PVE-side template at the same `(node, vmid)`: pveconform will not attempt a kind-flip write. The operator either changes the manifest to `kind: TemplateVM` (the right pveconform representation of PVE's state) or manually demotes the PVE object (`qm` from the PVE host, or PVE's Web UI). |
+| PVE /untemplate endpoint | **PVE 9.2 has no `/qemu/{id}/untemplate` endpoint** (probe-verified `HTTP 501 "not implemented"` on conformance-dev 2026-09-11). The planner therefore surfaces a **non-destructive anomaly** when a ProxOps `kind: VM` desired matches a PVE-side template at the same `(node, vmid)`: ProxOps will not attempt a kind-flip write. The operator either changes the manifest to `kind: TemplateVM` (the right ProxOps representation of PVE's state) or manually demotes the PVE object (`qm` from the PVE host, or PVE's Web UI). |
 | Create | `POST /qemu` with `start=0` + `POST /qemu/{id}/template`. The executor combines both into a single `Create` action. |
 | Delete | `DELETE /qemu/{id}`. PVE accepts delete on a templated object. |
-| Cloud-init | M11's `spec.cloud-init-data` is fully supported (see `kind: VM` § Cloud-Init Data above). |
+| Cloud-init | `spec.cloud-init-data` is fully supported (see `kind: VM` § Cloud-Init Data above). |
 
-Adoption (M11): PVE objects reporting `template=1` now produce `kind:
-TemplateVM` manifests under `templatevm/<cluster>/`, replacing M10's
-"skip + SkippedObject census" contract. PVE-side `sshkeys` are redacted to
-`["*"]` (M10 PII redaction rule generalized); `cipassword` / `cicustom`
-remain in the gap report.
+Adoption: PVE objects reporting `template=1` produce `kind: TemplateVM`
+manifests under `templatevm/<cluster>/`. PVE-side `sshkeys` are redacted
+to `["*"]`; `cipassword` / `cicustom` remain in the gap report.
 
 ---
 
@@ -288,13 +288,13 @@ remain in the gap report.
 | `spec.arch` | no | `arch` | `amd64` (default) \| `arm64`. |
 | `spec.options` | no | see Options | See LXC Options. |
 | `spec.pve-description` | no | `description` | PVE description. |
-| `spec.tags` | no | `tags` | PVE tags; `pveconform` auto-added. |
+| `spec.tags` | no | `tags` | PVE tags; `proxops` auto-added. |
 | `spec.extra` | no | passthrough | Escape hatch. |
 
 ### LXC NIC
 
 PVE 9.x LXC NICs use a **different grammar** than VM NICs. The wire value is
-`name=<iface>[,type=veth][,bridge=BRIDGE][,tag=NN][,hwaddr=xx][,rate=NN][,firewall=1]`
+`name=<iface>[,type=veth][,bridge=BRIDGE][,tag=NN][,hwaddr=xx][,rate=NN][,firewall=1][,ip=<cidr>][,gw=<addr>]`
 and **`name=` is required** (PVE 9.2 rejects a bare model string).
 
 | Field | Required | PVE wire | Semantics |
@@ -306,6 +306,8 @@ and **`name=` is required** (PVE 9.2 rejects a bare model string).
 | `hwaddr` | no | `,hwaddr=xx` | Pinned MAC; empty → PVE assigns (not drift). |
 | `rate-limit` | no | `,rate=NN` | MBit/s. |
 | `firewall` | no | `,firewall=1` | Per-NIC firewall. |
+| `ip` | no | `,ip=<addr/prefix>` | Static address; empty → PVE/DHCP decides (not owned). |
+| `gw` | no | `,gw=<addr>` | Static gateway; empty → not owned. |
 
 ### Mount Point
 
@@ -328,15 +330,20 @@ and **`name=` is required** (PVE 9.2 rejects a bare model string).
 
 ### LXC Options
 
+Boolean options are **tri-state** (`*bool`): unset (nil) = "PVE decides"
+(never written); `true` = `=1`; `false` = `=0`.
+
 | Field | PVE wire | Semantics |
 |---|---|---|
-| `unprivileged` | `unprivileged=1` | Unprivileged container. |
+| `unprivileged` | `unprivileged=1` | Unprivileged container. **Create-only** on PVE 9.x (PUT → 500): a divergence surfaces a recreate-required anomaly, never a write. |
 | `protection` | `protection=1` | Blocks accidental destroy. |
-| `nesting` | `nesting=1` | Nested LXC/VM. |
-| `keyctl` | `keyctl=1` | Allow keyctl. |
-| `fuse` | `fuse=1` | Allow FUSE. |
+| `nesting` | `features=nesting=<0\|1>` | Nested LXC/VM. Rides the PVE 9.x `features` composite — a top-level `nesting=` is rejected (400). |
+| `keyctl` | (no accepted form) | Allow keyctl. **Adoptable but not convergable** on PVE 9.2 (403 at create + PUT; the `features` composite only carries `nesting`). A desired=on / live=off mismatch is a non-destructive anomaly. |
+| `fuse` | (no accepted form) | Allow FUSE. Same adopt-only caveat as `keyctl`. |
 | `onboot` | `onboot=1` | Auto-start on node boot. |
 | `startup` | `startup` | PVE startup ordering. |
+| `console` | `console=<0\|1>` | Console enable (create + PUT accepted). |
+| `ttys` | (not sent) | Accepted in the manifest but **inert**: ProxOps never writes it (PVE 9.2 rejects `ttys=` at create) and `adopt` does not capture it (it surfaces as a gap). |
 
 Reconcile semantics for `spec.template`:
 - **Create** — the referenced CTTemplate is downloaded on `spec.node` **first**
@@ -351,9 +358,10 @@ Reconcile semantics for `spec.template`:
 
 A **downloadable PVE container-template archive** (`.tar.zst` / `vztmpl`)
 living on a storage backend. It is a **storage artifact**: it has **no PVE
-numeric id**, is **not a VM**, is **not an LXC**, and is **not** "a clone of
-an existing CT marked as a template". That latter concept can later be modelled
-by a separate, more accurate kind if a real use case appears.
+numeric id**, is **not a VM**, is **not an LXC**, and is **not** "an
+existing CT marked as a template" — an LXC promoted to a PVE template
+(`pct template`) is not modelled (see GAPS.md; the qemu-side equivalent is
+`kind: TemplateVM`).
 
 | Field | Required | PVE wire | Semantics |
 |---|---|---|---|
@@ -361,14 +369,14 @@ by a separate, more accurate kind if a real use case appears.
 | `spec.storage` | yes | — | PVE storage id with `vztmpl` content (e.g. `local`). |
 | `spec.filename` | yes | `filename=` | On-storage name (e.g. `debian-13-standard_13.6.1-1_amd64.tar.zst`). |
 | `spec.url` | yes | `url=` | HTTPS URL PVE fetches. |
-| `spec.checksum` | no | (advisory) | `algorithm` + `value`; PVE 9.2's download API has no `verify` param, so this is carried for review/future use. |
+| `spec.checksum` | no | `checksum` + `checksum_algorithm` | `algorithm` (`sha256`\|`sha1`\|`sha512`\|`md5`) + `value`; sent on the `download-url` request when set (PVE 9.2's exact parameter acceptance is not live-verified — see GAPS.md). |
 
 Reconcile semantics:
 - **Absent on a node** → `POST /nodes/{n}/storage/{s}/download-url` with
   `content=vztmpl`. One download **per declared node**.
 - **Present** → zero actions.
 - **Multi-node** — each `spec.nodes` entry is planned independently.
-- **Never pruned in MVP** — removing the manifest does not delete the
+- **Never pruned** — removing the manifest does not delete the
   PVE-side file (a shared template can back many LXCs).
 - **Fail-closed** — an unreadable storage listing skips the download for that
   node this cycle; the next cycle retries.
@@ -383,7 +391,7 @@ downloaded before the LXC is created) and requires no `depends-on`.
 
 An installer ISO on a PVE storage backend. A **storage artifact** with **no**
 PVE numeric id; identity is `(node, storage, filename)` on PVE, `metadata.name`
-on pveconform.
+on proxops.
 
 | Field | Required | PVE wire | Semantics |
 |---|---|---|---|
@@ -391,7 +399,7 @@ on pveconform.
 | `spec.storage` | yes | — | PVE storage id with ISO content (e.g. `local`, `isos`). |
 | `spec.filename` | yes | `filename=` | On-storage name (e.g. `debian-13.1.0-amd64-netinst.iso`). |
 | `spec.url` | yes | `url=` | HTTPS URL PVE fetches. |
-| `spec.checksum` | no | (advisory) | `algorithm` + `value`. |
+| `spec.checksum` | no | `checksum` + `checksum_algorithm` | `algorithm` (`sha256`\|`sha1`\|`sha512`\|`md5`) + `value`; sent on the `download-url` request when set (see GAPS.md). |
 
 Reconcile semantics mirror CTTemplate (download per missing node, idempotent,
 never pruned, fail-closed on unreadable listing).
@@ -402,15 +410,15 @@ before the VM is created) and requires no `depends-on`.
 
 ---
 
-## `kind: DiskImage` (M11+)
+## `kind: DiskImage`
 
 A downloadable **disk image** on a PVE storage backend (PVE 9's `import`
 content pool: qcow2 / vmdk / raw). Like ISO and CTTemplate it is a **storage
 artifact** with **no** PVE numeric id; identity is `(node, storage, filename)`
-on PVE, `metadata.name` on pveconform.
+on PVE, `metadata.name` on proxops.
 
 This kind is what makes a `kind: VM` bootable from a cloud image **without a
-template**: a VM disk references it via `spec.disks[].image`, and pveconform
+template**: a VM disk references it via `spec.disks[].image`, and proxops
 seeds that disk at create with PVE's `import-from` form.
 
 | Field | Required | PVE wire | Semantics |
@@ -419,7 +427,7 @@ seeds that disk at create with PVE's `import-from` form.
 | `spec.storage` | yes | — | PVE storage id with `import` content (e.g. `local`). |
 | `spec.filename` | yes | `filename=` | On-storage name. PVE 9.2's import pool accepts `.qcow2` \| `.vmdk` \| `.raw` (probed on conformance-dev 2026-09-13; `.qcow`/`.img`/`.iso` are rejected at download). |
 | `spec.url` | yes | `url=` | HTTPS URL PVE fetches. |
-| `spec.checksum` | no | (advisory) | `algorithm` + `value`. |
+| `spec.checksum` | no | `checksum` + `checksum_algorithm` | `algorithm` (`sha256`\|`sha1`\|`sha512`\|`md5`) + `value`; sent on the `download-url` request when set (see GAPS.md). |
 
 Reconcile semantics mirror ISO/CTTemplate (download per missing node via
 `POST /storage/{s}/download-url` with `content=import`, idempotent, never
@@ -433,7 +441,7 @@ the VM's node before the VM is created) and requires no `depends-on`.
 **End-to-end validation (2026-09-13, conformance-dev PVE 9.2.2):** a
 DiskImage + a cloud-init VM (`ci-user`, `ssh-keys`, `nameservers`,
 `search-domains`, static `ipconfigs`, cloud-init drive on `ide2`, guest
-agent) was created and booted by `pveconform apply`; the guest's
+agent) was created and booted by `proxops apply`; the guest's
 `cloud-init status` reported `done` with `DataSourceNoCloud`, and hostname,
 static IP + gateway, DNS servers/search domain, the `ci-user` account, and
 the SSH key in `authorized_keys` all matched the manifest. A second apply
@@ -444,19 +452,23 @@ planned zero actions (idempotent), and out-of-band PVE-side edits to
 
 ## Ownership tag
 
-On create, pveconform adds the PVE tag `pveconform` to VM/LXC objects. This is
-the gate the agent uses before **deleting** anything: live PVE objects
-**without** this tag are never touched. **Storage artifacts (ISO, CTTemplate)
-carry no ownership tag and are never deleted** by pveconform in MVP.
+On create, ProxOps adds the PVE tag `proxops` to VM / LXC / TemplateVM
+objects. This is the gate the agent uses before **deleting** anything:
+live PVE objects **without** this tag are never touched. Objects tagged
+by the pre-rename build (`pveconform`) are treated as untagged — never
+deleted, and claimed with the `proxops` tag on the first managed update
+(see OPERATIONS.md → "Ownership-tag migration"). **Storage artifacts
+(ISO, CTTemplate, DiskImage) carry no ownership tag and are never
+deleted.**
 
 ## Escape hatch: `spec.extra`
 
 `VM` and `LXC` have an `extra` map of free PVE keys merged into the create and
 drift-update form values after the structured fields. Use it for properties the
 schema doesn't model first-class (`bootspeed`, `rtc`, `watchdog`, unusual
-device slots, …). Values are sent verbatim; pveconform performs no validation on
+device slots, …). Values are sent verbatim; ProxOps performs no validation on
 `extra`.
 
-`extra` is **not** used for the ownership tag — pveconform always controls
+`extra` is **not** used for the ownership tag — ProxOps always controls
 `tags` itself. Keys that clash with a structured field (e.g. `scsi0`, `net0`,
 `memory`, `onboot`) are rejected at parse time.

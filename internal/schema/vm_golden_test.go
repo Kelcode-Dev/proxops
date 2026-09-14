@@ -82,8 +82,8 @@ func TestTalosSampleToCreateParams(t *testing.T) {
 	}
 	// ownership tag must be present.
 	tags, _ := p["tags"].(string)
-	if !strings.Contains(tags, "pveconform") {
-		t.Errorf("tags missing pveconform: %q", tags)
+	if !strings.Contains(tags, "proxops") {
+		t.Errorf("tags missing proxops: %q", tags)
 	}
 	// scsi0: PVE 9.2 LVM/LVM-thin create-time wire form is
 	// "<pool>:<size-GiB>" with options inline. PVE reads the bare number in
@@ -96,7 +96,7 @@ func TestTalosSampleToCreateParams(t *testing.T) {
 	// nicString: with an unpinned (empty) MAC, PVE expects "virtio,bridge=..."
 	// — NOT "virtio=,bridge=..." (empty key after '=' trips PVE's
 	// "missing key in comma-separated list property" guard). PVE 9.2 omits
-	// `firewall=0` from NIC reports when it is not enabled, so pveconform
+	// `firewall=0` from NIC reports when it is not enabled, so proxops
 	// likewise leaves that token off the wire until the user sets
 	// spec.networks[].firewall (drift-safe: both sides see it as absent).
 	net0, _ := p["net0"].(string)
@@ -182,7 +182,7 @@ func TestTalosSampleCreateExactValues(t *testing.T) {
 		"scsihw": "virtio-scsi",
 		"scsi0":  "local-lvm:vm-142-disk-0,iothread=1,size=8G",
 		"net0":   "virtio=52:54:00:aa:bb:cc,bridge=vmbr2",
-		"tags":   []any{"pveconform"},
+		"tags":   []any{"proxops"},
 	}
 	if upd, stop, changed := v.Drift(current); changed {
 		t.Errorf("Drift against PVE's LVM disk report reported a change: upd=%v stop=%v — size/shape mismatch", upd, stop)
@@ -200,7 +200,7 @@ func TestDriftNoChange(t *testing.T) {
 		"cpu":    "host",
 		"cores":  4,
 		"memory": 8192, // PVE MiB count (8GiB)
-		"tags":   []any{"pveconform"},
+		"tags":   []any{"proxops"},
 		"name":   "talos-worker-01",
 		"scsi0":  "vm_disks:vm-142-disk-0,iothread=1,size=50G",
 		"scsihw": "virtio-scsi-single",
@@ -220,7 +220,7 @@ func TestDriftMemoryChange(t *testing.T) {
 		"cpu":    "host",
 		"cores":  "4",
 		"memory": "16384", // 16 GiB in PVE MiB
-		"tags":   "pveconform",
+		"tags":   "proxops",
 		"scsi0":  "vm_disks:0,size=50G",
 		"net0":   "virtio=,bridge=vmbr2,firewall=0",
 	}

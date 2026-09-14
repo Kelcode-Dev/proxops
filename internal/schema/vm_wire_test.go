@@ -82,7 +82,7 @@ func TestUserFailingManifestCreateWire(t *testing.T) {
 		t.Errorf("scsihw = %v, want %q", got, want)
 	}
 	// net0: unpinned-MAC virtio on vmbr0. PVE 9.2 omits firewall=0 when not
-	// enabled; pveconform emits it only when spec.networks[].firewall is set.
+	// enabled; proxops emits it only when spec.networks[].firewall is set.
 	if got, want := p["net0"], "virtio,bridge=vmbr0"; got != want {
 		t.Errorf("net0 = %v, want %q (no '=' on unpinned-MAC virtio; no firewall token when unset)", got, want)
 	}
@@ -114,7 +114,7 @@ func TestUserFailingManifestCreateWire(t *testing.T) {
 		// PVE's post-allocate report shape for our 8GiB + iothread disk:
 		"scsi0": "local-lvm:local-lvm-vm-9100-disk-0,iothread=1,size=8G",
 		"net0":  "virtio=52:54:00:aa:bb:cc,bridge=vmbr0,firewall=0",
-		"tags":  []any{"pveconform"},
+		"tags":  []any{"proxops"},
 	}
 	if update, stop, changed := v.Drift(live); changed {
 		t.Errorf("Drift on PVE's own create report is not a no-op: changed=%v stop=%v update=%v", changed, stop, update)
@@ -200,7 +200,7 @@ func TestVMUnpinnedMacNICDrift(t *testing.T) {
 		// PVE natively reports net0 as "virtio=<auto-mac>,bridge=..." even
 		// when we created it with an unpinned MAC.
 		"net0": "virtio=aa:bb:cc:dd:ee:ff,bridge=vmbr0,firewall=0",
-		"tags": []any{"pveconform"},
+		"tags": []any{"proxops"},
 	}
 	if _, stop, changed := v.Drift(live); changed {
 		t.Errorf("Drift treats a PVE-assigned MAC as owned: stop=%v — VM would churn on every cycle", stop)
@@ -222,7 +222,7 @@ func TestVMNICPinnedMacDrift(t *testing.T) {
 		"scsi0.iothread": "1",
 		// PVE put a different MAC than we pinned → drift on net0.
 		"net0": "virtio=aa:bb:cc:dd:ee:ff,bridge=vmbr0",
-		"tags": []any{"pveconform"},
+		"tags": []any{"proxops"},
 	}
 	upd, _, changed := v.Drift(live)
 	if !changed {

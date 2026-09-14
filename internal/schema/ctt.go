@@ -15,7 +15,7 @@ var cttNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._\-]*$`)
 // (vztmpl) storage artifact.
 //
 // PVE's CT template pool is a storage-content type (a `vztmpl` on a
-// dir-storage backend). pveconform's job for this kind is to ensure the
+// dir-storage backend). proxops's job for this kind is to ensure the
 // file is present at every (node, storage) the manifest declares —
 // downloading from spec.url via PVE's POST /storage/{s}/download.
 //
@@ -24,7 +24,7 @@ var cttNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._\-]*$`)
 // different kind (see M5 notes). The CTT model here is a storage artifact
 // and has no PVE numeric id.
 //
-// Identity on PVE: (node, storage, filename). Identity on pveconform:
+// Identity on PVE: (node, storage, filename). Identity on proxops:
 // metadata.name. Multi-node placement via spec.nodes:
 //
 //	CTTemplate/debian-13
@@ -86,7 +86,7 @@ func (c *CTTemplate) ID() int { return 0 }
 // DesiredState is always "" for artifacts.
 func (c *CTTemplate) DesiredState() string { return "" }
 
-// Deps implements Resource — CTTs have no pveconform-side references.
+// Deps implements Resource — CTTs have no proxops-side references.
 func (c *CTTemplate) Deps() []Ref { return nil }
 
 // DriftAnomalies always returns nil: a CTTemplate is a storage artifact, not

@@ -1,12 +1,12 @@
-# ISO manifest: pveconform ensures this installer image is present on the
+# ISO manifest: proxops ensures this installer image is present on the
 # PVE storage backend "local" on every declared node, downloading it from
 # the URL if it is not.
 #
-# - No PVE numeric id: identity is `metadata.name` on the pveconform side,
+# - No PVE numeric id: identity is `metadata.name` on the proxops side,
 #   and (node, storage, filename) on the PVE side.
 # - Multi-node placement via spec.nodes: the file must exist on each
 #   declared node/storage pair.
-# - Never deleted by pveconform in MVP: removing the manifest stops
+# - Never deleted by ProxOps (artifact rule): removing the manifest stops
 #   re-download but leaves the file on PVE storage.
 # - The PVE node must have outbound HTTPS to fetch from spec.url.
 apiVersion: proxops/v1alpha1

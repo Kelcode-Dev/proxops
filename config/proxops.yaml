@@ -1,14 +1,14 @@
-# pveconform — reference configuration (M8 multi-cluster model).
+# ProxOps — reference configuration (multi-cluster model).
 #
 # Precedence (lowest → highest): built-in defaults → this file → CLI flags →
 # environment (credentials ONLY, never read from this file or flags).
 # Every field is optional; defaults are shown as comments.
 #
-# Load with:  pveconform run --config config/pveconform.yaml
+# Load with:  proxops run --config config/proxops.yaml
 #
-# M8: pve.clusters is a map of NAMED PVE clusters. Each cluster has its own
-# base-url (endpoint) and node allowlist. pveconform's reconcile cycle is
-# cluster-scoped: one pveconform git composition
+# pve.clusters is a map of NAMED PVE clusters. Each cluster has its own
+# base-url (endpoint) and node allowlist. proxops's reconcile cycle is
+# cluster-scoped: one proxops git composition
 # (clusters/<name>/resources.yaml) → one named cluster → one PVE endpoint →
 # one node allowlist → that cluster's resources. There is no implicit
 # "current cluster".
@@ -19,11 +19,11 @@ log:
 pve:
   auth: token              # token (PVE API token, recommended) | ticket (user+password)
   user: root@pam           # PVE user id (token owner, or ticket user)
-  token-id: pveconform     # token name for auth=token (user@pam!token-id=<uuid>)
-  # token: ""              # token uuid — use env PVECONFORM_PVE_TOKEN
+  token-id: proxops     # token name for auth=token (user@pam!token-id=<uuid>)
+  # token: ""              # token uuid — use env PROXOPS_PVE_TOKEN
   # token-value: ""        # fully-composed "user@realm!tokenid=uuid" —
-                           # use env PVECONFORM_PVE_TOKEN_VALUE (overrides the pair)
-  # password: ""           # ticket auth only — use env PVECONFORM_PVE_PASSWORD
+                           # use env PROXOPS_PVE_TOKEN_VALUE (overrides the pair)
+  # password: ""           # ticket auth only — use env PROXOPS_PVE_PASSWORD
   # ca-file: ""            # PVE cluster CA (shared by every cluster); empty = system trust store
 
   # Named PVE clusters. At least one is required.
@@ -49,11 +49,11 @@ pve:
 
 git:
   # URL mode (default):
-  url: https://github.com/example/pveconform-manifests.git
+  url: https://github.com/example/proxops-manifests.git
   branch: main
-  # token: ""              # use env PVECONFORM_GIT_TOKEN
+  # token: ""              # use env PROXOPS_GIT_TOKEN
   # Local (air-gapped) mode — mutually exclusive with url:
-  # path: /var/lib/pveconform/manifests
+  # path: /var/lib/proxops/manifests
 
 reconcile:
   poll-interval: 30s       # watch-mode cycle cadence
@@ -62,4 +62,4 @@ reconcile:
 
 listen: 127.0.0.1:9494     # /healthz /metrics /status bind address
                            # use 0.0.0.0:9494 for a monitoring scrape
-data-dir: ~/.local/share/pveconform   # git cache + scratch (not user data)
+data-dir: ~/.local/share/proxops   # git cache + scratch (not user data)

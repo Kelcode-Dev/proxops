@@ -7,7 +7,7 @@ import (
 )
 
 // TestLXCDriftOnLiveShape: reproduce the real PVE 9.2 LXC 9200 live report +
-// pveconform manifest, and assert that Drift returns "no change". This
+// proxops manifest, and assert that Drift returns "no change". This
 // pins the PVE 9.2 LXC wire quirk (PVE adds net0.name/type/hwaddr, reports
 // rootfs with PVE-assigned volume id, and normalizes nameserver to space
 // form).
@@ -24,7 +24,7 @@ func TestLXCDriftOnLiveShape(t *testing.T) {
 		"  dns:\n    hostname: test-lxc-01\n    nameservers: [127.0.0.1, 1.1.1.1]\n    domain: example.invalid\n" +
 		"  arch: amd64\n" +
 		"  options:\n    unprivileged: true\n    onboot: true\n" +
-		"  pve-description: pveconform M6 LXC with inferred template reference\n"
+		"  pve-description: proxops M6 LXC with inferred template reference\n"
 
 	lxc := schema.NewLXC()
 	if err := schema.YAMLTo(lxcRaw, lxc); err != nil {
@@ -39,7 +39,7 @@ func TestLXCDriftOnLiveShape(t *testing.T) {
 	live := map[string]any{
 		"arch":         "amd64",
 		"cores":        int64(1),
-		"description":  "pveconform M6 LXC with inferred template reference\n",
+		"description":  "proxops M6 LXC with inferred template reference\n",
 		"hostname":     "test-lxc-01",
 		"memory":       int64(1024),
 		"nameserver":   "127.0.0.1 1.1.1.1",
@@ -49,7 +49,7 @@ func TestLXCDriftOnLiveShape(t *testing.T) {
 		"rootfs":       "local-lvm:vm-9200-disk-0,size=4G",
 		"searchdomain": "example.invalid",
 		"swap":         int64(512),
-		"tags":         []any{"pveconform"},
+		"tags":         []any{"proxops"},
 		"unprivileged": "1",
 	}
 
