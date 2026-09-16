@@ -25,6 +25,11 @@ spec:
       interface: scsi0          # PVE slot
       controller: virtio-scsi-single
       iothread: true
+      # M13 drive options (PVE inline tokens on the drive string):
+      # discard: on             # TRIM passthrough ("ignore" | "on")
+      # ssd: true               # advertise SSD — scsi/sata/ide ONLY (PVE
+      #                         # rejects ssd= on virtio/nvme buses)
+      # aio: io_uring           # "native" | "threads" | "io_uring"
   networks:
     - model: virtio
       bridge: vmbr2

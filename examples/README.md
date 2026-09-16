@@ -60,6 +60,12 @@ templatevm/
   example/
     almalinux-tpl.yaml    # cluster-specific TemplateVM: a qemu VM promoted to
                           # a PVE template (template=1); state must be stopped
+templatect/
+  example/
+    debian-tpl.yaml       # cluster-specific TemplateCT: an LXC container
+                          # promoted to a PVE template (template=1); the LXC
+                          # analogue of TemplateVM, DISTINCT from the ctt/
+                          # vztmpl artifact kind; state must be stopped
 ```
 
 - **base resources** under `<kind>/base/` are reusable: any cluster may list
@@ -77,9 +83,11 @@ templatevm/
   The parser merges both edge sets before the planner schedules creates.
 
 PVE id-space note: the kinds that DO carry a numeric PVE id (VM, LXC,
-TemplateVM) share ONE per-node integer pool. These examples pin
+TemplateVM, TemplateCT) share ONE per-node integer pool. These examples pin
 well-separated ids to keep that obvious to readers: 142 (VM), 400
-(annotation-example VM), 410 (cloud-init VM), 900 (TemplateVM), 9000 (LXC).
+(annotation-example VM), 410 (cloud-init VM), 900 (TemplateVM), 910
+(TemplateCT), 9000 (LXC). A TemplateCT shares the LXC id space (PVE lists
+both as type="lxc"), exactly as a TemplateVM shares the qm id space.
 The artifact kinds (`ISO`, `CTTemplate`, `DiskImage`) have **no** numeric
 PVE id — their only identity is `(node, storage, filename)` on the PVE side
 and `metadata.name` on the ProxOps side.

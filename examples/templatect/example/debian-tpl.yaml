@@ -1,0 +1,42 @@
+# ProxOps TemplateCT (a PVE LXC container promoted to a PVE template,
+# template=1).
+#
+# This is the LXC analogue of kind: TemplateVM, and it is DISTINCT from
+# kind: CTTemplate:
+#   - CTTemplate  = a downloadable .tar.zst vztmpl STORAGE ARTIFACT
+#                   (no numeric PVE id; lives under ctt/).
+#   - TemplateCT  = a live container object with a numeric CTID that was
+#                   customized and then promoted with `pct template`
+#                   (POST /lxc/{id}/template); lives under templatect/.
+#
+# Lifecycle proxops owns: CREATE (POST /lxc + POST /lxc/{id}/template),
+# UPDATE (PUT /lxc/{id}/config), MARK (MarkTemplate action), PRUNE
+# (DELETE /lxc/{id}).
+#
+# PVE 9.2 has NO /lxc/{id}/untemplate endpoint (probe-verified 501), so
+# promotion is one-way: proxops never demotes a template. A kind: LXC
+# manifest pointing at a live template CT is surfaced as an anomaly.
+#
+# spec.state must be "stopped" (or absent). spec.template names the
+# CTTemplate (vztmpl artifact) the container is bootstrapped from before
+# promotion.
+apiVersion: proxops/v1alpha1
+kind: TemplateCT
+metadata:
+  name: debian-tpl
+spec:
+  node: pve01
+  vmid: 910
+  state: stopped
+  memory: 1GiB
+  cpu:
+    cores: 1
+  template: golden-base    # CTTemplate manifest in this tree
+  root:
+    storage: local
+    size: 4GiB
+  networks:
+    - bridge: vmbr0
+  options:
+    unprivileged: true
+    nesting: true

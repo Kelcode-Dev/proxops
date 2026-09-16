@@ -33,24 +33,6 @@ name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
 
 ## Open gaps
 
-### VM: live-only disk properties beyond pool/size/iothread
-
-- **Resource/area**: VM disks (`scsi*`, `virtio*`, `sata*`)
-- **PVE field**: drive property options other than `iothread` — e.g.
-  `discard=on`, `ssd=1`, `mbcache=force`, `aio`
-- **Status**: discovered
-- **Priority**: low
-- **What is unsupported**: ProxOps's owned disk surface is pool + size +
-  iothread + slot + controller. PVE reports additional drive options;
-  adopted manifests do not carry them, and `Drift` ignores them.
-- **Impact/risk**: none today (the option is not written back, so it
-  neither flaps nor mutates). An adopted VM is incomplete; an in-place PVE
-  change of `discard=` would not be visible to ProxOps.
-- **Discovery source**: live conformance-dev `/qemu/{id}/config` reports
-  during adoption; `schema.parseDiskInfo`.
-- **Notes**: a structured `Disk.Options` (map of passthrough tokens) would
-  close this. Until then such options are treated as PVE-owned.
-
 ### VM: cpu.flags is declarative-only
 
 - **Resource/area**: VM CPU (`spec.cpu.flags`)
@@ -83,21 +65,30 @@ name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
 - **Notes**: the operator's review step is part of the adoption contract
   (docs/OPERATIONS.md → "Adopting existing PVE objects").
 
-### LXC: container mount points with pre-existing paths
+### LXC: bind-mount writes require root@pam (fail closed under API tokens)
 
-- **Resource/area**: LXC mount points (`mp*`)
-- **PVE field**: `mpN=<path>:/<path>` (bind mounts) vs
-  `mpN=<pool>:<size>` (allocated volumes)
-- **Status**: discovered
-- **Priority**: low
-- **What is unsupported**: ProxOps models only *allocated* LVM/dir volumes
-  (`mpN=<pool>:<size>,mp=<mountpoint>`). PVE bind-mounts of a host path
-  (`mp0=/mnt/share:/srv/data`) are a different shape not owned by ProxOps.
-- **Impact/risk**: a bind mount on a live LXC is not adoptable and not
-  reconciled; it will not flap or be removed (ProxOps never owns it).
-- **Discovery source**: PVE pct.conf(5) mpN grammar.
-- **Notes**: a future `LXCBinding` shape (path + read-only + optional
-  bind-options) would close this.
+- **Resource/area**: LXC bind mounts (`spec.bind-mounts`, `mpN` host-path form)
+- **PVE field**: `mpN=<host-path>,mp=<guest-path>[,ro=<0|1>]`
+- **Status**: investigated
+- **Priority**: medium
+- **What is unsupported**: M13 made bind mounts a first-class declarative +
+  adopted + drift-detected shape, but PVE 9.2 restricts bind-mount **writes**
+  to `root@pam`: an API-token request is rejected with HTTP 403
+  `mount point type bind is only allowed for root@pam` at BOTH create and
+  `/config` PUT (probe-verified on conformance-dev). ProxOps therefore
+  submits the declaration faithfully and lets PVE enforce the permission —
+  with a token identity the write action **fails closed** (a failed action on
+  `/status`, never a silent skip or false convergence). Read/adoption works
+  with any token that can read the CT config.
+- **Impact/risk**: a cluster whose credential is an API token cannot
+  converge bind mounts; the operator must use a `root@pam` ticket credential
+  (`pve.auth: ticket`) for those clusters, or manage binds on PVE by hand.
+  ProxOps never re-points a live bind's host path automatically (host-data
+  safety) — that divergence is a non-destructive anomaly regardless of auth.
+- **Discovery source**: live conformance-dev probes (disposable CTs 9320/9321,
+  destroyed); PVE pct.conf(5) mpN grammar.
+- **Notes**: allocated `mpN` volumes (the other bind-vs-volume shape) ARE
+  fully convergable with a token — only the host-path bind form is gated.
 
 ### LXC: `keyctl` / `fuse` are adoptable but NOT convergable on PVE 9.x
 
@@ -163,21 +154,6 @@ name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
 - **Notes**: `cpulimit`/`cpuunits` are PVE CPU-weight knobs (defaults 0 /
   1024); ProxOps does not adopt PVE defaults, so they surface on
   non-default live values.
-
-### LXC: an existing CT marked as a PVE template is not modelled
-
-- **Resource/area**: LXC / CTTemplate
-- **PVE field**: `template=1` on a `/lxc/{id}/config` report
-- **Status**: discovered
-- **Priority**: low
-- **What is unsupported**: ProxOps has no "LXC template" resource kind.
-  `kind: TemplateVM` covers the qemu side (`POST /qemu/{id}/template`) only.
-  A container promoted with `pct template` is not adopted as a distinct
-  kind and is not reconciled as a template.
-- **Impact/risk**: adoption of such an object is not exercised by the
-  project's own clusters; behaviour is unverified rather than known-wrong.
-- **Discovery source**: schema review — `adoptLXC` has no `template` branch
-  (contrast `adoptVM`, which routes `template=1` to `kind: TemplateVM`).
 
 ### Artifacts: download URLs are not part of PVE's state
 
@@ -329,9 +305,6 @@ considered:
   Status: `deliberate`.
 - **HA resources, pools, users, roles, SDN**: out of the GitOps model.
   Status: `deliberate`.
-- **Secure Boot policy** (`/qemu/{id}/security`): `spec.hardware.efi-disk.secure-boot`
-  is recorded + validated but NOT sent — PVE manages Secure Boot through a
-  separate endpoint. Status: `deliberate`.
 - **`bootspeed` / `netboot`**: rejected on PVE 9.2 `/config`; not modelled.
   Status: `deliberate`.
 
@@ -484,3 +457,44 @@ test.
   TEMPLATE (a clone inherits `scsihw` and declares no `spec.disks`), so set
   `spec.disks[].controller: virtio-scsi-single` on the TemplateVM. Pinned:
   `TestE2ECloneProvisionLifecycle` (template carries the controller).
+
+### M13 wire findings (Secure Boot, drive options, LXC mounts, TemplateCT)
+
+- **Secure Boot is `pre-enrolled-keys`, NOT a `/security` endpoint** —
+  PVE 9.2.2 has **no** `/nodes/{n}/qemu/{id}/security` endpoint (HTTP 501 on
+  GET/PUT/POST) and rejects a `secure-boot=` token (400, both inline on
+  `efidisk0` and top-level). The real wire form is the `pre-enrolled-keys=
+  <0|1>` token on `efidisk0`: `enabled` → `=1`, `disabled` → `=0`. The
+  toggle converges in place via the live drive form on stopped AND running
+  VMs (key enrollment takes effect at the guest's next boot); an empty slot
+  takes the create form. PVE auto-adds an `ms-cert=<2011|2023|2023k|2023w>`
+  token to the report when keys are enrolled at create — ProxOps treats
+  `ms-cert` as PVE-owned (preserved verbatim on live-form rewrites, never
+  compared; a live-form write WITHOUT it drops it from the report). Pinned:
+  `TestM13_SecureBoot_CreateWire`, `TestM13_SecureBoot_Drift`,
+  `TestM13_SecureBoot_Adopt`.
+- **drive options are bus-specific** — `discard=<ignore|on>` and
+  `aio=<native|threads|io_uring>` are accepted inline on every bus;
+  `ssd=<0|1>` is accepted on **scsi/sata/ide only** — PVE 9.2 rejects
+  `ssd=` on virtio/nvme (400 "property is not defined in schema"), so
+  ProxOps fails closed at `Validate`. `mbcache` is **not** in PVE 9's schema
+  (400) and is not modelled. All three converge in place via the live drive
+  form (volume id preserved). Pinned: `TestM13_DiskOptions_CreateWire`,
+  `TestM13_DiskOptions_SSD_BusValidation`, `TestM13_DiskOptions_Drift`.
+- **allocated `mpN` volumes share the rootfs disk counter** — PVE allocates
+  `mp0` as `vm-<ctid>-disk-<n>` (the same counter as rootfs `disk-0`), and
+  the live form (`mpN=<volid>,size=…,mp=…,ro=…`) toggles the guest path and
+  option tokens in place. A create-form write over a LIVE mp volume
+  RE-CREATES it (new volid) — the same data-loss guard as VM disks. Pinned:
+  `TestM13_LXCMount_Drift`, `TestM13_LXCMount_OptionsAdopt`.
+- **bind-mount writes are root@pam-only** — see the open gap above; the
+  403 is PVE-enforced, ProxOps fails closed. Pinned:
+  `TestM13_BindMount_CreateWire`, `TestM13_BindMount_Drift`.
+- **`POST /lxc/{id}/template` is synchronous (NULL data)** — unlike the qemu
+  mark (which returns a task UPID), the LXC mark returns `{"data":null}` with
+  no UPID (probe-verified PVE 9.2.2). The executor treats the empty UPID as
+  immediate success. Promotion renames the rootfs volume
+  `vm-<ctid>-disk-0` → `base-<ctid>-disk-0`. `/lxc/{id}/untemplate` is 501
+  (no demotion), same as the qemu side. Pinned:
+  `TestE2ETemplateCTCreateMarksAndIsIdempotent`,
+  `TestE2E_LXCDesiredButPVEIsTemplateCTSurfacesAnomaly`.

@@ -160,6 +160,7 @@ VM.spec.disks[].image               →  DiskImage.metadata.name
 VM.spec.clone                       →  TemplateVM.metadata.name
 LXC.spec.template                   →  CTTemplate.metadata.name
 TemplateVM.spec.hardware.cdrom.iso  →  ISO.metadata.name
+TemplateCT.spec.template            →  CTTemplate.metadata.name
 ```
 
 Behaviour:
@@ -281,11 +282,12 @@ mismatch fails closed at config validation.
   re-downloading; PVE keeps the file.
 - **No PVE user/role management.** The PVE token used by ProxOps is
   assumed to already exist with the right roles (see README).
-- **No PVE-kind demotion of a template back to a plain VM.** PVE 9.2 has
-  no `/qemu/{id}/untemplate` endpoint (probe: HTTP 501 "not implemented").
-  ProxOps therefore surfaces a `kind: VM` desired against a live PVE-side
-  `template=1` as a non-destructive anomaly; the demotion is an operator's
-  manual step on the PVE host.
+- **No PVE-kind demotion of a template back to a plain VM/CT.** PVE 9.2 has
+  no `/qemu/{id}/untemplate` and no `/lxc/{id}/untemplate` endpoint (probe:
+  HTTP 501 "not implemented" on both). ProxOps therefore surfaces a
+  `kind: VM` (or `kind: LXC`) desired against a live PVE-side `template=1`
+  as a non-destructive anomaly; the demotion is an operator's manual step on
+  the PVE host.
 - **No re-cloning of an existing VM.** A `spec.clone` VM is cloned from its
   TemplateVM **only when the VM is absent from PVE**. Once the clone exists,
   every change is a config write (never a fresh clone over live data — PVE
@@ -324,19 +326,22 @@ What it does:
   allowlist, PVE's `/cluster/nodes` listing); only allowlisted nodes are
   ever read — this is the cluster-isolation guarantee;
 - writes one manifest per live object under `<kind>/<cluster>/` in the git
-  work tree (VM, LXC, ISO, CTTemplate, TemplateVM); `import`
+  work tree (VM, LXC, ISO, CTTemplate, TemplateVM, TemplateCT); `import`
   content (DiskImage) is not adopted — see GAPS.md;
 - surfaces **unsupported PVE configuration explicitly** (a `gap` line per
   live key ProxOps does not model; `INCOMPLETE` for generated manifests
   missing a value PVE cannot re-report, e.g. the LXC `ostemplate`). PVE
-  *template* VMs (`template=1`) are adopted as `kind: TemplateVM`
-  manifests under `templatevm/<cluster>/` with the full lifecycle owned
-  (create + mark, config drift, prune). PVE-side `sshkeys` in the
-  template's cloud-init are redacted to the `["*"]` sentinel so the operator
-  fills in the real key(s) before apply; `cipassword` / `cicustom` stay as
-  gap lines. A ProxOps `kind: VM` desired against a live PVE-side template
-  at the same `(node, vmid)` is surfaced as a non-destructive anomaly (no
-  kind-flip write).
+  *template* VMs (`template=1` on a `type=qm` object) are adopted as
+  `kind: TemplateVM` manifests under `templatevm/<cluster>/`, and PVE
+  *template* containers (`template=1` on a `type=lxc` object, M13) as
+  `kind: TemplateCT` manifests under `templatect/<cluster>/`, both with the
+  full lifecycle owned (create + mark, config drift, prune). PVE-side
+  `sshkeys` in the template's cloud-init are redacted to the `["*"]`
+  sentinel so the operator fills in the real key(s) before apply;
+  `cipassword` / `cicustom` stay as gap lines. A ProxOps `kind: VM` (or
+  `kind: LXC`) desired against a live PVE-side template at the same
+  `(node, vmid)` is surfaced as a non-destructive anomaly (no kind-flip
+  write).
 - **redacts sensitive PVE fields** in the gap report: `sshkeys` and
   `cipassword` values are emitted as `<redacted>` (the field name still
   reports, so the operator knows ProxOps does not model it);
@@ -383,7 +388,8 @@ PVE -> adopt -> YAML -> (human review) -> clusters/<cluster>/resources.yaml
 
 Every remaining drift line must map to a documented expectation:
 
-- `update ... config drift` on every adopted VM / LXC / TemplateVM: the ownership-tag claim
+- `update ... config drift` on every adopted VM / LXC / TemplateVM /
+  TemplateCT: the ownership-tag claim
   (PVE objects carry no `proxops` tag; ProxOps adds one when it
   manages an object). This is expected and is the first write the operator
   consciously approves — it is not applied by `diff`.
@@ -393,7 +399,8 @@ Every remaining drift line must map to a documented expectation:
   cdrom slots; adopt documents them as a gap and leaves them PVE-managed.
 - `skipped (no proxops tag)` for LXC resources whose `spec.template`
   could not be recovered (INCOMPLETE). PVE-side `template=1` objects are
-  adopted as `kind: TemplateVM` under `templatevm/<cluster>/`.
+  adopted as `kind: TemplateVM` under `templatevm/<cluster>/` (qemu) or
+  `kind: TemplateCT` under `templatect/<cluster>/` (container).
 
 Live-only data disks are preserved: adopt interrogates the PVE /config
 report, so a live second data disk is represented in the adopted manifest

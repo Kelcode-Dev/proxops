@@ -9,8 +9,9 @@
 #     ctt/base/; any other cluster could list the very same files in its own
 #     clusters/<other>/resources.yaml — base resources are shared by
 #     reference, not owned),
-#   - cluster-specific VMs + an LXC (live under vm/example/ and
-#     lxc/example/; only this cluster lists them).
+#   - cluster-specific VMs + an LXC + a TemplateVM + a TemplateCT (live
+#     under vm/example/, lxc/example/, templatevm/example/ and
+#     templatect/example/; only this cluster lists them).
 #
 # To run the example tree against a PVE cluster:
 #  1. mirror the structure under <kind>/example/ + <kind>/base/ in your own
@@ -34,3 +35,4 @@ resources:
   - ../../vm/example/talos-worker-01.yaml
   - ../../vm/example/clone-vm.yaml
   - ../../templatevm/example/almalinux-tpl.yaml
+  - ../../templatect/example/debian-tpl.yaml

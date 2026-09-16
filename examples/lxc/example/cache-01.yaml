@@ -30,6 +30,20 @@ spec:
     - storage: local-lvm
       size: 4GiB
       mount-point: /mnt/data
+      # M13 per-mount options (PVE inline mpN tokens; omitted = PVE default):
+      # options:
+      #   read-only: true      # ro=1
+      #   backup: false        # backup=0 (exclude from vzdump)
+      #   mount-options: noatime
+  # M13 bind-mounts: host-path directories bind-mounted into the guest
+  # (mpN=<host-path>,mp=<guest-path>). PVE restricts bind-mount WRITES to
+  # root@pam — with an API-token identity proxops submits the declaration
+  # and fails closed on PVE's 403 (never false convergence). proxops never
+  # re-points or deletes a live bind automatically (host-data safety).
+  # bind-mounts:
+  #   - host-path: /mnt/bindmounts/shared
+  #     mount-point: /shared
+  #     read-only: true
   networks:
     - bridge: vmbr0
       # iface: wired0     # PVE's netX.name (defaults to net<N>)

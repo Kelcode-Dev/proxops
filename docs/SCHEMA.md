@@ -10,7 +10,8 @@ The manifest tree is organised around the **GitOps composition model**
 ```
 clusters/<cluster>/resources.yaml   # what <cluster> consumes (explicit list)
 <kind>/{base|<cluster>}/....yaml    # resource definitions, kind in vm, lxc,
-                                     #   iso, ctt, templatevm, diskimage
+                                     #   iso, ctt, templatevm, diskimage,
+                                     #   templatect
 ```
 
 The cluster's ProxOps **configuration** and **credentials** are committed
@@ -31,8 +32,8 @@ clusters/<cluster>/
 ```
 
 Resource manifests (under `vm/`, `lxc/`, `iso/`, `ctt/`, `templatevm/`,
-`diskimage/`) do NOT carry credentials — a secret is never a spec field on
-a resource.
+`diskimage/`, `templatect/`) do NOT carry credentials — a secret is never a
+spec field on a resource.
 
 A manifest file is only reconciled if some cluster's
 `clusters/<cluster>/resources.yaml` lists it; the cluster boundary is the
@@ -44,7 +45,7 @@ Every manifest has this envelope:
 
 ```yaml
 apiVersion: proxops/v1alpha1   # only supported value
-kind: VM | LXC | CTTemplate | ISO | TemplateVM | DiskImage
+kind: VM | LXC | CTTemplate | ISO | TemplateVM | DiskImage | TemplateCT
 metadata:
   name: human-readable-name      # required, [a-z0-9](-[a-z0-9])*
   labels:                        # optional, free-form
@@ -60,10 +61,12 @@ ids** for objects that have one. The kinds that have **no** PVE numeric id
 (ISO, CTTemplate, and DiskImage — all *storage artifacts*) are identified on
 PVE by `(node, storage, filename)` and on ProxOps by `metadata.name`.
 
-The three kinds that carry a PVE numeric id (VM, LXC, and TemplateVM) share
-PVE's per-node integer pool: a `spec.vmid` collision inside one cluster's
-composition is a parse error. A TemplateVM and a VM can never claim the same
-`(node, vmid)`.
+The four kinds that carry a PVE numeric id (VM, LXC, TemplateVM and
+TemplateCT) share PVE's per-node integer pool: a `spec.vmid` collision
+inside one cluster's composition is a parse error. A TemplateVM and a VM can
+never claim the same `(node, vmid)` (PVE lists both as `type="qm"`); a
+TemplateCT and an LXC can never claim the same `(node, vmid)` (PVE lists both
+as `type="lxc"`).
 
 ---
 
@@ -151,6 +154,13 @@ Behaviour:
 | `interface` | no (default `scsi0`) | — | Explicit PVE slot (`scsi0`, `scsi1`, `sata2`, `virtio0`, …). |
 | `controller` | no | VM-wide `scsihw` | PVE `scsihw` value; first disk declaring it wins. |
 | `iothread` | no | `,iothread=1` inline | Dedicated I/O thread. |
+| `discard` | no | `,discard=<ignore\|on>` inline | TRIM/discard passthrough (PVE 9.2: accepted on every bus). Omitted = not owned. |
+| `ssd` | no | `,ssd=<0\|1>` inline | Advertise an SSD to the guest. **scsi/sata/ide only** — PVE 9.2 rejects `ssd=` on virtio/nvme (`property is not defined in schema`), so `Validate` fails closed. Tri-state: omitted = not owned; `false` = pinned `ssd=0` (PVE retains an explicit 0 in the report). |
+| `aio` | no | `,aio=<native\|threads\|io_uring>` inline | Async I/O engine (PVE 9.2: accepted on every bus). Omitted = not owned. |
+
+> `mbcache` is **not modelled**: PVE 9.2's drive schema rejects it (probe-
+> verified 400 `property is not defined in schema`). It was removed from the
+> PVE 9 docs; see GAPS.md.
 
 Image-seeded disks are imported **once** (at create, or when the slot is
 empty). PVE does not re-report the `import-from` option after create (the
@@ -183,7 +193,7 @@ non-destructive anomaly (the data-loss guard), never a re-import.
 | `cdrom.iso` = `none` (detach) | no | `ide2`/`ide3` = `none` | **Detach sentinel.** ProxOps owns the slot and writes `none`. Use to model "no CD ever", or remove a previously-attached ISO (change `cdrom.iso: <name>` → `cdrom.iso: none`, reconcile to detach). |
 | (block absent) | no | — | ProxOps does **not** own the PVE IDE slot; PVE keeps its default. No dependency inferred. |
 | `cdrom.media` | no | `,media=` | `cdrom` (default) \| `disk`. |
-| `efi-disk` | no | `efidisk0` | Valid with `bios: ovmf`. Owns pool + size; PVE volume name not owned. PVE clamps small EFI sizes to 4 MiB. `template` pins the OVMF vars type (`efitype=`: `byos` \| `2m` \| `4m` \| `8m`). `secure-boot` (`required` \| `optional` \| `disabled`) is recorded + validated but NOT sent: PVE 9.2 manages Secure Boot policy through its separate `/qemu/{id}/security` endpoint. |
+| `efi-disk` | no | `efidisk0` | Valid with `bios: ovmf`. Owns pool + size; PVE volume name not owned. PVE clamps small EFI sizes to 4 MiB. `template` pins the OVMF vars type (`efitype=`: `byos` \| `2m` \| `4m` \| `8m`). `secure-boot` (`enabled` \| `disabled`; omitted = not owned) maps to PVE's `pre-enrolled-keys=<0\|1>` token on `efidisk0` — fully convergent (create + live-form toggle, stopped or running; enrollment takes effect at the guest's next boot). PVE 9.2 has **no** `/qemu/{id}/security` endpoint (probe-verified 501) and rejects a `secure-boot=` token (400); the earlier GAPS premise was wrong. PVE auto-adds an `ms-cert=` token when keys are enrolled: ProxOps treats it as PVE-owned (preserved verbatim on rewrites, never compared). |
 | `cloud-init` | no | `ide2` = `<storage>:cloudinit,size=…` | When enabled, ProxOps claims `ide2` for cloud-init and shifts the CD/DVD slot to `ide3` (demonstrated coexistence on PVE 9.2). The storage MUST carry `images` content or the VM fails at start (see GAPS.md). |
 | `tpm` | no | `tpm0` | `version`: `v1.2` \| `v2.0` (default v2.0). With `bios: ovmf` + `machine: q35`. |
 | `serial0` | no | `serial0` | e.g. `socket`. |
@@ -398,7 +408,8 @@ later than a plain create.
 | `spec.cpu.cores` | yes | `cores` | PVE `cores` int. |
 | `spec.root.storage` | yes | `rootfs` | PVE storage id with `rootdir` content. |
 | `spec.root.size` | yes | size in `rootfs` | `<storage>:<GiB>` PVE create form. |
-| `spec.mount-points` | no | `mp0`,`mp1`,… | Additional LXC volumes; see Mount Point. |
+| `spec.mount-points` | no | `mp0`,`mp1`,… | Additional LXC **allocated** volumes; see Mount Point. |
+| `spec.bind-mounts` | no | `mpN` (host-path form) | Host-path bind mounts (M13); see Bind Mount. Shares the `mpN` slot namespace with `mount-points` (a slot collision is a parse error). |
 | `spec.networks` | ≥1 | `net0`,`net1`,… | See LXC NIC. |
 | `spec.dns` | no | `hostname`/`nameserver`/`searchdomain` | See DNS. |
 | `spec.arch` | no | `arch` | `amd64` (default) \| `arm64`. |
@@ -427,11 +438,55 @@ and **`name=` is required** (PVE 9.2 rejects a bare model string).
 
 ### Mount Point
 
+An **allocated** LXC volume on an `mpN` slot (PVE's `mpN=<storage>:<GiB>,mp=<path>`
+form). PVE 9.2 rewrites the report to `mpN=<storage>:vm-<ctid>-disk-<n>,mp=<path>,size=<binary>`.
+
 | Field | Required | PVE wire | Semantics |
 |---|---|---|---|
 | `storage` | yes | `mp<N>=<storage>:<GiB>` | PVE storage id. |
 | `size` | yes | size | `<GiB>` PVE create form. |
 | `mount-point` | no | `,mp=PATH` | In-guest path. |
+| `options.read-only` | no | `,ro=<0\|1>` | Mount read-only (PVE default 0). Tri-state: omitted = not owned. |
+| `options.backup` | no | `,backup=<0\|1>` | Include in vzdump (PVE default 1). |
+| `options.acl` | no | `,acl=<0\|1>` | ACL support (PVE default 0). |
+| `options.quota` | no | `,quota=<0\|1>` | User quotas (PVE default 0). |
+| `options.shared` | no | `,shared=<0\|1>` | Cluster-shared volume (PVE default 0). |
+| `options.mount-options` | no | `,mountoptions=OPTS` | Free-form `mount(8)` options (e.g. `noatime`). |
+
+All option tokens converge **in place** on a live volume via the live drive
+form (probe-verified PVE 9.2.2: PUT `mpN=<volid>,size=…,mp=…,ro=…` toggles
+without recreating the volume). The guest path (`mp=`) also converges
+in place. A pool/size change on a live volume stays a non-destructive
+anomaly (the data-loss guard).
+
+### Bind Mount
+
+A host-path bind mount on an `mpN` slot (PVE's `mpN=<host-path>,mp=<guest>`
+form). Bind mounts and allocated volumes are **distinct shapes** on the same
+slot namespace: adoption classifies each live `mpN` by its first token
+(`<storage>:` prefix = allocated; leading `/` = bind).
+
+| Field | Required | PVE wire | Semantics |
+|---|---|---|---|
+| `host-path` | yes | `mp<N>=<host-path>` | Absolute directory on the PVE node. PVE requires it to exist and contain no symlinks. ProxOps **refuses system-critical roots** (`/etc`, `/var`, `/usr`, `/boot`, `/dev`, `/root`, `/run`, `/srv`, `/sys`, `/bin`, `/sbin`, `/lib*`, `/proc`, `/`) at validation — pct.conf warns binding system dirs can damage the host. |
+| `mount-point` | yes | `,mp=<guest-path>` | Absolute in-guest path. |
+| `slot` | no | `mpN` | Slot override (defaults continue after `mount-points`). |
+| `read-only` | no | `,ro=<0\|1>` | Tri-state; omitted = not owned. |
+
+> **Permission boundary (probe-verified PVE 9.2.2):** PVE restricts bind-mount
+> writes to `root@pam` — an API-token request is rejected with HTTP 403
+> `mount point type bind is only allowed for root@pam` at BOTH create and
+> `/config` PUT. ProxOps models bind mounts faithfully (declarative +
+> adopted + drift-detected) and lets PVE enforce the permission: with a
+> token identity the write action **fails closed** with PVE's 403 (never a
+> silent skip or false convergence). Use a ticket-auth cluster credential
+> (`pve.auth: ticket`, user `root@pam`) when bind-mount convergence is
+> required.
+>
+> **Safety:** ProxOps never re-points a live bind mount's host path
+> automatically (exposing a different host directory to a running container
+> can damage host data) — that divergence is a non-destructive anomaly. A
+> bind↔allocated swap on one slot is likewise an anomaly, never automatic.
 
 ### DNS
 
@@ -470,14 +525,49 @@ Reconcile semantics for `spec.template`:
 
 ---
 
+## `kind: TemplateCT`
+
+A PVE LXC container promoted to a PVE template (PVE `template=1` on the
+`/lxc/{id}/config` report). It is the LXC analogue of `kind: TemplateVM`
+(M11) and is **distinct from `kind: CTTemplate`**: a CTTemplate is a
+downloadable vztmpl *storage artifact* (no numeric id), while a TemplateCT
+is a live container object with a numeric CTID that was customized and then
+promoted with `pct template` (`POST /lxc/{id}/template`).
+
+The ProxOps schema surface is **identical to `kind: LXC`** (a `TemplateCT`
+manifest re-uses every `spec` field an LXC manifest supports, plus
+`spec.state` constrained to "stopped").
+
+Differences from `kind: LXC`:
+
+| Concern | ProxOps behaviour |
+|---|---|
+| `spec.state` | MUST be `stopped` (or absent → "stopped"). ProxOps never starts a template CT (`state: started` fails `Validate()` at parse time). |
+| PVE id space | PVE's per-node lxc id space is shared with `kind: LXC` — a TemplateCT and an LXC cannot both claim the same `(node, vmid)`. ProxOps enforces this as any other in-cluster id collision. PVE lists both as `type="lxc"`; the `template` flag in the per-object `/config` report is what distinguishes them. |
+| PVE /template endpoint | `POST /lxc/{id}/template` (mark). Unlike the qemu mark, PVE responds **synchronously with a NULL data** (no task UPID — probe-verified PVE 9.2.2); the executor treats the empty UPID as immediate success. The planner emits a `MarkTemplate` action when a desired TemplateCT matches a PVE CT at the same `(node, vmid)` that is NOT template-flagged. |
+| PVE /untemplate endpoint | **PVE 9.2 has no `/lxc/{id}/untemplate` endpoint** (probe-verified `HTTP 501 "not implemented"` on conformance-dev 2026-10-14, same as the qemu side). The planner surfaces a **non-destructive anomaly** when a ProxOps `kind: LXC` desired matches a PVE-side template CT at the same `(node, vmid)`: ProxOps will not attempt a kind-flip write. The operator either changes the manifest to `kind: TemplateCT` or manually demotes the object on the PVE host. |
+| Create | `POST /lxc` with `start=0` + `POST /lxc/{id}/template`. The executor combines both into a single `Create` action. |
+| Delete | `DELETE /lxc/{id}`. PVE accepts destroy on a template CT. |
+| Volume rename | Promotion RENAMES the rootfs volume `vm-<ctid>-disk-0` → `base-<ctid>-disk-0` (probe-verified). ProxOps never compares volume names, so drift is stable across the rename. |
+| `spec.template` | Still names a CTTemplate (the vztmpl the container is bootstrapped from before promotion). The structured `TemplateCT → CTTemplate` dependency edge is inherited from LXC. |
+
+Adoption: PVE CTs reporting `template=1` produce `kind: TemplateCT`
+manifests under `templatect/<cluster>/` (the `template` key is owned by the
+kind, not a gap). The `ostemplate` gap still applies (PVE does not persist
+it), so `spec.template` needs a human before the manifest is listed — the
+same contract as `kind: LXC`.
+
+---
+
 ## `kind: CTTemplate`
 
 A **downloadable PVE container-template archive** (`.tar.zst` / `vztmpl`)
 living on a storage backend. It is a **storage artifact**: it has **no PVE
-numeric id**, is **not a VM**, is **not an LXC**, and is **not** "an
-existing CT marked as a template" — an LXC promoted to a PVE template
-(`pct template`) is not modelled (see GAPS.md; the qemu-side equivalent is
-`kind: TemplateVM`).
+numeric id**, is **not a VM**, and is **not an LXC**. It is also distinct
+from `kind: TemplateCT` (M13): a CTTemplate is the downloadable vztmpl
+*file* an LXC is bootstrapped from, while a TemplateCT is a live container
+object that was customized and *promoted* to a PVE template
+(`pct template`).
 
 | Field | Required | PVE wire | Semantics |
 |---|---|---|---|

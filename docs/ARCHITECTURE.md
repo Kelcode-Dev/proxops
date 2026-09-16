@@ -186,13 +186,15 @@ directions fail closed).
 Index for exactly that cluster's composed files:
 
 - routing to typed resources (VM / LXC / CTTemplate / ISO / TemplateVM /
-  DiskImage) + `Validate()`;
+  DiskImage / TemplateCT) + `Validate()`;
 - duplicate `(kind, name)` refs -> error;
 - duplicate PVE id on a node **within the cluster** -> error;
 - structured edges (`VM -> ISO` via `hardware.cdrom.iso`,
   `VM -> DiskImage` via `spec.disks[].image`,
   `VM -> TemplateVM` via `spec.clone`,
-  `LXC -> CTTemplate` via `spec.template`) + `depends-on` annotation edges;
+  `LXC -> CTTemplate` via `spec.template`,
+  `TemplateCT -> CTTemplate` via `spec.template`) + `depends-on` annotation
+  edges;
 - unknown edge targets / cycles fail the cluster's cycle (no cross-cluster
   resolution, by construction).
 
@@ -263,6 +265,18 @@ action Failed — never reported as converged — and the next cycle re-diffs th
 half-configured clone through the normal Drift path (which also clears any
 leaked identity); ProxOps never re-clones over a live VM.
 
+**Template creates** (`kind: TemplateVM` M11, `kind: TemplateCT` M13) are a
+two-write sequence inside one `Create` action: the object `POST` (`start=0`)
+followed by the mark endpoint (`POST /qemu/{id}/template` or
+`POST /lxc/{id}/template`). The qemu mark returns a task UPID (drained
+serially); the LXC mark is synchronous with a NULL data response (no UPID —
+probe-verified PVE 9.2.2), which the executor treats as immediate success. A
+failed mark leaves the object created-but-unmarked, surfaced as drift next
+cycle (the planner's `MarkTemplate` action fires when a desired template
+matches a live non-template object at the same id). Neither kind has an
+`/untemplate` endpoint (501), so a desired `kind: VM`/`kind: LXC` against a
+live PVE-side template is a non-destructive anomaly, never a kind-flip write.
+
 ### adopt -- PVE -> ProxOps YAML (read-only)
 
 `proxops adopt --cluster <name>`:
@@ -273,8 +287,10 @@ leaked identity); ProxOps never re-clones over a live VM.
 2. Enumerates nodes (allowlist; only when the allowlist is empty does it
    query `/cluster/nodes`).
 3. Reverse-engineers every VM and LXC on those nodes from their PVE
-   `/config` report into a ProxOps manifest, every PVE-side template
-   (`template=1`) into a `kind: TemplateVM` manifest, and every
+   `/config` report into a ProxOps manifest, every PVE-side qemu template
+   (`template=1` on a `type=qm` object) into a `kind: TemplateVM` manifest,
+   every PVE-side container template (`template=1` on a `type=lxc` object,
+   M13) into a `kind: TemplateCT` manifest, and every
    `iso`/`vztmpl` storage artifact into an ISO/CTTemplate manifest (same
    filename on several allowed nodes -> one manifest with `spec.nodes`
    covering them). `import` content (DiskImage) is not adopted — see
