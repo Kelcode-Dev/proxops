@@ -38,7 +38,7 @@ older build.
 
 | Kind | PVE object | Identity | Notes |
 |---|---|---|---|
-| `VM` | qemu VM | `(node, vmid)` | Fixed `spec.vmid`; disks (incl. image-seeded via `spec.disks[].image`), networks, CPU, memory, hardware (bios/machine/EFI/cloud-init/TPM/serial/cdrom), options, cloud-init data (`spec.cloud-init-data`: ci-user/ssh-keys/nameservers/search-domains/ipconfigs), power state |
+| `VM` | qemu VM | `(node, vmid)` | Fixed `spec.vmid`; disks (incl. image-seeded via `spec.disks[].image`), networks, CPU, memory, hardware (bios/machine/EFI/cloud-init/TPM/serial/cdrom), options, cloud-init data (`spec.cloud-init-data`: ci-user/ssh-keys/nameservers/search-domains/ipconfigs), power state. May be provisioned by cloning a `TemplateVM` via `spec.clone` (full clone + the VM's own config; inherited identity is overwritten/cleared). |
 | `LXC` | container | `(node, vmid)` | Fixed `spec.vmid`; root FS (`spec.root`), optional mount points (`mp*`), template ref (`spec.template`), networks (incl. static `ip`/`gw`), DNS, options, power state |
 | `TemplateVM` | qemu VM promoted to a PVE template (`template=1`) | `(node, vmid)` (shares PVE's qm id space with VM) | Schema identical to `VM`; `spec.state` must be `stopped`. ProxOps creates it via `POST /qemu` + `POST /qemu/{id}/template` and manages it via the standard `/config` surface. PVE 9.2 has no `/qemu/{id}/untemplate` endpoint; a `kind: VM` desired against a live PVE-side template surfaces a non-destructive anomaly instead of a kind-flip write. |
 | `CTTemplate` | downloadable PVE vztmpl pool file | no PVE id; PVE identity `(node, storage, filename)` | PVE storage artifact ProxOps DOWNLOADS from `spec.url` when missing on a node. Never pruned. |

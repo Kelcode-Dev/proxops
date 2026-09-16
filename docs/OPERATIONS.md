@@ -157,6 +157,7 @@ ProxOps infers these cross-kind edges from the manifest itself:
 ```text
 VM.spec.hardware.cdrom.iso          →  ISO.metadata.name
 VM.spec.disks[].image               →  DiskImage.metadata.name
+VM.spec.clone                       →  TemplateVM.metadata.name
 LXC.spec.template                   →  CTTemplate.metadata.name
 TemplateVM.spec.hardware.cdrom.iso  →  ISO.metadata.name
 ```
@@ -285,6 +286,11 @@ mismatch fails closed at config validation.
   ProxOps therefore surfaces a `kind: VM` desired against a live PVE-side
   `template=1` as a non-destructive anomaly; the demotion is an operator's
   manual step on the PVE host.
+- **No re-cloning of an existing VM.** A `spec.clone` VM is cloned from its
+  TemplateVM **only when the VM is absent from PVE**. Once the clone exists,
+  every change is a config write (never a fresh clone over live data — PVE
+  also refuses a clone onto an existing id). To reprovision a clone from an
+  updated template, delete the VM manifest (prune), then re-add it.
 
 ### Idempotency by construction
 

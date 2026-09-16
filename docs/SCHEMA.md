@@ -76,6 +76,8 @@ creates topologically so prerequisites finish **before** their dependants:
    these cross-kind edges:
    - `VM.spec.hardware.cdrom.iso` → an `ISO`
    - `VM.spec.disks[].image` → a `DiskImage`
+   - `VM.spec.clone` → a `TemplateVM` (the VM is provisioned by cloning the
+     template; the template must exist and be marked before the clone runs)
    - `LXC.spec.template` → a `CTTemplate`
    - `TemplateVM.spec.hardware.cdrom.iso` → an `ISO` (TemplateVM re-uses the
      VM surface, so the same edge applies)
@@ -137,6 +139,7 @@ Behaviour:
 | `spec.pve-description` | no | `description` | PVE description string. |
 | `spec.tags` | no | `tags` | PVE user tags; `proxops` is added automatically. |
 | `spec.extra` | no | passthrough | Free-form PVE keys for unmodeled properties. |
+| `spec.clone` | no | clone endpoint | **A TemplateVM `metadata.name`.** When set, the VM is provisioned by a PVE **full clone** of that template instead of a fresh create, then configured with this manifest's own values. See *Provisioning from a TemplateVM* below. A clone-backed VM MUST NOT declare `spec.disks` (it inherits the template's disk layout). |
 
 ### Disk
 
@@ -266,6 +269,119 @@ Differences from `kind: VM`:
 Adoption: PVE objects reporting `template=1` produce `kind: TemplateVM`
 manifests under `templatevm/<cluster>/`. PVE-side `sshkeys` are redacted
 to `["*"]`; `cipassword` / `cicustom` remain in the gap report.
+
+---
+
+## Provisioning a VM from a TemplateVM (`spec.clone`)
+
+A `kind: VM` may name a `kind: TemplateVM` on `spec.clone`. ProxOps then
+provisions the VM with PVE's **full-clone** endpoint instead of a fresh
+create, and applies the VM's own configuration on top. The lifecycle is:
+
+```
+TemplateVM  →  clone (full=1)  →  configure (VM's own values)  →  Cloud-Init  →  optional start  →  reconcile
+```
+
+```yaml
+apiVersion: proxops/v1alpha1
+kind: VM
+metadata:
+  name: app-01
+spec:
+  node: pve01
+  vmid: 9161
+  clone: golden-tpl        # a TemplateVM metadata.name
+  state: started
+  memory: 2GiB             # the VM's OWN value, not the template's
+  cpu: {type: host, cores: 2}
+  networks:
+    - model: virtio
+      bridge: vmbr0
+  hardware:
+    cloud-init: {enabled: true, storage: local-lvm}
+  cloud-init-data:         # the VM's OWN identity — see below
+    ci-user: deploy
+    ipconfigs:
+      - nic: 0
+        ip: 192.168.0.50/24
+        gateway: 192.168.0.1
+```
+
+### Rules
+
+- **`spec.disks` MUST be empty.** A clone inherits the template's disk
+  layout; re-stating a create-form disk over a cloned live volume is the
+  data-loss shape ProxOps forbids, so declaring both fails `Validate()` at
+  parse time. The template owns the disk layout (including `scsihw` — see
+  the controller note below).
+- **The clone source is the TemplateVM's own `spec.vmid`,** resolved through
+  the structured `VM → TemplateVM` edge. A manifest can never point a clone
+  at an arbitrary PVE id: the target is named by `metadata.name`, and its
+  vmid comes from the TemplateVM's spec. A clone whose resolved source equals
+  its own target vmid is rejected (would clone onto itself).
+- **Missing / invalid references fail closed.** `spec.clone` naming an
+  unknown resource, a non-`TemplateVM`, or a template not placed on the VM's
+  node is a **parse error** that aborts the cluster's cycle before any PVE
+  call — ProxOps never partially converges a clone.
+- **A clone is created once, never re-cloned.** The clone runs only when the
+  VM is absent from PVE. Drift is corrected through config writes; ProxOps
+  never re-clones over a live VM (PVE also refuses a clone onto an existing
+  id).
+
+### Identity: a clone must not keep the template's hostname / IP / keys
+
+PVE's full clone **copies the template's entire `/config`**, including the
+cloud-init DATA block (`ciuser`, `sshkeys`, `ipconfig<N>`, `nameserver`,
+`searchdomain`) — probe-verified on conformance-dev PVE 9.2.2. Left alone, a
+clone would boot with the **template's** identity. ProxOps therefore, in the
+post-clone config write:
+
+- **overwrites** every cloud-init DATA key the VM manifest declares (its own
+  user, keys, static IP, DNS); and
+- **clears** (via PVE's `delete=` form-value) every inherited identity key the
+  VM manifest does **not** declare, so an undeclared `searchdomain` /
+  `sshkeys` / `ipconfig<N>` from the template never leaks into the guest.
+
+The set map and the `delete=` list are **disjoint by construction**: PVE 9.2
+rejects setting and deleting the same key in one request. The clearing is
+**convergent** — it rides the normal Drift path too, so a clone whose create
+failed partway (clone landed, config write did not) is repaired on the next
+cycle rather than leaking the template's identity forever.
+
+`name` is never leaked (the clone's own `name=` always wins), and PVE
+regenerates `vmgenid` / `smbios1` (UUID) per clone. `tags` are overwritten
+with the VM's own (ownership tag included).
+
+### The cloud-init DRIVE is inherited, not rewritten
+
+The cloud-init **drive** (`ide2=<storage>:cloudinit`) is a storage-backed
+volume, so a clone gets its own copy from the template. Re-sending the
+create-form drive over the clone's live volume makes PVE `lvcreate` a volume
+that already exists and the task **fails** ("Logical Volume
+`vm-<id>-cloudinit` already exists" — probe-verified 2026-09-15). ProxOps
+therefore writes `ide2` only into an **empty** slot (a template that carried
+no drive); a live inherited drive is left as-is, and a drive on a different
+pool than the manifest asks for is surfaced as a non-destructive anomaly
+(moving a live volume is a storage migration, not a config write). The
+cloud-init **DATA** keys above are always reconciled — they are plain config
+values, not volumes.
+
+### Controller / boot caveat
+
+A clone inherits the template's `scsihw`. Some cloud images (e.g. the Ubuntu
+*minimal* images) ship an initramfs without PVE's default `lsi53c897a`
+driver and **kernel-panic** ("VFS: Unable to mount root fs on
+unknown-block(0,0)") unless the controller is `virtio-scsi-single`. Because a
+clone-backed VM declares no disks, the controller is owned by the **template**
+(set it on the template's `spec.disks[].controller`); the clone inherits it.
+See GAPS.md.
+
+### Power
+
+PVE's clone endpoint rejects `start` (probe-verified), so a clone-backed VM
+with `state: started` is powered on by the planner's normal power step on the
+following cycle — the same convergence guarantee as any other VM, one cycle
+later than a plain create.
 
 ---
 

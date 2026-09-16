@@ -271,6 +271,34 @@ name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
   appear in the report; `sshkeys`/`cipassword` gap values must contain
   `<redacted>`), `TestAgent_GeneratedOutputContainsNoCredentialMaterial`.
 
+### Clone-backed VM: undeclared non-identity fields come from the template
+
+- **Resource/area**: VM provisioning via `spec.clone`
+- **PVE field**: any `/config` key a full clone copies that the VM manifest
+  does not declare (hardware layout, `machine`/`bios`/`vga`, `scsihw`,
+  `boot`, `onboot`/`startup`/`protection`, `efidisk0`/`tpm0`/`serial0`,
+  the cloud-init DRIVE volume)
+- **Status**: deliberate
+- **Priority**: low
+- **What is unsupported**: a full clone inherits the template's whole
+  `/config`. ProxOps overwrites the fields the VM manifest declares and
+  clears the inherited **cloud-init identity** keys it does not (ciuser /
+  sshkeys / ipconfig<N> / nameserver / searchdomain / cipassword /
+  cicustom), but it does NOT reset other undeclared fields to a
+  fresh-create default — the template's hardware layout and operational
+  posture survive, which is the point of cloning. A clone-backed VM also
+  cannot declare `spec.disks` (the layout is inherited), so the disk
+  controller (`scsihw`) is owned by the template.
+- **Impact/risk**: an operator expecting a clone to "look like" a fresh VM
+  with only a few overrides may be surprised that, e.g., the template's
+  `onboot` or `boot` order persists. Identity (hostname / user / keys /
+  static IP) is never leaked — that is enforced and convergent. The
+  inherited `scsihw` can make an image with a mismatched initramfs panic on
+  boot (see the wire finding below); set the controller on the template.
+- **Discovery source**: live clone probe on conformance-dev (2026-09-15).
+  Pinned: `TestClone_ConfigParams`, `TestClone_DriftClearsLeakedIdentity`,
+  `TestClone_DriveNotRewritten`, `TestE2ECloneProvisionLifecycle`.
+
 ### LXC: `cpu.units` is declarative-only
 
 - **Resource/area**: LXC CPU (`spec.cpu.units`)
@@ -409,3 +437,50 @@ test.
 - **LXC static `ip=`/`gw=` inside `netX`** — PVE 9.2 create + PUT accept
   the `netX=...,ip=...,gw=...` form; ProxOps owns them end-to-end. Pinned:
   the LXC wire-regression tests.
+- **full clone copies the template's cloud-init DATA** —
+  `POST /qemu/{src}/clone` with `full=1` reproduces `ciuser`, `sshkeys`,
+  `ipconfig<N>`, `nameserver`, `searchdomain`, `onboot`, `tags`, `boot` and
+  the hardware layout verbatim on the clone's `/config` (probe on
+  conformance-dev 2026-09-15). It does NOT copy `name` (the clone's own
+  `name=` wins) and it REGENERATES `vmgenid` + `smbios1` (UUID). ProxOps
+  therefore overwrites the declared cloud-init DATA and `delete=`s the
+  undeclared inherited identity keys after every clone, so a clone never
+  boots with the template's hostname / user / keys / static IP. Pinned:
+  `TestClone_ConfigParams`, `TestClone_DriftClearsLeakedIdentity`,
+  `TestE2ECloneProvisionLifecycle`.
+- **`delete=` and setting the SAME key in one `/config` request is rejected**
+  — PVE 9.2 returns 400 "you can't use '-ciuser' and '-delete ciuser' at the
+  same time". Deleting an ABSENT-but-known key is tolerated (200); deleting
+  an UNKNOWN key is 400 "unknown option". ProxOps keeps the clone's set map
+  and delete list disjoint by construction. Pinned:
+  `TestClone_ConfigParams` (disjointness assertion).
+- **the clone endpoint rejects `start`** — `POST /qemu/{src}/clone` with
+  `start=1` is 400 "property is not defined in schema". Power is a separate
+  `status/start`, so a `state: started` clone-backed VM is powered on by the
+  planner's normal power step on the following cycle. Pinned:
+  `TestE2ECloneProvisionLifecycle`.
+- **a clone of a missing source fails synchronously** — `POST
+  /qemu/{src}/clone` for an absent source returns HTTP 500 "unable to find
+  configuration file for VM N on node 'X'" with NO UPID; a clone onto an
+  existing id returns 500 "unable to create VM N: config file already
+  exists". ProxOps surfaces either as a failed action, never as convergence.
+  Pinned: `internal/pveclient/mock/mock.go` (both shapes) +
+  `TestE2ECloneMissingTemplateFailsClosed`.
+- **re-sending the cloud-init DRIVE over a clone's live volume fails the
+  task** — the clone inherits its own `<pool>:vm-<id>-cloudinit` volume; a
+  `/config` write restating `ide2=<pool>:cloudinit` makes PVE `lvcreate` a
+  volume that already exists and the task FAILS ("Logical Volume
+  vm-<id>-cloudinit already exists", probe 2026-09-15). ProxOps writes the
+  drive only into an EMPTY slot. The same lvcreate rule applies to any
+  create-form volume written over a live one — the general data-loss guard.
+  Pinned: `TestClone_DriveNotRewritten`, `TestClone_DrivePoolMismatchIsAnomaly`
+  + the mock's lvcreate mirror.
+- **cloud images may lack PVE's default SCSI driver** — the Ubuntu *minimal*
+  cloud image's initramfs has no `lsi53c897a` (PVE's default `scsihw`), so a
+  VM using it kernel-panics ("VFS: Unable to mount root fs on
+  unknown-block(0,0)") unless `scsihw=virtio-scsi-single`. Verified on
+  conformance-dev with PLAIN (non-clone) VMs, so it is an image property,
+  not a clone defect. For a clone-backed VM the controller is owned by the
+  TEMPLATE (a clone inherits `scsihw` and declares no `spec.disks`), so set
+  `spec.disks[].controller: virtio-scsi-single` on the TemplateVM. Pinned:
+  `TestE2ECloneProvisionLifecycle` (template carries the controller).

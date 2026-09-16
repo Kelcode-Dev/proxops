@@ -191,6 +191,7 @@ Index for exactly that cluster's composed files:
 - duplicate PVE id on a node **within the cluster** -> error;
 - structured edges (`VM -> ISO` via `hardware.cdrom.iso`,
   `VM -> DiskImage` via `spec.disks[].image`,
+  `VM -> TemplateVM` via `spec.clone`,
   `LXC -> CTTemplate` via `spec.template`) + `depends-on` annotation edges;
 - unknown edge targets / cycles fail the cluster's cycle (no cross-cluster
   resolution, by construction).
@@ -248,6 +249,19 @@ Actions run in plan order; stop-required flows: Stop -> Update -> Start
 (restored only when `DesiredPower=started`). Failures never abort the cycle;
 the next cycle re-diffs. Every `statusx.Object` record is tagged with the
 cluster.
+
+**Clone-backed VM creates** (`VM.spec.clone`, M12) are a two-write sequence
+inside one `Create` action: `POST /qemu/{template-vmid}/clone` (`full=1`,
+`newid`, `name`) followed by a `/config` write that applies the VM's own
+values and `delete=`s the inherited cloud-init identity keys the manifest
+does not declare (PVE's full clone copies the template's whole `/config`,
+hostname/IP/keys included — see GAPS.md). The clone source vmid comes from
+the resolved TemplateVM, never from the referencing manifest. The cloud-init
+DRIVE is written only when the clone's live slot is empty (re-sending it over
+the clone's inherited volume fails the task). A failed clone leaves the
+action Failed — never reported as converged — and the next cycle re-diffs the
+half-configured clone through the normal Drift path (which also clears any
+leaked identity); ProxOps never re-clones over a live VM.
 
 ### adopt -- PVE -> ProxOps YAML (read-only)
 
