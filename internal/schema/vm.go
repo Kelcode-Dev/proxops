@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -297,6 +298,24 @@ type VMSpec struct {
 
 	// State is the desired power state: "started" (default) or "stopped".
 	State string `yaml:"state,omitempty" json:"state,omitempty"`
+
+	// Clone references a TemplateVM by metadata.name (M12). When set, the
+	// VM is provisioned with PVE's full-clone endpoint
+	// (POST /nodes/{n}/qemu/{template-vmid}/clone, full=1) instead of a
+	// fresh create, then configured with the manifest's own values. The
+	// clone creates the VM ONLY — it is never re-run to update an
+	// existing VM (drift is corrected via config writes, never by
+	// re-cloning over live data).
+	//
+	// A clone-backed VM MUST NOT declare spec.disks: the clone inherits
+	// the template's disk layout, and writing a create-form disk over a
+	// cloned live volume is the exact data-loss shape ProxOps forbids.
+	// Identity fields the clone copies from the template (hostname,
+	// cloud-init user/keys/IP, onboot, ...) are overwritten by the
+	// VM's own declared values; keys the VM does not declare are
+	// explicitly cleared post-clone (PVE's delete= option) so a clone
+	// never silently keeps the template's identity.
+	Clone string `yaml:"clone,omitempty" json:"clone,omitempty"`
 }
 
 // VM is a schema.Resource for Kind=VM.
@@ -314,6 +333,14 @@ type VM struct {
 	// cdromManagedState), independent of this field, so ToCreateParams/Drift
 	// behave consistently even in pre-resolution unit tests.
 	cdromVolid string
+
+	// cloneSourceID holds the pinned spec.vmid of the referenced TemplateVM
+	// after ResolveArtifactRefs (M12). 0 before resolution or when the VM
+	// is not clone-backed. The planner reads it to emit a clone-create
+	// action; it is never trusted from the manifest itself (the clone
+	// target is identified by metadata.name, and its vmid comes from the
+	// TemplateVM's own spec — fail-closed against VMID confusion).
+	cloneSourceID int
 }
 
 // NewVM returns an empty VM.
@@ -363,6 +390,13 @@ func (v *VM) Deps() []Ref {
 			refs = append(refs, Ref{Kind: KindDiskImage, Name: img})
 		}
 	}
+	// M12: clone-backed VM → structured TemplateVM edge. The template must
+	// exist (and be marked) before the clone runs; the planner orders the
+	// create levels and the executor defers this VM when the template's
+	// create failed earlier in the same cycle.
+	if tpl := strings.TrimSpace(v.Spec.Clone); tpl != "" {
+		refs = append(refs, Ref{Kind: KindTemplateVM, Name: tpl})
+	}
 	return refs
 }
 
@@ -392,8 +426,25 @@ func (v *VM) Validate() error {
 		return fmt.Errorf("%s: spec.memory: %w", v.Ref(), err)
 	}
 	// disks
-	if len(v.Spec.Disks) == 0 {
+	if len(v.Spec.Disks) == 0 && !v.IsCloneBacked() {
 		return fmt.Errorf("%s: spec.disks must be present", v.Ref())
+	}
+	// M12: a clone-backed VM inherits the template's disk layout. Declaring
+	// spec.disks alongside spec.clone would either be ignored (silent drift
+	// against a live volume) or, worse, re-state a create-form disk over the
+	// cloned volume — the exact data-loss shape ProxOps forbids. Fail closed.
+	if v.IsCloneBacked() && len(v.Spec.Disks) > 0 {
+		return fmt.Errorf("%s: spec.disks must be empty when spec.clone is set (a clone inherits the template %q's disk layout; proxops will not re-state a disk over a cloned live volume)", v.Ref(), v.Spec.Clone)
+	}
+	if tpl := strings.TrimSpace(v.Spec.Clone); tpl != "" {
+		if tpl == v.Metadata.Name {
+			return fmt.Errorf("%s: spec.clone references itself", v.Ref())
+		}
+		for i := range v.Spec.Disks {
+			if v.Spec.Disks[i].Image != "" {
+				return fmt.Errorf("%s: spec.disks[%d].image cannot be combined with spec.clone (a clone seeds its disks from the template)", v.Ref(), i)
+			}
+		}
 	}
 	seenSlots := map[string]bool{}
 	for i := range v.Spec.Disks {
@@ -801,6 +852,192 @@ func (v *VM) cdromSlot() string {
 // cloud-init → ide3 rule).
 func (v *VM) CdromSlot() string { return v.cdromSlot() }
 
+// CloneInheritedKeys are the PVE /config keys a full clone copies from the
+// template that carry IDENTITY or SECRET semantics — the cloud-init DATA
+// block. M12 probe-verified on conformance-dev PVE 9.2.2: a full clone of a
+// template reporting ciuser / sshkeys / ipconfig0 / nameserver / searchdomain
+// reproduces every one of them verbatim on the clone's /config, so without
+// intervention a clone boots with the TEMPLATE's cloud-init user, keys and
+// static IP.
+//
+// proxops clears the ones the clone-backed VM's manifest does not own (see
+// CloneDeleteKeys), so a clone never silently keeps the template's identity.
+// ipconfig<N> slots are handled per-slot alongside this list.
+//
+// Deliberately NOT in the list:
+//   - name / hostname: the clone's own name= parameter always wins (PVE does
+//     not copy the template's name — probe-verified), and the guest hostname
+//     derives from it via cloud-init.
+//   - smbios1 / vmgenid: PVE regenerates these per clone (probe-verified).
+//   - tags: PVE DOES copy the template's tags, but proxops always writes the
+//     clone's own tags (ownership tag included) in the post-clone config
+//     pass, so the inherited value is overwritten, never leaked.
+//   - operational posture (onboot/startup/protection) + description + the
+//     hardware layout: these follow the normal "empty = not owned" contract.
+//     A clone inheriting the template's non-identity posture is the point of
+//     cloning; any manifest-declared value rides the config write, and live
+//     state the manifest does not describe is surfaced by Drift /
+//     DriftAnomalies rather than silently erased. See docs/GAPS.md.
+var CloneInheritedKeys = []string{
+	"ciuser", "sshkeys", "cipassword", "cicustom",
+	"nameserver", "searchdomain",
+}
+
+// IsCloneBacked reports whether the manifest declares spec.clone (M12).
+func (v *VM) IsCloneBacked() bool { return strings.TrimSpace(v.Spec.Clone) != "" }
+
+// CloneSourceID exposes the resolved clone-source template VMID (M12) to the
+// planner. 0 when the VM is not clone-backed or resolution has not run.
+// Resolution failure aborts the cycle before planning, so a clone-backed VM
+// reaching the planner always has a non-zero source.
+func (v *VM) CloneSourceID() int { return v.cloneSourceID }
+
+// CloneConfigSet narrows a VM's create params to the post-clone config write
+// (M12): vmid, start and the disk slots are removed. A clone allocates its
+// disks from the template (re-stating a create-form disk over a cloned live
+// volume is the data-loss shape ProxOps forbids), and PVE's clone endpoint
+// rejects `start` outright (probe-verified: "property is not defined in
+// schema"), so power is applied as a separate status/start after the config
+// write.
+//
+// The cloud-init DRIVE (ide2) is NOT stripped here: whether it must be
+// written depends on the clone's LIVE state (a clone of a template that
+// carried a cloud-init drive inherits the volume and re-sending it fails the
+// task with "lvcreate ... vm-<id>-cloudinit already exists" — probe-verified
+// on conformance-dev 2026-09-15; a clone of a template WITHOUT a drive has an
+// empty ide2 and writing it is safe). The executor makes that call after
+// reading the clone's config (see exec.cloneCreate). The cloud-init DATA
+// (ciuser / sshkeys / ipconfig<N> / nameserver / searchdomain) always rides
+// the write — those are plain config keys, not volumes.
+func CloneConfigSet(params map[string]any) map[string]any {
+	out := make(map[string]any, len(params))
+	for k, val := range params {
+		if k == "vmid" || k == "start" || isDiskSlot(k) {
+			continue
+		}
+		out[k] = val
+	}
+	return out
+}
+
+// CloneConfigWrite builds the post-clone config body from the VM's create
+// params and the clone's LIVE config (read after the clone task settled):
+// CloneConfigSet, minus the cloud-init drive when the clone already carries
+// a live cloud-init volume (inherited from the template). Writing the drive
+// into an empty slot (a template without one) is safe and keeps the first
+// cycle convergent — the guest gets its cloud-init data AND drive before the
+// power-on step.
+func CloneConfigWrite(params map[string]any, live map[string]any) map[string]any {
+	out := CloneConfigSet(params)
+	if _, ok := out[CloudInitDriveSlot]; ok {
+		if cur, _ := live[CloudInitDriveSlot].(string); !isNewStorageSlot(cur) {
+			// Live cloud-init volume present — the clone inherited it; a
+			// re-send would lvcreate over it (task failure, partial apply).
+			delete(out, CloudInitDriveSlot)
+		}
+	}
+	return out
+}
+
+// CloudInitDriveSlot is the PVE config key proxops writes the cloud-init
+// drive to (always ide2; the cdrom shifts to ide3 when cloud-init is on).
+const CloudInitDriveSlot = "ide2"
+
+// ipconfigSlotCount is the number of ipconfig<N> slots a clone could have
+// inherited from the template: the wider of the VM's NIC count and its
+// declared ipconfig slots. PVE tolerates deleting an ABSENT key
+// (probe-verified), so deriving the range from the manifest alone keeps the
+// delete list deterministic and independent of what the template carried.
+func (v *VM) ipconfigSlotCount() int {
+	n := len(v.Spec.NICs)
+	for _, c := range v.Spec.CloudInitData.IPConfigs {
+		if c.NIC+1 > n {
+			n = c.NIC + 1
+		}
+	}
+	return n
+}
+
+// cloneClearKeys returns the inherited identity keys that are PRESENT in the
+// clone's live config but NOT owned by the manifest (M12). Drift uses this so
+// the "never keep the template's identity" guarantee is CONVERGENT, not
+// create-time-only: if a clone-create fails after the clone landed (the exact
+// shape of the lvcreate bug above), the next cycle clears the leak through the
+// normal update path instead of leaving the template's ciuser / sshkeys /
+// static IP live forever.
+//
+// Only PRESENT keys are returned — emitting delete= for absent keys every
+// cycle would make Drift never converge. The result is disjoint from the keys
+// the manifest owns (PVE 400s on set+delete overlap — probe-verified).
+func (v *VM) cloneClearKeys(current map[string]any) []string {
+	if current == nil {
+		return nil
+	}
+	var out []string
+	add := func(k string, owned bool) {
+		if owned {
+			return
+		}
+		if s := strings.TrimSpace(pveStr(current[k])); s != "" && !isNoneSlot(s) {
+			out = append(out, k)
+		}
+	}
+	add("ciuser", v.Spec.CloudInitData.CIUser != "")
+	add("sshkeys", cloudInitSSHKeysWire(v.Spec.CloudInitData.SSHKeys) != "")
+	add("nameserver", len(v.Spec.CloudInitData.Nameservers) > 0)
+	add("searchdomain", len(v.Spec.CloudInitData.SearchDomains) > 0)
+	// cipassword / cicustom are never modelled (secret / PVE-owned): if a
+	// clone carries them, they are the template's — clear.
+	add("cipassword", false)
+	add("cicustom", false)
+	for i := 0; i < v.ipconfigSlotCount(); i++ {
+		k := "ipconfig" + strconv.Itoa(i)
+		owned := false
+		for _, c := range v.Spec.CloudInitData.IPConfigs {
+			if c.NIC == i && c.IP != "" {
+				owned = true
+			}
+		}
+		add(k, owned)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CloneDeleteKeys returns the PVE keys to clear via the `delete=` form-value
+// after cloning (M12): every inherited identity/secret/host-coupled key that
+// the manifest does NOT own, plus every ipconfig<N> slot it does not own.
+//
+// PVE 9.2 constraint (probe-verified): one /config request cannot both set
+// and delete the SAME key (400 "you can't use '-ciuser' and '-delete ciuser'
+// at the same time"), so the result is disjoint from the set map by
+// construction: a key the manifest owns rides the set, a key it does not own
+// rides the delete list.
+//
+// Deleting an ABSENT key is tolerated by PVE (probe-verified), so the
+// ipconfig range is derived from the manifest alone — deterministic and
+// independent of what the template happened to carry.
+func (v *VM) CloneDeleteKeys(params map[string]any) []string {
+	owned := make(map[string]bool, len(params))
+	for k := range params {
+		owned[k] = true
+	}
+	var del []string
+	for _, k := range CloneInheritedKeys {
+		if !owned[k] {
+			del = append(del, k)
+		}
+	}
+	for i := 0; i < v.ipconfigSlotCount(); i++ {
+		k := "ipconfig" + strconv.Itoa(i)
+		if !owned[k] {
+			del = append(del, k)
+		}
+	}
+	sort.Strings(del)
+	return del
+}
+
 // DriftAnomalies surfaces live-only disk and NIC slots that proxops's
 // manifest does not declare but PVE reports on this VM. These are
 // "manual drift" — a human added a drive/NIC in the PVE GUI that the
@@ -831,10 +1068,16 @@ func (v *VM) DriftAnomalies(current map[string]any) []string {
 		wantDisks[slot] = true
 	}
 	out := make([]string, 0, 4)
+	// M12: a clone-backed VM declares NO spec.disks — the template's disk
+	// layout is inherited by the clone and is EXPECTED to be live. Flagging
+	// those slots as "live-only disks proxops will not remove" would be
+	// noise on every converged clone, so the disk-slot anomaly class is
+	// suppressed for clone-backed VMs. (NIC slots stay checked.)
+	cloneBacked := v.IsCloneBacked()
 	for k, raw := range current {
 		switch {
 		case isDiskSlot(k):
-			if !wantDisks[k] && !isNoneSlot(pveStr(raw)) {
+			if !cloneBacked && !wantDisks[k] && !isNoneSlot(pveStr(raw)) {
 				out = append(out, fmt.Sprintf("live-only disk slot %s=%s is not in spec.disks; proxops will not automatically remove a live-only disk", k, pveStr(raw)))
 			}
 		case isNICSlot(k):
@@ -853,9 +1096,23 @@ func (v *VM) DriftAnomalies(current map[string]any) []string {
 	}
 	// Disk pool/size drift on live data volumes is non-destructive too:
 	// proxops will not auto-resize/re-pool. Surface alongside
-	// live-only-slot anomalies.
-	if _, _, danoms := v.diskSlotDrift(current); danoms != nil {
-		out = append(out, danoms...)
+	// live-only-slot anomalies. Clone-backed VMs have no desired disks, so
+	// diskSlotDrift yields nothing — skip the call for clarity.
+	if !cloneBacked {
+		if _, _, danoms := v.diskSlotDrift(current); danoms != nil {
+			out = append(out, danoms...)
+		}
+	} else if v.Spec.Hardware.CloudInit.Enabled {
+		// M12: a clone inherits the template's cloud-init DRIVE volume. When
+		// the manifest asks for a different pool than the clone ended up with,
+		// proxops will NOT move the volume (that is a storage migration, not a
+		// config write) — surface it instead of silently failing the task.
+		cur := parseDiskInfo(pveStr(current[CloudInitDriveSlot]))
+		if cur.pool != "" && cur.pool != v.Spec.Hardware.CloudInit.Storage {
+			out = append(out, fmt.Sprintf(
+				"clone cloud-init drive lives on pool %q (inherited from template %q) but spec.hardware.cloud-init.storage is %q; proxops will not move a live cloud-init volume — align the manifest with the template or recreate the VM",
+				cur.pool, strings.TrimSpace(v.Spec.Clone), v.Spec.Hardware.CloudInit.Storage))
+		}
 	}
 	// Sort for determinism.
 	for i := 0; i < len(out); i++ {
@@ -1075,12 +1332,25 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 	// cloud-init: PVE owns ide2; we own storage + size + media. PVE stores a
 	// per-vmid volume name ("local:9100/vm-9100-cloudinit.qcow2,...") that we
 	// must NOT compare — only pool + size.
+	//
+	// M12: the cloud-init DRIVE is a storage-backed volume, so a clone
+	// INHERITS it from the template (the clone's own vmid names the volume).
+	// Re-sending the create form over an inherited volume makes PVE lvcreate a
+	// volume that already exists and the task FAILS (probe-verified on
+	// conformance-dev 2026-09-15). For a clone-backed VM the drive is therefore
+	// written only into an EMPTY slot (a template that carried no drive); a
+	// live drive on a different pool is surfaced by DriftAnomalies instead of
+	// rewritten. The cloud-init DATA below is always reconciled — those are
+	// plain config keys, not volumes.
 	if hw.CloudInit.Enabled {
-		slot := "ide2"
+		slot := CloudInitDriveSlot
 		cloudInitWant := fmt.Sprintf("%s:cloudinit,size=%s", hw.CloudInit.Storage, hw.CloudInit.Size)
-		if !cloudInitMatches(pveStr(current[slot]), cloudInitWant) {
-			upd[slot] = cloudInitWant
-			stop = true
+		curDrive := pveStr(current[slot])
+		if !cloudInitMatches(curDrive, cloudInitWant) {
+			if !v.IsCloneBacked() || isNewStorageSlot(curDrive) {
+				upd[slot] = cloudInitWant
+				stop = true
+			}
 		}
 	}
 	// EFI disk: PVE owns efidisk0; we own pool + size; PVE auto-assigns a
@@ -1265,6 +1535,17 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 		}
 		if opt.Hidden && pveInt(current["hidden"]) != 1 {
 			upd["hidden"] = "1"
+		}
+	}
+
+	// M12: a clone-backed VM must never keep the template's cloud-init
+	// identity. The clear rides the NORMAL update path so the guarantee is
+	// convergent: a clone-create that failed after the clone landed (the
+	// lvcreate shape above) leaves a half-configured clone that the next
+	// cycle repairs, instead of a permanent template-identity leak.
+	if v.IsCloneBacked() {
+		if clear := v.cloneClearKeys(current); len(clear) > 0 {
+			upd["delete"] = strings.Join(clear, ",")
 		}
 	}
 

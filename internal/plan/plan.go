@@ -78,6 +78,15 @@ type Action struct {
 	// skips it; the planner records it on Plan.Anomalies so /status +
 	// /metrics surface the live-only slot to the operator.
 	Anomaly bool
+	// CloneSourceID (M12) is the PVE vmid of the TemplateVM this Create
+	// clones from. 0 = ordinary create. The executor refuses to run a
+	// clone when the source id equals the target id (wrong-resource guard).
+	CloneSourceID int
+	// DeleteKeys (M12) are PVE /config keys the executor clears via the
+	// `delete=` form-value in the post-clone config write, so a clone never
+	// silently keeps the template's identity (hostname/cloud-init user/keys/
+	// static IP/onboot/...) for fields the VM manifest does not own.
+	DeleteKeys []string
 }
 
 // Plan is the ordered result of one planning pass.
@@ -212,12 +221,33 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 			if err != nil {
 				return nil, fmt.Errorf("%s: create params: %w", ref, err)
 			}
+			// M12: clone-backed VM. The create is a PVE full clone from the
+			// resolved TemplateVM's pinned vmid (never a vmid the manifest
+			// could invent), followed by a config write that applies the
+			// VM's own values and clears the inherited identity keys the
+			// manifest does not own.
+			var cloneSrc int
+			var delKeys []string
+			verb := createVerb(kt)
+			if v, ok := r.(*schema.VM); ok && v.IsCloneBacked() {
+				cloneSrc = v.CloneSourceID()
+				if cloneSrc == 0 {
+					return nil, fmt.Errorf("%s: spec.clone references %q but no clone source vmid resolved (resolver did not run?)", ref, v.Spec.Clone)
+				}
+				if cloneSrc == v.Spec.VMID {
+					return nil, fmt.Errorf("%s: clone source vmid %d equals the target vmid (would clone onto itself)", ref, cloneSrc)
+				}
+				delKeys = v.CloneDeleteKeys(params)
+				verb = fmt.Sprintf("full-clone from TemplateVM %s (vmid %d)", strings.TrimSpace(v.Spec.Clone), cloneSrc)
+			}
 			p.Actions = append(p.Actions, Action{
 				Tier: 0, Kind: kt, Name: ref.Name, Node: r.Node(), ID: r.ID(),
 				What: Create, Params: params, Level: levels(ref), Ref: ref,
-				Deps:      depsFor(ref),
-				Reason:    ref.String() + ": not on PVE; will " + createVerb(kt),
-				LivePower: "", DesiredPower: r.DesiredState(),
+				Deps:          depsFor(ref),
+				Reason:        ref.String() + ": not on PVE; will " + verb,
+				LivePower:     "", DesiredPower: r.DesiredState(),
+				CloneSourceID: cloneSrc,
+				DeleteKeys:    delKeys,
 			})
 			continue
 		}

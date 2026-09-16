@@ -32,4 +32,5 @@ resources:
   - ../../vm/example/app-vm.yaml
   - ../../vm/example/cloudinit-vm.yaml
   - ../../vm/example/talos-worker-01.yaml
+  - ../../vm/example/clone-vm.yaml
   - ../../templatevm/example/almalinux-tpl.yaml

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/GizzmoShifu/proxmox-operator/internal/metrics"
@@ -347,6 +348,13 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 		}
 		return mupid, nil
 	default:
+		// M12: a clone-backed VM create is a PVE full clone from the
+		// planner-resolved TemplateVM vmid, not a fresh POST /qemu. The
+		// planner guarantees CloneSourceID != 0 and != the target id for
+		// clone actions; a non-clone VM create has CloneSourceID == 0.
+		if a.Kind == schema.KindVM && a.CloneSourceID != 0 {
+			return e.cloneCreate(ctx, a)
+		}
 		v := toValues(a.Params)
 		start := a.DesiredPower == "started"
 		if a.Kind == schema.KindVM {
@@ -354,6 +362,63 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 		}
 		return e.client.LXC().Create(ctx, a.Node, v, start)
 	}
+}
+
+// cloneCreate performs the M12 clone lifecycle for one Create action:
+//
+//  1. POST /nodes/{n}/qemu/{src}/clone with newid + full=1 + name — PVE
+//     allocates the clone (fresh disk volumes, fresh MAC, regenerated
+//     vmgenid/smbios uuid) and copies the template's whole /config.
+//  2. POST /nodes/{n}/qemu/{newid}/config with the VM's OWN declared
+//     values (minus vmid/start/disk slots) plus delete=<inherited keys the
+//     manifest does not own>, so the clone never keeps the template's
+//     hostname/cloud-init identity/onboot posture by accident.
+//
+// PVE rejects `start` on the clone endpoint (probe-verified: "property is
+// not defined in schema"), so the desired power state is applied by the
+// planner's normal power step AFTER this create — never here.
+//
+// Failure semantics (fail closed, no partial success): if the clone task
+// fails, the action fails with no config write attempted. If the clone
+// succeeds but the config write fails, the action FAILS even though a VM
+// exists on PVE — the executor does not report convergence, and the next
+// cycle re-diffs the half-configured clone through the normal Drift path
+// (the clone itself is never re-run over the live object: PVE refuses a
+// clone onto an existing id, and the planner only clones when the VM is
+// absent).
+func (e *Executor) cloneCreate(ctx context.Context, a plan.Action) (string, error) {
+	if a.CloneSourceID == a.ID {
+		return "", fmt.Errorf("%s: clone source vmid equals target vmid (%d); refusing", a.Ref, a.ID)
+	}
+	upid, err := e.client.VM().Clone(ctx, a.Node, a.CloneSourceID, a.ID, true, a.Name)
+	if err != nil {
+		return "", fmt.Errorf("%s: clone from vmid %d: %w", a.Ref, a.CloneSourceID, err)
+	}
+	if err := e.waitTask(ctx, a.Node, upid); err != nil {
+		return upid, fmt.Errorf("%s: clone task from vmid %d: %w", a.Ref, a.CloneSourceID, err)
+	}
+	// Read the clone's live config: the cloud-init DRIVE is a storage-backed
+	// volume the clone inherits from the template, and re-sending the create
+	// form over a live volume makes PVE lvcreate a volume that already exists
+	// (task failure, partial apply). The write therefore includes ide2 only
+	// when the clone's slot is empty (a template without a cloud-init drive).
+	// Probe-verified on conformance-dev 2026-09-15.
+	live, lErr := e.client.VM().Get(ctx, a.Node, a.ID)
+	if lErr != nil {
+		return "", fmt.Errorf("%s: clone created (vmid %d) but reading its config failed: %w", a.Ref, a.ID, lErr)
+	}
+	v := toValues(schema.CloneConfigWrite(a.Params, live))
+	if len(a.DeleteKeys) > 0 {
+		v.Set("delete", strings.Join(a.DeleteKeys, ","))
+	}
+	cupid, uErr := e.client.VM().Update(ctx, a.Node, a.ID, v)
+	if uErr != nil {
+		return cupid, fmt.Errorf("%s: clone created (vmid %d) but post-clone config failed: %w", a.Ref, a.ID, uErr)
+	}
+	// Return the config-update UPID WITHOUT waiting: apply's Create case
+	// drains it (matching the TemplateVM create+mark pattern — waiting here
+	// too would double-drain and the second waiter would find the task gone).
+	return cupid, nil
 }
 
 // markTemplate performs a PVE-side VM template-mark for an already-existing

@@ -125,6 +125,37 @@ func (vm *VM) MarkTemplate(ctx context.Context, node string, vmid int) (string, 
 	return vm.c.Do(ctx, http.MethodPost, node, vmBase(node, vmid)+"/template", nil, nil)
 }
 
+// Clone performs a PVE clone (POST /nodes/{n}/qemu/{src}/clone). M12.
+//
+// Wire facts (probe-verified on conformance-dev PVE 9.2.2):
+//   - `newid` is required; `full=1` requests a full clone (independent
+//     volumes); `name` sets the destination display name (PVE does NOT
+//     copy the source's name otherwise).
+//   - `start` is REJECTED ("property is not defined in schema") — power is
+//     a separate status/start call.
+//   - A missing source fails SYNCHRONOUSLY with HTTP 500 "unable to find
+//     configuration file for VM <src> on node '<n>'" (no UPID).
+//   - An existing destination id fails synchronously with HTTP 500
+//     "unable to create VM <newid>: config file already exists".
+//   - The clone copies the source's whole /config (identity fields
+//     included); the caller is responsible for the post-clone config
+//     write — see exec.cloneCreate.
+//
+// Returns the task UPID on success.
+func (vm *VM) Clone(ctx context.Context, node string, srcID, newID int, full bool, name string) (string, error) {
+	p := url.Values{
+		"newid": {strconv.Itoa(newID)},
+		"full":  {"0"},
+	}
+	if full {
+		p.Set("full", "1")
+	}
+	if name != "" {
+		p.Set("name", name)
+	}
+	return vm.c.Do(ctx, http.MethodPost, node, vmBase(node, srcID)+"/clone", p, nil)
+}
+
 // IsTemplate reports whether PVE reports `template=1` on the object's live
 // /config. Used by the planner to detect the VM↔TemplateVM kind-mismatch
 // shape: a proxops VM desired against a PVE-side template. PVE 9.2 has

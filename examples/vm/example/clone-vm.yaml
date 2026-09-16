@@ -1,0 +1,56 @@
+# ProxOps VM provisioned by CLONING a TemplateVM (M12).
+#
+# spec.clone names a kind: TemplateVM by metadata.name. ProxOps then
+# provisions this VM with PVE's full-clone endpoint instead of a fresh
+# create, and applies THIS manifest's own configuration on top. The
+# lifecycle is:  TemplateVM -> clone -> configure -> Cloud-Init -> start.
+#
+# Rules that make this safe:
+#   - spec.disks MUST be empty: the clone inherits the template's disk
+#     layout (including its scsihw controller). Re-stating a disk over a
+#     cloned live volume is the data-loss shape ProxOps forbids.
+#   - the clone source vmid is the TemplateVM's OWN spec.vmid, resolved
+#     through the structured VM -> TemplateVM edge — never a vmid this
+#     manifest could invent.
+#   - a clone is created ONCE (when the VM is absent). Drift is corrected
+#     by config writes, never by re-cloning over live data.
+#
+# Identity: PVE's full clone copies the template's cloud-init DATA
+# (ciuser / sshkeys / ipconfig<N> / nameserver / searchdomain). ProxOps
+# OVERWRITES the keys this manifest declares and CLEARS (via PVE delete=)
+# the inherited ones it does not — so this VM never boots with the
+# template's hostname, user, keys, or static IP. Here the VM declares its
+# own ci-user + static IP; the template's ssh-keys / search-domain are
+# cleared rather than leaked.
+#
+# Boot caveat: the template owns scsihw. Cloud images whose initramfs lacks
+# PVE's default lsi53c897a driver (e.g. Ubuntu *minimal*) need the template
+# to set controller: virtio-scsi-single, or the guest kernel panics on boot.
+apiVersion: proxops/v1alpha1
+kind: VM
+metadata:
+  name: clone-vm
+spec:
+  node: pve01
+  vmid: 901
+  clone: almalinux-tpl     # -> structured VM -> TemplateVM dependency
+  state: started
+  memory: 4GiB
+  cpu:
+    type: host
+    cores: 2
+  networks:
+    - model: virtio
+      bridge: vmbr0
+  hardware:
+    cloud-init:
+      enabled: true
+      storage: local-lvm
+  cloud-init-data:
+    ci-user: deploy
+    ipconfigs:
+      - nic: 0
+        ip: 192.168.192.201/18
+        gateway: 192.168.192.5
+  options:
+    agent: true

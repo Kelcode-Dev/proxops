@@ -40,6 +40,9 @@ func ResolveArtifactRefs(resources []Resource) error {
 			if err := v.resolveDiskImages(byRef); err != nil {
 				return err
 			}
+			if err := v.resolveClone(byRef); err != nil {
+				return err
+			}
 		case *LXC:
 			if err := v.resolveTemplate(byRef); err != nil {
 				return err
@@ -57,6 +60,40 @@ func ResolveArtifactRefs(resources []Resource) error {
 			}
 		}
 	}
+	return nil
+}
+
+// resolveClone binds a VM's spec.clone reference (M12) to the referenced
+// TemplateVM's pinned PVE vmid and validates that the template lives on the
+// same node as the VM (PVE's clone endpoint is node-local: the source must
+// be reachable on the target's node). It fails closed when the reference is
+// unknown, names a non-TemplateVM, or the template is placed elsewhere.
+//
+// The clone source VMID is taken EXCLUSIVELY from the TemplateVM's own
+// spec.vmid — never from the referencing manifest — so a manifest cannot
+// point a clone at an arbitrary PVE id (wrong-resource / wrong-VMID guard).
+func (v *VM) resolveClone(byRef map[Ref]Resource) error {
+	tplName := strings.TrimSpace(v.Spec.Clone)
+	if tplName == "" {
+		v.cloneSourceID = 0
+		return nil
+	}
+	res, ok := byRef[Ref{Kind: KindTemplateVM, Name: tplName}]
+	if !ok {
+		return fmt.Errorf("%s: spec.clone references unknown TemplateVM %q", v.Ref(), tplName)
+	}
+	tv, ok := res.(*TemplateVM)
+	if !ok {
+		return fmt.Errorf("%s: spec.clone references %s which is not a TemplateVM", v.Ref(), res.Ref())
+	}
+	if !containsString(tv.Nodes(), v.Spec.Node) {
+		return fmt.Errorf("%s: spec.clone %q is not placed on node %s (TemplateVM nodes: %v)",
+			v.Ref(), tplName, v.Spec.Node, tv.Nodes())
+	}
+	if tv.Spec.VMID <= 0 {
+		return fmt.Errorf("%s: spec.clone %q has no valid spec.vmid to clone from", v.Ref(), tplName)
+	}
+	v.cloneSourceID = tv.Spec.VMID
 	return nil
 }
 

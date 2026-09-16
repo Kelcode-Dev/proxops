@@ -661,6 +661,81 @@ func parsePVEBool(s string) (val bool, ok bool) {
 // Only the disk-slot keys PVE allocates volumes for are transformed; cdrom /
 // cloudinit / other values pass through with PVE's report shape applied where
 // the mock can model it.
+// isCreateFormVolume reports whether a form-value is PVE's CREATE form of a
+// storage-backed volume: "<pool>:cloudinit..." or "<pool>:<size>" (a bare
+// number after the pool). The LIVE form ("<pool>:vm-N-disk-0,size=...") is
+// not create-form and is safe to restate.
+func isCreateFormVolume(val string) bool {
+	ci := strings.IndexByte(val, ':')
+	if ci <= 0 {
+		return false
+	}
+	rest := val[ci+1:]
+	if strings.HasPrefix(rest, "cloudinit") || strings.Contains(rest, ":cloudinit") {
+		return true
+	}
+	// Bare size token (e.g. "local-lvm:8") — create form. A volume name
+	// ("vm-9100-disk-0") is not numeric.
+	head := rest
+	if j := strings.IndexByte(head, ','); j >= 0 {
+		head = head[:j]
+	}
+	if head == "" {
+		return false
+	}
+	for _, c := range head {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// hasLiveVolume reports whether a config value is a live allocated volume
+// (non-empty, not the "none" form).
+func hasLiveVolume(val string) bool {
+	t := strings.TrimSpace(val)
+	return t != "" && t != "none" && !strings.HasPrefix(t, "none,")
+}
+
+// renameCloneVolume rewrites a PVE volume reference for a full clone:
+// "local-lvm:vm-<src>-disk-0[,opts]" -> "local-lvm:vm-<dst>-disk-0[,opts]"
+// and "local-lvm:vm-<src>-cloudinit[,opts]" -> the destination's cloudinit
+// volume. A base-template volume ("base-<src>-disk-N") becomes a fresh
+// per-destination volume (full=1 semantics: independent data).
+func renameCloneVolume(val string, src, dst int) string {
+	ci := strings.IndexByte(val, ':')
+	if ci <= 0 {
+		return val
+	}
+	pool, rest := val[:ci], val[ci+1:]
+	srcStr := strconv.Itoa(src)
+	dstStr := strconv.Itoa(dst)
+	switch {
+	case strings.HasPrefix(rest, "vm-"+srcStr+"-"):
+		rest = "vm-" + dstStr + "-" + rest[len("vm-"+srcStr+"-"):]
+	case strings.HasPrefix(rest, "base-"+srcStr+"-"):
+		// full clone: the base volume is copied into a fresh own volume.
+		rest = "vm-" + dstStr + "-" + rest[len("base-"+srcStr+"-"):]
+	}
+	return pool + ":" + rest
+}
+
+// regenCloneMAC replaces a NIC string's MAC with a deterministic
+// per-destination one, mirroring PVE assigning a fresh MAC to a clone.
+func regenCloneMAC(val string, dst int) string {
+	parts := strings.Split(val, ",")
+	for i, p := range parts {
+		if strings.HasPrefix(p, "virtio=") || strings.HasPrefix(p, "e1000=") ||
+			strings.HasPrefix(p, "rtl8139=") || strings.HasPrefix(p, "vmxnet3=") {
+			eq := strings.IndexByte(p, '=')
+			parts[i] = p[:eq+1] + fmt.Sprintf("52:54:00:%02X:%02X:%02X", (dst>>16)&0xff, (dst>>8)&0xff, dst&0xff)
+			break
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
 func normalizePVEDrive(id int, key, val string) string {
 	// Only real disk slots (scsiN/virtioN/sataN) get PVE's volume-name +
 	// size normalization; cdrom/cloudinit values are reported verbatim.
@@ -826,10 +901,48 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 			if rec.Config == nil {
 				rec.Config = map[string]string{}
 			}
-			for k, vs := range r.PostForm {
-				if len(vs) > 0 {
-					rec.Config[k] = vs[0]
+			// PVE's `delete=k1,k2,...` form-value removes keys in the SAME
+			// request that sets others — but PVE 9.2 REJECTS setting and
+			// deleting the same key in one request (probe-verified: 400
+			// "you can't use '-ciuser' and '-delete ciuser' at the same
+			// time"). Deleting an ABSENT key is tolerated. The mock mirrors
+			// both rules so the clone path's delete= list is exercised
+			// honestly.
+			var dels []string
+			if dv := r.PostForm.Get("delete"); dv != "" {
+				dels = strings.Split(dv, ",")
+			}
+			for _, k := range dels {
+				k = strings.TrimSpace(k)
+				if k == "" {
+					continue
 				}
+				if _, setting := r.PostForm[k]; setting {
+					s.mu.Unlock()
+					writeErr(w, http.StatusBadRequest,
+						"Parameter verification failed.\n")
+					return
+				}
+				delete(rec.Config, k)
+			}
+			for k, vs := range r.PostForm {
+				if k == "delete" || len(vs) == 0 {
+					continue
+				}
+				// PVE 9.2 realism (M12, probe-verified): writing the
+				// CREATE form of a storage-backed volume ("<pool>:cloudinit"
+				// / "<pool>:<size>") over a slot that already holds a live
+				// volume makes the config task fail with
+				// "lvcreate ... already exists". The clone path must never
+				// restate an inherited cloud-init drive; the mock enforces
+				// that so e2e tests catch the regression.
+				if isCreateFormVolume(vs[0]) && hasLiveVolume(rec.Config[k]) {
+					s.mu.Unlock()
+					writeErr(w, http.StatusInternalServerError,
+						"lvcreate error: volume already exists\n")
+					return
+				}
+				rec.Config[k] = vs[0]
 			}
 			s.objs[node][id] = rec
 			upid := s.newTaskLocked(node, "update")
@@ -888,30 +1001,43 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 
 	case "clone":
-		// PVE clone: POST /{qemu|lxc}/{id}/clone with newid. PVE 9.2
-		// supports both; M11 pins the qemu path (qemu templates are the
-		// proxops TemplateVM clone source). The mock preserves the
-		// source kind for the clone target (a PVE clone of a qm is a qm,
-		// of a ct is a ct).
+		// PVE clone: POST /{qemu|lxc}/{id}/clone with newid. M12 pins the
+		// qemu path (qemu templates are the proxops TemplateVM clone
+		// source). The mock mirrors PVE 9.2.2 clone semantics probed on
+		// conformance-dev:
+		//   - the destination keeps the SOURCE KIND (a qm clone is a qm);
+		//   - the template flag is NOT inherited (a clone is a normal VM);
+		//   - `name=` sets the destination name (PVE does not copy the
+		//     source's name);
+		//   - `start=` is REJECTED ("property is not defined in schema");
+		//   - an existing destination id fails with 500 "config file
+		//     already exists" (PVE's real shape, not 409);
+		//   - full=1 allocates fresh volumes named vm-<newid>-disk-N and a
+		//     fresh cloudinit volume, and PVE regenerates the MAC.
 		if r.Method != http.MethodPost {
 			writeErr(w, http.StatusMethodNotAllowed, "clone is a POST")
 			return
 		}
 		_ = r.ParseForm()
+		if r.PostForm.Get("start") != "" {
+			writeErr(w, http.StatusBadRequest,
+				"Parameter verification failed.\n")
+			return
+		}
 		newidStr := r.PostFormValue("newid")
 		newid, err2 := strconv.Atoi(newidStr)
 		if err2 != nil || newid <= 0 {
 			writeErr(w, http.StatusBadRequest, "newid required")
 			return
 		}
-		full := r.PostFormValue("full") == "1"
 		s.mu.Lock()
 		if s.objs[node] == nil {
 			s.objs[node] = map[int]VM{}
 		}
 		if _, busy := s.objs[node][newid]; busy {
 			s.mu.Unlock()
-			writeErr(w, http.StatusConflict, "vm id "+strconv.Itoa(newid)+" already exists")
+			writeErr(w, http.StatusInternalServerError,
+				"unable to create VM "+strconv.Itoa(newid)+": config file already exists\n")
 			return
 		}
 		src := s.objs[node][id]
@@ -919,24 +1045,34 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 		for k, v := range src.Config {
 			outCfg[k] = v
 		}
-		// PVE clones preserve "name"? They do not. The destination gets
-		// a PVE-picked name. We set it to the destination's "name" form param.
+		// A clone is a normal VM: the template flag never carries over.
+		delete(outCfg, "template")
+		// PVE does not copy the source name; the clone's name= wins.
 		delete(outCfg, "name")
-		for k, vs := range r.PostForm {
-			if k == "newid" || k == "full" {
-				continue
-			}
-			if len(vs) > 0 {
-				outCfg[k] = vs[0]
+		if nm := r.PostFormValue("name"); nm != "" {
+			outCfg["name"] = nm
+		}
+		// Full clone: fresh per-vmid volume names + regenerated MAC.
+		for k, v := range outCfg {
+			switch {
+			case strings.HasPrefix(k, "scsi") || strings.HasPrefix(k, "virtio") || strings.HasPrefix(k, "sata"):
+				outCfg[k] = renameCloneVolume(v, id, newid)
+			case strings.HasPrefix(k, "ide") || k == "efidisk0" || k == "tpm0":
+				outCfg[k] = renameCloneVolume(v, id, newid)
+			case strings.HasPrefix(k, "net"):
+				outCfg[k] = regenCloneMAC(v, newid)
 			}
 		}
-		// full=true forces "full" in PVE; mock just sets nothing.
-		_ = full
-		s.objs[node][newid] = VM{ID: newid, Kind: "lxc", Config: outCfg, Status: "stopped"}
+		kind := src.Kind
+		if kind == "" {
+			kind = "qemu"
+		}
+		s.objs[node][newid] = VM{ID: newid, Kind: kind, Config: outCfg, Status: "stopped"}
 		upid := s.newTaskLocked(node, "clone")
 		s.cloned++
 		s.mu.Unlock()
 		writeOK(w, upid)
+		return
 
 	case "start":
 		s.power(w, r, node, id, "start")

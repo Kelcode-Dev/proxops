@@ -1,6 +1,9 @@
 package schema
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // TemplateVM is a PVE qemu object that has been promoted to a template
 // (PVE `template=1`). It is a first-class proxops kind as of M11.
@@ -44,13 +47,13 @@ import "fmt"
 //     apply. proxops's Drift treats the sentinel as "PVE owns live
 //     sshkeys — do not write", so round-trips are stable.
 //
-// Dependency semantics: a TemplateVM's only proxops-side edge is the
-// inherited VM cdrom.iso edge (to an ISO). proxops does NOT model a
-// "VM clones TemplateVM" edge in M11 — VMs are never created by PVE clone
-// from a proxops TemplateVM (a VM manifest describes a fresh VM, disks
-// allocated by PVE at create, which is the proxops guarantee against
-// data loss: a clone would re-create the template's own disk on first
-// apply → the exact data-loss shape M10's adopt guards against).
+// Dependency semantics: a TemplateVM's own outgoing edge is the inherited
+// VM cdrom.iso edge (to an ISO). The reverse edge — a VM cloning this
+// TemplateVM — is modelled on the VM side (VM.spec.clone → TemplateVM, M12):
+// the clone is a full clone, so the VM inherits the template's disk layout
+// and a clone-backed VM declares no spec.disks (the data-loss guarantee is
+// preserved by never re-stating a disk over a cloned live volume). See
+// docs/SCHEMA.md § "Provisioning a VM from a TemplateVM".
 
 // TemplateVM is a schema.Resource for Kind=TemplateVM, embedding a VM to
 // reuse the PVE wire surface. The ",inline" yaml tag is required so
@@ -81,8 +84,15 @@ func (t *TemplateVM) Ref() Ref { return Ref{Kind: t.Kind, Name: t.Metadata.Name}
 func (t *TemplateVM) DesiredState() string { return "stopped" }
 
 // Validate delegates to VM.Validate for the shared wire surface, then
-// enforces the TemplateVM-only rule: state must be absent or "stopped".
+// enforces the TemplateVM-only rules: state must be absent or "stopped",
+// and spec.clone is not allowed (a template is a clone SOURCE, never a
+// target). The clone check runs FIRST because the embedded VM.Validate's
+// clone rules (disks must be empty when cloning) would otherwise mask the
+// clearer TemplateVM-specific message.
 func (t *TemplateVM) Validate() error {
+	if strings.TrimSpace(t.Spec.Clone) != "" {
+		return fmt.Errorf("%s: spec.clone is not allowed on a TemplateVM (templates are clone sources, not clone targets)", t.Ref())
+	}
 	if err := t.VM.Validate(); err != nil {
 		return err
 	}
@@ -95,4 +105,24 @@ func (t *TemplateVM) Validate() error {
 	return nil
 }
 
-// Deps is inherited from the embedded VM (inherited cdrom.iso → ISO edge).
+// Deps overrides the embedded VM.Deps: a TemplateVM is a clone SOURCE, never
+// a clone target, so the VM→TemplateVM edge (M12) must not appear here even
+// though the embedded struct promotes Deps() unchanged. (Validate rejects
+// spec.clone on a TemplateVM, so the edge could only come from a manifest
+// that never reaches the planner — this override is the belt-and-braces
+// version of that guarantee.)
+func (t *TemplateVM) Deps() []Ref {
+	if strings.TrimSpace(t.Spec.Clone) == "" {
+		return t.VM.Deps()
+	}
+	var refs []Ref
+	if iso := strings.TrimSpace(t.Spec.Hardware.Cdrom.Iso); iso != "" && iso != CDROMNone {
+		refs = append(refs, Ref{Kind: KindISO, Name: iso})
+	}
+	for _, d := range t.Spec.Disks {
+		if img := strings.TrimSpace(d.Image); img != "" {
+			refs = append(refs, Ref{Kind: KindDiskImage, Name: img})
+		}
+	}
+	return refs
+}
