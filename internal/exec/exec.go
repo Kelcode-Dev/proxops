@@ -347,6 +347,26 @@ func (e *Executor) create(ctx context.Context, a plan.Action) (string, error) {
 			return mupid, fmt.Errorf("create template-mark: %w (created VM left un-marked)", mErr)
 		}
 		return mupid, nil
+	case schema.KindTemplateCT:
+		// M13: create a CT at the pinned cid, then mark it as a template.
+		// PVE's POST /lxc/{id}/template responds synchronously with a NULL
+		// data (no UPID — probe-verified PVE 9.2.2); waitTask("") is a
+		// no-op, so the mark success is reported directly. DesiredPower is
+		// always "stopped" for a TemplateCT.
+		v := toValues(a.Params)
+		upid, cErr := e.client.LXC().Create(ctx, a.Node, v, false)
+		if cErr != nil {
+			return upid, cErr
+		}
+		waitErr := e.waitTask(ctx, a.Node, upid)
+		if waitErr != nil {
+			return upid, waitErr
+		}
+		mupid, mErr := e.client.LXC().MarkTemplate(ctx, a.Node, a.ID)
+		if mErr != nil {
+			return mupid, fmt.Errorf("create template-mark: %w (created CT left un-marked)", mErr)
+		}
+		return mupid, nil
 	default:
 		// M12: a clone-backed VM create is a PVE full clone from the
 		// planner-resolved TemplateVM vmid, not a fresh POST /qemu. The
@@ -421,12 +441,20 @@ func (e *Executor) cloneCreate(ctx context.Context, a plan.Action) (string, erro
 	return cupid, nil
 }
 
-// markTemplate performs a PVE-side VM template-mark for an already-existing
-// qemu object (M11 desired TemplateVM vs. live proxops-created VM that
-// is not yet PVE-templatel). PVE 9.2's mark endpoint is POST-only;
-// there is no untemplate endpoint (501 "not implemented", probed
-// conformance-dev 2026-09-11).
+// markTemplate performs a PVE-side template-mark for an already-existing
+// qemu VM or lxc CT (M11 desired TemplateVM / M13 desired TemplateCT vs. a
+// live proxops-created object that is not yet PVE-templated). PVE 9.2's mark
+// endpoints are POST-only; there is no untemplate endpoint on either kind
+// (501 "not implemented", probed conformance-dev 2026-09-11 / 2026-10-14).
+// The LXC mark responds synchronously with a NULL data (no UPID).
 func (e *Executor) markTemplate(ctx context.Context, a plan.Action) (string, error) {
+	if a.Kind == schema.KindTemplateCT || a.Kind == schema.KindLXC {
+		upid, err := e.client.LXC().MarkTemplate(ctx, a.Node, a.ID)
+		if err != nil {
+			return upid, fmt.Errorf("%s: mark-template: %w", a.Ref, err)
+		}
+		return upid, nil
+	}
 	upid, err := e.client.VM().MarkTemplate(ctx, a.Node, a.ID)
 	if err != nil {
 		return upid, fmt.Errorf("%s: mark-template: %w", a.Ref, err)

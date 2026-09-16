@@ -512,6 +512,16 @@ func newResource(doc map[string]any) (schema.Resource, error) {
 			return nil, err
 		}
 		return tv, nil
+	// M13: TemplateCT — a PVE lxc object marked as a template. Shares the
+	// wire surface of an LXC (schema.TemplateCT embeds schema.LXC) but has
+	// its own kind + lifecycle (create+mark, no start, no untemplate on
+	// PVE 9.2).
+	case schema.KindTemplateCT:
+		t := schema.NewTemplateCT()
+		if err := docTo(t, doc); err != nil {
+			return nil, err
+		}
+		return t, nil
 	default:
 		return nil, fmt.Errorf("unknown kind %q", kindRaw)
 	}
@@ -540,6 +550,9 @@ func metadataOf(r schema.Resource) *schema.Metadata {
 		return &v.Metadata
 	// M11: TemplateVM embeds schema.VM, so &v.Metadata works via promotion.
 	case *schema.TemplateVM:
+		return &v.Metadata
+	// M13: TemplateCT embeds schema.LXC (same promotion trick).
+	case *schema.TemplateCT:
 		return &v.Metadata
 	default:
 		return &schema.Metadata{}

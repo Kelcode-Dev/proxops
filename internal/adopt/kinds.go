@@ -3,7 +3,6 @@ package adopt
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
@@ -327,7 +326,8 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 }
 
 // adoptLXC reads one LXC's /config and writes a single proxops manifest
-// under lxc/<cluster>/.
+// under lxc/<cluster>/. A PVE CT reporting template=1 is routed to
+// adoptTemplateCT (M13) and produces a templatect/<cluster>/ manifest.
 func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.LXCListEntry) error {
 	cfg, gErr := ac.pve.LXC().Get(ctx, node, e.CID)
 	if gErr != nil {
@@ -337,6 +337,29 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 	for k, v := range cfg {
 		raw[k] = v
 	}
+
+	// M13: a PVE-promoted CT (template=1) reverse-translates to the
+	// TemplateCT kind, mirroring adoptVM's TemplateVM routing (M11).
+	if pveTemplateValue(raw["template"]) {
+		return ac.adoptTemplateCT(ctx, node, e, raw)
+	}
+	return ac.writeLXCManifest(ctx, node, e, raw, schema.KindLXC)
+}
+
+// adoptTemplateCT writes the TemplateCT manifest for a promoted CT (M13).
+// The owned-field surface is identical to an LXC (TemplateCT embeds LXC);
+// the manifest is written under templatect/<cluster>/ and carries the
+// template=1 gap note (PVE does not persist the ostemplate a CT was
+// created from, so spec.template needs a human — same contract as LXC).
+func (ac *adoptContext) adoptTemplateCT(ctx context.Context, node string, e pveclient.LXCListEntry, raw map[string]any) error {
+	return ac.writeLXCManifest(ctx, node, e, raw, schema.KindTemplateCT)
+}
+
+// writeLXCManifest is the shared reverse-translation body for kind=LXC and
+// kind=TemplateCT (M13). kind selects the manifest root + gap attribution;
+// everything else (owned fields, bind mounts, gaps) is identical because
+// TemplateCT embeds LXC on the wire.
+func (ac *adoptContext) writeLXCManifest(ctx context.Context, node string, e pveclient.LXCListEntry, raw map[string]any, kind schema.Kind) error {
 
 	lxc := schema.NewLXC()
 	lxc.Metadata.Name = nameForPVE(pveStr(raw["hostname"]), e.CID, "ct")
@@ -374,7 +397,7 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 			// provide: fail closed — a manifest with an unknown size would
 			// risk data loss on the first apply.
 			ac.res.Gaps = append(ac.res.Gaps, Gap{
-				Kind:  schema.KindLXC,
+				Kind:  kind,
 				Node:  node,
 				ID:    e.CID,
 				Field: "spec.root.size / spec.mount-points",
@@ -416,7 +439,7 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 			// see Result.Incomplete.
 			lxc.Spec.Root.Size = ""
 			ac.res.Gaps = append(ac.res.Gaps, Gap{
-				Kind:  schema.KindLXC,
+				Kind:  kind,
 				Node:  node,
 				ID:    e.CID,
 				Field: "spec.root.size",
@@ -448,7 +471,7 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 				mp.Size = s
 			} else {
 				ac.res.Gaps = append(ac.res.Gaps, Gap{
-					Kind:  schema.KindLXC,
+					Kind:  kind,
 					Node:  node,
 					ID:    e.CID,
 					Field: "spec.mount-points[" + slot + "].size",
@@ -460,21 +483,26 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 		}
 	}
 	lxc.Spec.MountPoints = mps
-	// Bind mounts: PVE reports host-path bind mp's ("mpN=/host:path") that
-	// proxops does not model (docs/GAPS.md: LXC bind-mount mpN). They
-	// never appear in spec.mount-points, so surface them explicitly as a
-	// gap (the LXCKeyIsDynamic check would otherwise silently drop them).
-	for _, slot := range mpslots(raw) {
-		if v, ok := raw[slot].(string); ok && strings.HasPrefix(strings.TrimSpace(v), "/") {
+	// Bind mounts (M13): PVE reports host-path bind mp's ("mpN=<host>,mp=
+	// <guest>" or the legacy "mpN=<host>:<guest>"). These are now a
+	// first-class declarative shape (spec.bind-mounts), so adopt writes them
+	// into the manifest. A bind whose host path is a system-critical
+	// directory (which proxops's Validate refuses to declare) is surfaced as
+	// a gap instead, so the operator reconciles it deliberately.
+	for _, bm := range schema.PveLXCBindMountsFromPVE(raw) {
+		b := schema.LXCBinding{Slot: bm.Slot, HostPath: bm.HostPath, MountPoint: bm.MountPoint, ReadOnly: bm.ReadOnly}
+		if b.HostPath == "" || !strings.HasPrefix(b.HostPath, "/") || b.MountPoint == "" || !strings.HasPrefix(b.MountPoint, "/") {
 			ac.res.Gaps = append(ac.res.Gaps, Gap{
-				Kind:  schema.KindLXC,
+				Kind:  kind,
 				Node:  node,
 				ID:    e.CID,
-				Field: slot,
-				Value: redactGapValue(slot, v),
-				Note:  "LXC mount-point is a host-path bind mount; proxops does not model bind mpN (docs/GAPS.md). Remove/re-host this bind on PVE before listing the LXC in resources.yaml, or add an explicit bind-mount shape to the schema.",
+				Field: bm.Slot,
+				Value: redactGapValue(bm.Slot, bm.Raw),
+				Note:  "LXC mount-point is a host-path bind mount in a shape proxops could not parse into spec.bind-mounts (host + guest path both required); reconcile on PVE after review",
 			})
+			continue
 		}
+		lxc.Spec.BindMounts = append(lxc.Spec.BindMounts, b)
 	}
 
 	// networks.
@@ -522,7 +550,7 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 			lxc.Spec.Template = tplName
 		} else {
 			ac.res.Gaps = append(ac.res.Gaps, Gap{
-				Kind:  schema.KindLXC,
+				Kind:  kind,
 				Node:  node,
 				ID:    e.CID,
 				Field: "spec.template",
@@ -532,7 +560,7 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 		}
 	} else {
 		ac.res.Gaps = append(ac.res.Gaps, Gap{
-			Kind:  schema.KindLXC,
+			Kind:  kind,
 			Node:  node,
 			ID:    e.CID,
 			Field: "spec.template",
@@ -544,7 +572,17 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 	// state.
 	lxc.Spec.State = pveStatusToState(e.Status)
 
-	if wErr := ac.writeManifest(schema.KindLXC, lxc, lxc.Metadata.Name); wErr != nil {
+	// Write the manifest under the routed kind root. A TemplateCT shares the
+	// LXC wire surface, so the same populated struct is wrapped in the
+	// TemplateCT resource (embedded LXC) before marshalling.
+	var doc any = lxc
+	if kind == schema.KindTemplateCT {
+		t := schema.NewTemplateCT()
+		t.LXC = *lxc
+		t.Kind = schema.KindTemplateCT
+		doc = t
+	}
+	if wErr := ac.writeManifest(kind, doc, lxc.Metadata.Name); wErr != nil {
 		return wErr
 	}
 
@@ -561,33 +599,16 @@ func (ac *adoptContext) adoptLXC(ctx context.Context, node string, e pveclient.L
 		if LXCKeyIsDynamic(k) {
 			continue
 		}
-		gap := Gap{Kind: schema.KindLXC, Node: node, ID: e.CID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE LXC config proxops does not model; not represented in the generated manifest")}
+		// M13: "template" = "1" is owned by the TemplateCT kind itself (the
+		// manifest's kind IS the template flag), so it is not a gap there.
+		if k == "template" && kind == schema.KindTemplateCT {
+			continue
+		}
+		gap := Gap{Kind: kind, Node: node, ID: e.CID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE LXC config proxops does not model; not represented in the generated manifest")}
 		gaps = append(gaps, gap)
 	}
 	ac.res.Gaps = append(ac.res.Gaps, gaps...)
 	return nil
-}
-
-// mpslots returns the mp* slot keys present in a PVE LXC /config report,
-// in deterministic (slot-sort) order.
-func mpslots(raw map[string]any) []string {
-	out := []string{}
-	for k := range raw {
-		if len(k) > 2 && k[:2] == "mp" {
-			isSlot := true
-			for _, c := range k[2:] {
-				if c < '0' || c > '9' {
-					isSlot = false
-					break
-				}
-			}
-			if isSlot {
-				out = append(out, k)
-			}
-		}
-	}
-	sort.Strings(out)
-	return out
 }
 
 // pveStatusToState maps PVE's live power state to proxops's desired-state

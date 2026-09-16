@@ -16,7 +16,7 @@ func TestExamplesDirParses(t *testing.T) {
 		t.Fatalf("BuildClusterIndex: %v", err)
 	}
 	got := len(idx.List())
-	if want := 9; got != want {
+	if want := 10; got != want {
 		t.Fatalf("parsed %d resources for cluster example/, want %d", got, want)
 	}
 }

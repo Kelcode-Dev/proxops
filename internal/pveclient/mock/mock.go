@@ -66,7 +66,7 @@ type Server struct {
 	tasks            map[string]*task
 	taskSeq          int
 
-	created, updated, deleted, cloned, tpl, untpl, isl, tdl int
+	created, updated, deleted, cloned, tpl, isl, tdl int
 
 	// downloadFail makes POST /storage/{s}/download return HTTP 500 so a test
 	// can exercise the executor's in-cycle dependency deferral (failed
@@ -737,9 +737,10 @@ func regenCloneMAC(val string, dst int) string {
 }
 
 func normalizePVEDrive(id int, key, val string) string {
-	// Only real disk slots (scsiN/virtioN/sataN) get PVE's volume-name +
+	// Only real disk slots (scsiN/virtioN/sataN/ideN) get PVE's volume-name +
 	// size normalization; cdrom/cloudinit values are reported verbatim.
-	if !strings.HasPrefix(key, "scsi") && !strings.HasPrefix(key, "virtio") && !strings.HasPrefix(key, "sata") {
+	if !strings.HasPrefix(key, "scsi") && !strings.HasPrefix(key, "virtio") &&
+		!strings.HasPrefix(key, "sata") && !strings.HasPrefix(key, "ide") {
 		return val
 	}
 	ci := strings.IndexByte(val, ':')
@@ -748,17 +749,51 @@ func normalizePVEDrive(id int, key, val string) string {
 	}
 	pool, rest := val[:ci], val[ci+1:]
 	// import-from create form: "<pool>:0,import-from=<volid>[,opts...]".
-	if !strings.HasPrefix(rest, "0,import-from=") {
-		return val
+	if strings.HasPrefix(rest, "0,import-from=") {
+		tail := rest[len("0,import-from="):]
+		opts := ""
+		// The volid itself may contain ':' (storage:import path) but never a ',',
+		// so the first ',' after import-from= starts the option list.
+		if j := strings.IndexByte(tail, ','); j >= 0 {
+			opts = tail[j:]
+		}
+		return pool + ":vm-" + strconv.Itoa(id) + "-disk-0,size=3G" + opts
 	}
-	tail := rest[len("0,import-from="):]
+	// Plain allocation create form "<pool>:<GiB>[,opts...]" (probe-verified
+	// PVE 9.2.2): PVE allocates a volume and REWRITES the report to
+	// "<pool>:vm-<id>-disk-<n>[,opts...],size=<binary>". The option tokens
+	// (iothread/discard/ssd/aio) are preserved; the size token is appended
+	// in binary-suffix form. This is what makes the mock exercise proxops's
+	// live-form rewrite path (which needs a volume name to preserve).
+	head := rest
 	opts := ""
-	// The volid itself may contain ':' (storage:import path) but never a ',',
-	// so the first ',' after import-from= starts the option list.
-	if j := strings.IndexByte(tail, ','); j >= 0 {
-		opts = tail[j:]
+	if j := strings.IndexByte(head, ','); j >= 0 {
+		opts = head[j:]
+		head = head[:j]
 	}
-	return pool + ":vm-" + strconv.Itoa(id) + "-disk-0,size=3G" + opts
+	if !isNumericGiB(head) {
+		return val // already a live/report form — leave verbatim
+	}
+	return pool + ":vm-" + strconv.Itoa(id) + "-disk-0" + opts + ",size=" + head + "G"
+}
+
+// isNumericGiB reports whether s is a bare (fractional) GiB number, the
+// create-form allocation token PVE rewrites into a volume name + size.
+func isNumericGiB(s string) bool {
+	if s == "" {
+		return false
+	}
+	dots := 0
+	for _, c := range s {
+		if c == '.' {
+			dots++
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return dots <= 1
 }
 
 // objectRoute handles /nodes/{n}/{qemu|lxc}/[id[/action]].
@@ -964,7 +999,28 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 			}
 			rec.Config["template"] = "1"
 			rec.Status = "stopped"
+			// PVE 9.2.2 (probe-verified): promoting an LXC RENAMES its
+			// rootfs volume from "vm-<id>-disk-0" to "base-<id>-disk-0"
+			// (the qm path renames disks the same way). proxops never
+			// compares volume names, so this is fidelity-only.
+			if rec.Kind == "lxc" {
+				if rf, ok := rec.Config["rootfs"]; ok {
+					rec.Config["rootfs"] = strings.Replace(rf,
+						"vm-"+strconv.Itoa(id)+"-disk-",
+						"base-"+strconv.Itoa(id)+"-disk-", 1)
+				}
+			}
 			s.objs[node][id] = rec
+			// PVE 9.2.2 wire asymmetry (probe-verified): the qm mark
+			// returns a task UPID; the lxc mark is SYNCHRONOUS with a NULL
+			// data response (no UPID). Mirror both so proxops's executor
+			// (which treats an empty UPID as immediate success) is honest.
+			if rec.Kind == "lxc" {
+				s.tpl++
+				s.mu.Unlock()
+				writeOK(w, nil)
+				return
+			}
 			upid := s.newTaskLocked(node, "template")
 			s.tpl++
 			s.mu.Unlock()
@@ -974,31 +1030,16 @@ func (s *Server) objectRoute(w http.ResponseWriter, r *http.Request, node, kind,
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 
 	case "untemplate":
-		// PVE 9.2 wire (M11 probe 2026-09-11, conformance-dev VM 9100):
-		//   - /lxc/{id}/untemplate  -> 200 + UPID
-		//   - /qemu/{id}/untemplate -> HTTP 501 "not implemented"
-		// The mock mirrors PVE 9.2 exactly: LXC untemplates, qemUs
-		// reject. This locks e2e tests that pin proxops's
-		// fail-closed VM<->TemplateVM mismatch rule in plan.PlanActions.
-		if kindStr != "lxc" {
-			writeErr(w, http.StatusNotImplemented,
-				"Method '"+r.Method+" /nodes/"+node+"/"+kindStr+"/"+strconv.Itoa(id)+"/untemplate' not implemented")
-			return
-		}
-		if r.Method == http.MethodPost || r.Method == http.MethodDelete {
-			s.mu.Lock()
-			rec := s.objs[node][id]
-			if rec.Config != nil {
-				delete(rec.Config, "template")
-			}
-			s.objs[node][id] = rec
-			upid := s.newTaskLocked(node, "untemplate")
-			s.untpl++
-			s.mu.Unlock()
-			writeOK(w, upid)
-			return
-		}
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		// PVE 9.2 wire (M11 probe 2026-09-11 qemu; M13 probe 2026-10-14
+		// lxc, conformance-dev): BOTH /qemu/{id}/untemplate AND
+		// /lxc/{id}/untemplate return HTTP 501 "not implemented". There is
+		// no demotion endpoint on either kind. The mock mirrors PVE 9.2
+		// exactly. This locks e2e tests that pin proxops's fail-closed
+		// VM<->TemplateVM and LXC<->TemplateCT mismatch rules in
+		// plan.PlanActions.
+		writeErr(w, http.StatusNotImplemented,
+			"Method '"+r.Method+" /nodes/"+node+"/"+kindStr+"/"+strconv.Itoa(id)+"/untemplate' not implemented")
+		return
 
 	case "clone":
 		// PVE clone: POST /{qemu|lxc}/{id}/clone with newid. M12 pins the

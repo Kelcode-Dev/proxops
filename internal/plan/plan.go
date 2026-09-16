@@ -216,6 +216,23 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 			}
 		}
 
+		// M13: desired TemplateCT whose live PVE object exists as a
+		// non-template CT -> emit MarkTemplate (POST /lxc/{id}/template;
+		// synchronous null response, handled by the executor).
+		if kt == schema.KindTemplateCT && !present {
+			ctKey := liveKey(r.Node(), schema.KindLXC, r.ID())
+			if live.Configs[ctKey] != nil {
+				p.Actions = append(p.Actions, Action{
+					Tier: 0, Kind: kt, Name: ref.Name, Node: r.Node(), ID: r.ID(),
+					What: MarkTemplate, Level: levels(ref), Ref: ref,
+					Reason:    ref.String() + ": PVE object present but not a template; will mark as template",
+					Deps:      depsFor(ref),
+					LivePower: live.Power[ctKey], DesiredPower: r.DesiredState(),
+				})
+				continue
+			}
+		}
+
 		if !present {
 			params, err := r.ToCreateParams()
 			if err != nil {
@@ -265,6 +282,20 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 				// operator either switches the manifest to kind: TemplateVM
 				// (M11), or demotes the PVE object manually.
 				Reason: ref.String() + ": live PVE object is a template (template=1); a proxops VM manifest cannot be applied to a PVE template and PVE 9.2 has no /qemu/{id}/untemplate - change the manifest to kind: TemplateVM (or demote the PVE object by hand)",
+			})
+			continue
+		}
+
+		// M13: desired proxops LXC whose live PVE object is a PVE-side
+		// template CT: same rule as the VM case — no untemplate endpoint
+		// exists (probe-verified 501), so surface a non-destructive anomaly
+		// instead of writing config onto a clone source.
+		if kt == schema.KindLXC && isPVETemplate(cfg) {
+			p.Anomalies = append(p.Anomalies, Action{
+				Tier: 0, Kind: kt, Name: ref.Name, Node: r.Node(), ID: r.ID(),
+				What: Anomaly, Level: levels(ref), Ref: ref,
+				Anomaly: true,
+				Reason:  ref.String() + ": live PVE object is a template (template=1); a proxops LXC manifest cannot be applied to a PVE template and PVE 9.2 has no /lxc/{id}/untemplate - change the manifest to kind: TemplateCT (or demote the PVE object by hand)",
 			})
 			continue
 		}
@@ -354,8 +385,12 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		// M11: a TemplateVM and a VM share PVE's per-qm-id space. Register BOTH
 		// so the prune pass (normalizes qm->KindVM) never prunes a desired
 		// TemplateVM; a desired VM is recognised against a live template.
+		// M13: same rule for TemplateCT/LXC on the per-lxc-id space.
 		if kind == schema.KindTemplateVM {
 			desiredSet[liveKey(r.Node(), schema.KindVM, r.ID())] = true
+		}
+		if kind == schema.KindTemplateCT {
+			desiredSet[liveKey(r.Node(), schema.KindLXC, r.ID())] = true
 		}
 	}
 
@@ -406,6 +441,10 @@ func PlanActions(ctx context.Context, desired []schema.Resource, live *LiveInven
 		// M11: a live PVE-side template whose PVE id is claimed by a desired
 		// TemplateVM manifest is NOT a prune candidate.
 		if isPVETemplate(cfg) && desiredTemplateVM(desired, res.Node, res.Vmid) {
+			continue
+		}
+		// M13: same rule for a desired TemplateCT claiming a live template CT.
+		if isPVETemplate(cfg) && desiredTemplateCT(desired, res.Node, res.Vmid) {
 			continue
 		}
 		pruneCandidates = append(pruneCandidates, Action{
@@ -576,6 +615,11 @@ func LoadLive(ctx context.Context, c *pveclient.Client, desired []schema.Resourc
 			inv.Configs[keyFor(res.Node, kind, res.Vmid)] = cfg
 			if st, sErr := c.LXC().Status(ctx, res.Node, res.Vmid); sErr == nil {
 				inv.Power[keyFor(res.Node, kind, res.Vmid)] = normalizePower(st.Status)
+			}
+			// M13: PVE lxc object reporting template=1 -> also key under
+			// TemplateCT so a desired TemplateCT finds its live config.
+			if isPVETemplate(cfg) {
+				inv.Configs[keyFor(res.Node, schema.KindTemplateCT, res.Vmid)] = cfg
 			}
 		}
 	}
@@ -835,6 +879,20 @@ func isPVETemplate(cfg map[string]any) bool {
 func desiredTemplateVM(desired []schema.Resource, node string, id int) bool {
 	for _, r := range desired {
 		if r.Ref().Kind != schema.KindTemplateVM {
+			continue
+		}
+		if r.Node() == node && r.ID() == id {
+			return true
+		}
+	}
+	return false
+}
+
+// M13: desiredTemplateCT reports whether a desired TemplateCT manifest claims
+// the PVE CT id on the given node (prune-safe guard).
+func desiredTemplateCT(desired []schema.Resource, node string, id int) bool {
+	for _, r := range desired {
+		if r.Ref().Kind != schema.KindTemplateCT {
 			continue
 		}
 		if r.Node() == node && r.ID() == id {

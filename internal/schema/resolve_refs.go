@@ -58,6 +58,13 @@ func ResolveArtifactRefs(resources []Resource) error {
 			if err := v.resolveDiskImages(byRef); err != nil {
 				return err
 			}
+		case *TemplateCT:
+			// M13: a TemplateCT re-uses the LXC surface (embedded), so the
+			// spec.template → CTTemplate artifact edge resolves exactly like
+			// an LXC's. Route it explicitly through the LXC helper.
+			if err := v.resolveTemplate(byRef); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

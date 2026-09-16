@@ -46,6 +46,23 @@ type Disk struct {
 	Controller string `yaml:"controller,omitempty" json:"controller,omitempty"`
 	// IOThread requests a dedicated I/O thread for this disk.
 	IOThread bool `yaml:"iothread,omitempty" json:"iothread,omitempty"`
+	// Discard is PVE's drive `discard=` option: "ignore" | "on" (TRIM/
+	// discard passthrough). "" = not owned (proxops does not send the token
+	// and does not drift against a live value). Probe-verified PVE 9.2.2:
+	// accepted inline on every bus (scsi/virtio/sata/ide), toggled in place
+	// on stopped AND running VMs via the live drive form.
+	Discard string `yaml:"discard,omitempty" json:"discard,omitempty"`
+	// SSD is PVE's drive `ssd=` option (1|0): advertise an SSD to the guest.
+	// nil = not owned. Probe-verified PVE 9.2.2: accepted inline on
+	// scsi/sata/ide ONLY — virtio (and nvme) REJECT the token ("property is
+	// not defined in schema"), so Validate fails closed on those buses.
+	// PVE retains an explicit `ssd=0` in the report, so the tri-state is
+	// needed to distinguish "not owned" from "pinned off".
+	SSD *bool `yaml:"ssd,omitempty" json:"ssd,omitempty"`
+	// AIO is PVE's drive `aio=` option: "native" | "threads" | "io_uring".
+	// "" = not owned. Probe-verified PVE 9.2.2: accepted inline on every
+	// bus, toggled in place via the live drive form.
+	AIO string `yaml:"aio,omitempty" json:"aio,omitempty"`
 
 	// imageVolid holds the resolved DiskImage PVE volume id
 	// ("<storage>:import/<filename>") after ResolveArtifactRefs; "" before.
@@ -98,12 +115,23 @@ type EFIDisk struct {
 	// Size is the EFI vars volume size, e.g. "4MiB".
 	Size string `yaml:"size" json:"size"`
 	// Template pins an OVMF vars template ("byos", "2m", "4m", "8m").
+	// PVE reports it as the `efitype=` token on efidisk0.
 	Template string `yaml:"template,omitempty" json:"template,omitempty"`
-	// SecureBoot pins Secure Boot behaviour: "required" | "optional" | "disabled".
-	// PVE 9.2's /config create API does not accept this form-value — PVE
-	// manages Secure Boot policy through its separate `/qemu/{id}/security`
-	// endpoint. The declarative field is recorded and validated but not
-	// sent on the wire.
+	// SecureBoot enables/disables Secure Boot key pre-enrollment:
+	// "enabled" | "disabled" ("" = not owned → proxops does not send the
+	// token and does not drift against a live value).
+	//
+	// M13 (probe-verified on conformance-dev, PVE 9.2.2): the earlier
+	// assumption of a separate `/qemu/{id}/security` endpoint is FALSE —
+	// that endpoint returns HTTP 501 (not implemented) on GET/PUT/POST, and
+	// a `secure-boot=` token is rejected (400) both inline on efidisk0 and
+	// top-level. The real wire form is the `pre-enrolled-keys=<0|1>` token
+	// on efidisk0: "enabled" → pre-enrolled-keys=1, "disabled" → =0. PVE
+	// additionally auto-adds an `ms-cert=<2011|2023|2023k|2023w>` token to
+	// the report when keys are pre-enrolled; proxops treats ms-cert as
+	// PVE-owned (preserved verbatim on live-form rewrites, never compared).
+	// The toggle converges in place on stopped AND running VMs (enrollment
+	// takes effect at the next boot).
 	SecureBoot string `yaml:"secure-boot,omitempty" json:"secure-boot,omitempty"`
 }
 
@@ -476,6 +504,24 @@ func (v *VM) Validate() error {
 			return fmt.Errorf("%s: spec.disks[%d] slot %q is not a valid PVE disk slot (use scsi0, virtio0, sata0, ...)", v.Ref(), i, slot)
 		}
 		d.Slot = slot
+		// M13 drive options (probe-verified PVE 9.2.2, conformance-dev):
+		// discard/aio are accepted on every bus; ssd is accepted ONLY on
+		// scsi/sata/ide — PVE's virtio (and nvme) drive schema rejects the
+		// token with "property is not defined in schema", so fail closed at
+		// validation instead of submitting a create/update that 400s.
+		switch strings.ToLower(d.Discard) {
+		case "", "ignore", "on":
+		default:
+			return fmt.Errorf("%s: spec.disks[%d].discard %q must be 'ignore' or 'on' (PVE 9.2)", v.Ref(), i, d.Discard)
+		}
+		switch strings.ToLower(d.AIO) {
+		case "", "native", "threads", "io_uring":
+		default:
+			return fmt.Errorf("%s: spec.disks[%d].aio %q must be 'native', 'threads' or 'io_uring' (PVE 9.2)", v.Ref(), i, d.AIO)
+		}
+		if d.SSD != nil && !diskBusSupportsSSD(slot) {
+			return fmt.Errorf("%s: spec.disks[%d].ssd is not supported on slot %q (PVE 9.2 accepts ssd= only on scsi/sata/ide drives; virtio/nvme reject it)", v.Ref(), i, slot)
+		}
 	}
 	// nics
 	seenNet := map[string]bool{}
@@ -532,9 +578,9 @@ func (v *VM) Validate() error {
 			return fmt.Errorf("%s: spec.hardware.efi-disk.size: %v", v.Ref(), err)
 		}
 		switch strings.ToLower(hw.EFIDisk.SecureBoot) {
-		case "", "required", "optional", "disabled":
+		case "", "enabled", "disabled":
 		default:
-			return fmt.Errorf("%s: spec.hardware.efi-disk.secure-boot %q must be 'required'|'optional'|'disabled'", v.Ref(), hw.EFIDisk.SecureBoot)
+			return fmt.Errorf("%s: spec.hardware.efi-disk.secure-boot %q must be 'enabled' or 'disabled' (PVE 9.2 pre-enrolled-keys; see docs/GAPS.md M13)", v.Ref(), hw.EFIDisk.SecureBoot)
 		}
 	}
 	if hw.Cdrom.Media != "" {
@@ -740,6 +786,12 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 		// to 4m when omitted. Only emit it when the user pins one.
 		if hw.EFIDisk.Template != "" {
 			efiStr += ",efitype=" + strings.ToLower(hw.EFIDisk.Template)
+		}
+		// M13 Secure Boot: the wire token is `pre-enrolled-keys=<0|1>`
+		// (probe-verified PVE 9.2.2 — the /qemu/{id}/security endpoint does
+		// not exist; 501). "" = not owned → token omitted, PVE decides.
+		if tok, ok := secureBootWire(hw.EFIDisk.SecureBoot); ok {
+			efiStr += ",pre-enrolled-keys=" + tok
 		}
 		p["efidisk0"] = efiStr
 	}
@@ -1102,8 +1154,7 @@ func (v *VM) DriftAnomalies(current map[string]any) []string {
 		if _, _, danoms := v.diskSlotDrift(current); danoms != nil {
 			out = append(out, danoms...)
 		}
-	} else if v.Spec.Hardware.CloudInit.Enabled {
-		// M12: a clone inherits the template's cloud-init DRIVE volume. When
+	} else if v.Spec.Hardware.CloudInit.Enabled {		// M12: a clone inherits the template's cloud-init DRIVE volume. When
 		// the manifest asks for a different pool than the clone ended up with,
 		// proxops will NOT move the volume (that is a storage migration, not a
 		// config write) — surface it instead of silently failing the task.
@@ -1112,6 +1163,19 @@ func (v *VM) DriftAnomalies(current map[string]any) []string {
 			out = append(out, fmt.Sprintf(
 				"clone cloud-init drive lives on pool %q (inherited from template %q) but spec.hardware.cloud-init.storage is %q; proxops will not move a live cloud-init volume — align the manifest with the template or recreate the VM",
 				cur.pool, strings.TrimSpace(v.Spec.Clone), v.Spec.Hardware.CloudInit.Storage))
+		}
+	}
+	// M13: an EFI disk pool change on a LIVE efidisk0 volume is data-loss
+	// territory (a create-form write recreates the volume), so Drift does
+	// not write it — surface it instead.
+	if hw := &v.Spec.Hardware; hw.EFIDisk != nil {
+		curRaw := pveStr(current["efidisk0"])
+		if !isNewStorageSlot(curRaw) {
+			if cur := parseDiskInfo(curRaw); cur.pool != "" && cur.pool != hw.EFIDisk.Storage {
+				out = append(out, fmt.Sprintf(
+					"efidisk0 storage drift (live pool=%q; desired pool=%s); proxops will NOT move a live EFI vars volume (PVE /config would recreate it) — recreate the VM or migrate deliberately on PVE, then update the manifest",
+					cur.pool, hw.EFIDisk.Storage))
+			}
 		}
 	}
 	// Sort for determinism.
@@ -1353,25 +1417,69 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 			}
 		}
 	}
-	// EFI disk: PVE owns efidisk0; we own pool + size; PVE auto-assigns a
-	// LVM volume name, which we ignore. PVE clamps very small sizes to its
-	// minimum (4 MiB) and reports them with a binary-suffix token; our size
-	// comparison must tolerate PVE's clamping — a 1 MiB desired that PVE
-	// stores as 4 MiB is NOT drift.
+	// EFI disk: PVE owns the efidisk0 volume name; we own pool + efitype +
+	// the M13 Secure Boot token (pre-enrolled-keys). PVE auto-adds an
+	// `ms-cert=` token to the report when keys are pre-enrolled at create
+	// time — proxops treats ms-cert as PVE-owned: preserved verbatim on
+	// live-form rewrites, never compared (probe-verified PVE 9.2.2: a
+	// live-form write WITHOUT ms-cert drops it from the report, so the
+	// rewrite must carry it through rawExtra).
 	//
-	// We use pveDiskInfo.pool + sizeSet check and only drift when the pool
-	// differs OR when PVE's reported size differs from ours by more than a
-	// 1 MiB epsilon (to absorb PVE's clamping).
+	// Data-loss guard (same as data disks): a create-form write
+	// ("<pool>:<GiB>") over a LIVE efidisk0 recreates the volume; only an
+	// absent/empty slot gets a create-form write. A pool change on a live
+	// EFI volume is surfaced as an anomaly by DriftAnomalies, not written.
+	// The secure-boot/efitype toggle converges in place on stopped AND
+	// running VMs via the live form (probe-verified: enrollment takes
+	// effect at the guest's next boot).
 	if hw.EFIDisk != nil {
-		cur := parseDiskInfo(pveStr(current["efidisk0"]))
-		if cur.pool != "" && cur.pool != hw.EFIDisk.Storage {
-			upd["efidisk0"] = fmt.Sprintf("%s:%s", hw.EFIDisk.Storage, GiBString(diskBytes(hw.EFIDisk.Size)))
+		curRaw := pveStr(current["efidisk0"])
+		cur := parseDiskInfo(curRaw)
+		wantKeys, keysOwned := secureBootWire(hw.EFIDisk.SecureBoot)
+		wantEFIT := strings.ToLower(hw.EFIDisk.Template)
+		if isNewStorageSlot(curRaw) {
+			// No live EFI volume: the create-form write is safe.
+			efi := fmt.Sprintf("%s:%s", hw.EFIDisk.Storage, GiBString(diskBytes(hw.EFIDisk.Size)))
+			if wantEFIT != "" {
+				efi += ",efitype=" + wantEFIT
+			}
+			if keysOwned {
+				efi += ",pre-enrolled-keys=" + wantKeys
+			}
+			upd["efidisk0"] = efi
 			stop = true
-		} else if cur.pool == "" {
-			// PVE's live config has no efidisk0.
-			if pveStr(current["efidisk0"]) == "" || pveStr(current["efidisk0"]) == "none" {
-				// PVE truly omitted → drift.
-				upd["efidisk0"] = fmt.Sprintf("%s:%s", hw.EFIDisk.Storage, GiBString(diskBytes(hw.EFIDisk.Size)))
+		} else if cur.pool != "" && cur.pool == hw.EFIDisk.Storage {
+			// Live EFI volume on the desired pool: option drift only.
+			efitypeDrift := wantEFIT != "" && cur.efitype != "" && cur.efitype != wantEFIT
+			keysDrift := false
+			if keysOwned {
+				keysDrift = (cur.preEnrolled != nil && *cur.preEnrolled) != (wantKeys == "1")
+			}
+			if efitypeDrift || keysDrift {
+				s := cur.pool + ":" + cur.volumeName
+				if cur.sizeSet {
+					s += ",size=" + cur.sizeToken
+				}
+				switch {
+				case cur.efitype != "":
+					s += ",efitype=" + cur.efitype
+				case wantEFIT != "":
+					s += ",efitype=" + wantEFIT
+				}
+				switch {
+				case keysOwned:
+					s += ",pre-enrolled-keys=" + wantKeys
+				case cur.preEnrolled != nil:
+					if *cur.preEnrolled {
+						s += ",pre-enrolled-keys=1"
+					} else {
+						s += ",pre-enrolled-keys=0"
+					}
+				}
+				if cur.rawExtra != "" {
+					s += "," + cur.rawExtra
+				}
+				upd["efidisk0"] = s
 				stop = true
 			}
 		}
@@ -1639,7 +1747,49 @@ func driveVolumeString(d Disk) string {
 	if d.IOThread {
 		s += ",iothread=1"
 	}
+	s += driveOptionTokens(d)
 	return s
+}
+
+// driveOptionTokens renders the M13 drive options (discard/ssd/aio) in
+// PVE's inline grammar, in a stable order. Empty/nil = not owned → omitted.
+func driveOptionTokens(d Disk) string {
+	var b strings.Builder
+	if d.Discard != "" {
+		b.WriteString(",discard=" + strings.ToLower(d.Discard))
+	}
+	if d.SSD != nil {
+		if *d.SSD {
+			b.WriteString(",ssd=1")
+		} else {
+			b.WriteString(",ssd=0")
+		}
+	}
+	if d.AIO != "" {
+		b.WriteString(",aio=" + strings.ToLower(d.AIO))
+	}
+	return b.String()
+}
+
+// diskBusSupportsSSD reports whether PVE 9.2's drive schema accepts the
+// `ssd=` token on a slot's bus. Probe-verified on conformance-dev: scsi/sata/
+// ide accept it; virtio/nvme reject it ("property is not defined in schema").
+func diskBusSupportsSSD(slot string) bool {
+	return strings.HasPrefix(slot, "scsi") || strings.HasPrefix(slot, "sata") ||
+		strings.HasPrefix(slot, "ide")
+}
+
+// secureBootWire maps the declarative secure-boot value to PVE's
+// `pre-enrolled-keys` token ("1"/"0"); ok=false when the field is not owned.
+func secureBootWire(s string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "enabled":
+		return "1", true
+	case "disabled":
+		return "0", true
+	default:
+		return "", false
+	}
 }
 func diskBytes(human string) int64 {
 	b, _ := DiskBytes(human)
@@ -1652,7 +1802,8 @@ func diskBytes(human string) int64 {
 //	create/report: "local-lvm:vm-9100-disk-0,iothread=1,size=8G"
 //	our desired:   "local-lvm:8,iothread=1"
 //
-// Fields we own and compare: pool (volume id), size (bytes), iothread.
+// Fields we own and compare: pool (volume id), size (bytes), iothread, and
+// the M13 drive options (discard/ssd/aio).
 type pveDiskInfo struct {
 	pool       string
 	volumeName string
@@ -1661,6 +1812,17 @@ type pveDiskInfo struct {
 	//                      preserved for safe in-place rewrites
 	sizeSet  bool
 	iothread bool
+	// M13 drive options. Empty/nil = token absent from the string.
+	discard string
+	ssd     *bool
+	aio     string
+	// M13 EFI tokens (efidisk0 grammar shares the drive parser).
+	efitype     string
+	preEnrolled *bool
+	// rawExtra carries every non-owned option token (PVE-assigned volume
+	// names aside) verbatim, comma-joined, so a live-form rewrite can
+	// preserve PVE-owned tokens (e.g. efidisk0's ms-cert) untouched.
+	rawExtra string
 }
 
 // pveDiskInfo parses a PVE QEMU drive property string into (pool, size,
@@ -1691,9 +1853,25 @@ func parseDiskInfo(s string) pveDiskInfo {
 				case "size":
 					if b, ok := pveDiskSizeBytes(v); ok {
 						out.sizeBytes, out.sizeSet, out.sizeToken = b, true, v
+					} else {
+						out.rawExtra = addRawToken(out.rawExtra, t)
 					}
 				case "iothread":
 					out.iothread = v == "1" || v == "on" || v == "true"
+				case "discard":
+					out.discard = strings.ToLower(v)
+				case "ssd":
+					b := v == "1" || v == "on" || v == "true"
+					out.ssd = &b
+				case "aio":
+					out.aio = strings.ToLower(v)
+				case "efitype":
+					out.efitype = strings.ToLower(v)
+				case "pre-enrolled-keys":
+					b := v == "1" || v == "on" || v == "true"
+					out.preEnrolled = &b
+				default:
+					out.rawExtra = addRawToken(out.rawExtra, t)
 				}
 				continue
 			}
@@ -1713,9 +1891,20 @@ func parseDiskInfo(s string) pveDiskInfo {
 				out.volumeName = t
 				continue
 			}
+			// Bare flag token we do not own → preserve verbatim.
+			out.rawExtra = addRawToken(out.rawExtra, t)
 		}
 	}
 	return out
+}
+
+// addRawToken appends a PVE-owned option token to the rawExtra accumulator,
+// keeping PVE's verbatim spelling and stable order.
+func addRawToken(cur, tok string) string {
+	if cur == "" {
+		return tok
+	}
+	return cur + "," + tok
 }
 
 // diskSlotDrift classifies every spec disk against PVE's live report and
@@ -1767,21 +1956,98 @@ func (v *VM) diskSlotDrift(current map[string]any) (map[string]any, bool, []stri
 				slot, curRaw, want.pool, desiredSize))
 			continue
 		}
-		if cur.iothread != want.iothread {
-			// Preserve PVE's live volume id + exact size spelling so PVE
-			// treats this as an in-place option toggle, not a recreation.
-			keep := cur.pool + ":" + cur.volumeName
-			if cur.sizeSet {
-				keep += ",size=" + cur.sizeToken
-			}
-			if want.iothread {
-				keep += ",iothread=1"
-			}
-			upd[slot] = keep
+		if driveOptionsDrift(cur, want) {
+			// Preserve PVE's live volume id + exact size spelling + every
+			// option token the manifest does not own, so PVE treats this as
+			// an in-place option toggle, not a recreation.
+			upd[slot] = liveDriveRewrite(cur, want)
 			stop = true
 		}
 	}
 	return upd, stop, anoms
+}
+
+// driveOptionsDrift reports whether any owned drive option (iothread + the
+// M13 discard/ssd/aio tokens) differs between PVE's live report and our
+// desired state. Tokens the manifest does not own (empty/nil desired) never
+// drift. PVE omits an option that equals its default, so a live token
+// absence is compared against the documented default: iothread=off,
+// discard=ignore, ssd=off. aio has a kernel-dependent PVE default
+// (io_uring when supported, else native), so a live absence with a pinned
+// desired is treated as drift and materialised once — PVE retains the
+// explicit token in the report afterwards (probe-verified PVE 9.2.2 for
+// aio=threads; aio=native retention pinned by TestM13_AN_DriveOptions...).
+func driveOptionsDrift(cur, want pveDiskInfo) bool {
+	if cur.iothread != want.iothread {
+		return true
+	}
+	if want.discard != "" {
+		curD := cur.discard
+		if curD == "" {
+			curD = "ignore"
+		}
+		if !strings.EqualFold(curD, want.discard) {
+			return true
+		}
+	}
+	if want.ssd != nil {
+		curSSD := false
+		if cur.ssd != nil {
+			curSSD = *cur.ssd
+		}
+		if curSSD != *want.ssd {
+			return true
+		}
+	}
+	if want.aio != "" {
+		if cur.aio == "" || !strings.EqualFold(cur.aio, want.aio) {
+			return true
+		}
+	}
+	return false
+}
+
+// liveDriveRewrite renders the safe LIVE form for a drive slot: PVE's own
+// volume id + size spelling, plus every option token — owned tokens take the
+// desired value, non-owned tokens are preserved verbatim from the live
+// string (including PVE-owned extras like backup=0 or ms-cert=).
+func liveDriveRewrite(cur, want pveDiskInfo) string {
+	s := cur.pool + ":" + cur.volumeName
+	if cur.sizeSet {
+		s += ",size=" + cur.sizeToken
+	}
+	if want.iothread {
+		s += ",iothread=1"
+	}
+	discard := cur.discard
+	if want.discard != "" {
+		discard = want.discard
+	}
+	if discard != "" {
+		s += ",discard=" + discard
+	}
+	ssd := cur.ssd
+	if want.ssd != nil {
+		ssd = want.ssd
+	}
+	if ssd != nil {
+		if *ssd {
+			s += ",ssd=1"
+		} else {
+			s += ",ssd=0"
+		}
+	}
+	aio := cur.aio
+	if want.aio != "" {
+		aio = want.aio
+	}
+	if aio != "" {
+		s += ",aio=" + aio
+	}
+	if cur.rawExtra != "" {
+		s += "," + cur.rawExtra
+	}
+	return s
 }
 
 // diskMatches reports whether two PVE drive property strings agree on the

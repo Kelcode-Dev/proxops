@@ -435,6 +435,11 @@ func kindPath(cluster string, k schema.Kind, name string) string {
 	// with its own parse/route/plan/exec/adopt paths).
 	case schema.KindTemplateVM:
 		dir = "templatevm"
+	// M13: TemplateCT manifests live under the templatect/ kind root
+	// (mirrors composition.rootDirs; a promoted CT is a distinct resource
+	// kind from both LXC and the ctt/ vztmpl artifact).
+	case schema.KindTemplateCT:
+		dir = "templatect"
 	}
 	return filepath.ToSlash(filepath.Join(dir, cluster, name+".yaml"))
 }

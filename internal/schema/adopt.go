@@ -62,6 +62,19 @@ func PveDisksFromPVE(current map[string]any) ([]Disk, bool) {
 			Storage:  info.pool,
 			IOThread: info.iothread,
 		}
+		// M13: adopt the structured drive options PVE reports. Tokens PVE
+		// omits are PVE defaults and stay unowned ("" / nil) so Drift does
+		// not materialise them on the next apply.
+		if info.discard != "" {
+			d.Discard = info.discard
+		}
+		if info.ssd != nil {
+			ssd := *info.ssd
+			d.SSD = &ssd
+		}
+		if info.aio != "" {
+			d.AIO = info.aio
+		}
 		if info.sizeSet {
 			if s, ok := HumanFromBytes(info.sizeBytes); ok {
 				d.Size = s
@@ -423,17 +436,29 @@ type LXCDiskShape struct {
 	Mounts  []LXCMount
 	HasRoot bool
 	// BindMountSlots are mp slots PVE reports as host-path bind mounts
-	// ("mp0=/mnt/host-share:/srv/data"). proxops does not model bind
-	// mountpoints (GAPS.md: LXC bind mounts); adopt reports them so the
-	// operator sees them as explicit Gaps, not silently dropped. Each
-	// entry carries the slot + PVE wire value for the gap text.
+	// ("mp0=/mnt/host-share,mp=/srv/data"). M13: bind mounts are now a
+	// first-class declarative shape (LXC.spec.bind-mounts), so adopt
+	// populates the parsed HostPath/MountPoint/ReadOnly here and the
+	// caller (adoptLXC) writes them into the manifest. Raw is kept for the
+	// gap/fidelity text when a bind cannot be represented (e.g. an
+	// unsupported extra token).
 	BindMountSlots []LXCBindMount
 }
 
-// LXCBindMount is one PVE LXC host-path bind mount (mpN=<host>:<guest>).
+// LXCBindMount is one PVE LXC host-path bind mount (mpN=<host>,mp=<guest>).
 type LXCBindMount struct {
-	Slot string
-	Raw  string // PVE wire value, e.g. "/mnt/host-share:/srv/data"
+	Slot       string
+	Raw        string // PVE wire value, e.g. "/mnt/host-share,mp=/srv/data"
+	HostPath   string // the host directory (first token)
+	MountPoint string // the in-guest path (mp= token)
+	ReadOnly   *bool  // ro= token (nil = PVE default read-write)
+}
+
+// PveLXCBindMountsFromPVE returns the host-path bind mounts PVE reports on
+// mp* slots (M13). Allocated volumes are excluded (they land in
+// spec.mount-points). The result is sorted by slot for determinism.
+func PveLXCBindMountsFromPVE(current map[string]any) []LXCBindMount {
+	return pveLXCDisksFromPVEInternal(current).BindMountSlots
 }
 
 // PveLXCDisksFromPVE parses PVE's LXC /config report into rootfs + additional
@@ -491,12 +516,18 @@ func pveLXCDisksFromPVEInternal(current map[string]any) lxcDiskShapeInternal {
 		if isNewStorageSlot(raw) {
 			continue
 		}
-		// Host-path bind mount ("mp0=/mnt/host-share:/srv/data"): the value
-		// starts with a host path, not a "pool:" storage token. proxops
-		// does not model bind mounts (docs/GAPS.md: LXC bind-mount mpN) —
-		// report it, never drop it.
+		// Host-path bind mount ("mp0=/mnt/host-share,mp=/srv/data" or the
+		// legacy "mp0=/mnt/host-share:/srv/data"): the value starts with a
+		// host path, not a "pool:" storage token. M13: bind mounts are a
+		// first-class declarative shape (spec.bind-mounts); parse the host
+		// path + guest path + ro token, keeping the raw value for the gap
+		// text when the shape is unparseable.
 		if isLXCBindMount(raw) {
-			out.BindMountSlots = append(out.BindMountSlots, LXCBindMount{Slot: k, Raw: raw})
+			bm := LXCBindMount{Slot: k, Raw: raw}
+			if host, guest, ro, ok := lxcBindParseLive(raw); ok {
+				bm.HostPath, bm.MountPoint, bm.ReadOnly = host, guest, ro
+			}
+			out.BindMountSlots = append(out.BindMountSlots, bm)
 			continue
 		}
 		info := parseDiskInfo(raw)
@@ -518,6 +549,13 @@ func pveLXCDisksFromPVEInternal(current map[string]any) lxcDiskShapeInternal {
 			if str, okH := HumanFromBytes(info.sizeBytes); okH {
 				mp.Size = str
 			}
+		}
+		// M13: adopt the per-mount option tokens PVE actually reports. A
+		// token PVE omits equals its documented default, so it stays nil
+		// (unowned) — that keeps Drift from materialising a token the
+		// operator never asked for.
+		if opts := lxcMountOptionsFromLive(raw); opts != nil {
+			mp.Options = opts
 		}
 		out.Mounts = append(out.Mounts, mp)
 	}
@@ -749,11 +787,69 @@ func PveLXCTemplateFromPVE(current map[string]any) (storage, filename string, ok
 	return storage, rest, true
 }
 
+// lxcMountOptionsFromLive builds an LXCMountOptions from PVE's allocated-mp
+// report value, adopting ONLY the option tokens PVE actually reports. A token
+// PVE omits equals its documented pct.conf default (ro=0, backup=1, acl=0,
+// quota=0, shared=0), so it stays nil (unowned) and Drift will not
+// materialise it. Returns nil when no owned token is present.
+func lxcMountOptionsFromLive(raw string) *LXCMountOptions {
+	var o *LXCMountOptions
+	if v, p := lxcRawBoolToken(raw, "ro="); p {
+		if o == nil {
+			o = &LXCMountOptions{}
+		}
+		b := v
+		o.ReadOnly = &b
+	}
+	if v, p := lxcRawBoolToken(raw, "backup="); p {
+		if o == nil {
+			o = &LXCMountOptions{}
+		}
+		b := v
+		o.Backup = &b
+	}
+	if v, p := lxcRawBoolToken(raw, "acl="); p {
+		if o == nil {
+			o = &LXCMountOptions{}
+		}
+		b := v
+		o.ACL = &b
+	}
+	if v, p := lxcRawBoolToken(raw, "quota="); p {
+		if o == nil {
+			o = &LXCMountOptions{}
+		}
+		b := v
+		o.Quota = &b
+	}
+	if v, p := lxcRawBoolToken(raw, "shared="); p {
+		if o == nil {
+			o = &LXCMountOptions{}
+		}
+		b := v
+		o.Shared = &b
+	}
+	if mo := lxcRawToken(raw, "mountoptions="); mo != "" {
+		if o == nil {
+			o = &LXCMountOptions{}
+		}
+		o.MountOptions = mo
+	}
+	return o
+}
+
 // parseEFIDiskPVE extracts an EFIDisk from PVE's /config "efidisk0" value
-// (e.g. "local-lvm:vm-9100-disk-3,size=4M"). The pool is the storage; the
-// size is PVE-reported in binary-suffix form. PVE clamps very small sizes
-// (see M6 notes); adopt reports the clamped value. Returns nil when the
-// shape isn't recognised.
+// (e.g. "local-lvm:vm-9100-disk-3,efitype=4m,pre-enrolled-keys=1,size=4M").
+// The pool is the storage; the size is PVE-reported in binary-suffix form.
+// PVE clamps very small sizes (see M6 notes); adopt reports the clamped
+// value. Returns nil when the shape isn't recognised.
+//
+// M13: PVE DOES report `efitype=` and `pre-enrolled-keys=` on /config
+// (probe-verified PVE 9.2.2 — the earlier "PVE doesn't report efitype" note
+// was wrong; live reports carry both tokens). adopt maps efitype → Template
+// and pre-enrolled-keys → SecureBoot ("enabled"/"disabled"). The
+// PVE-managed `ms-cert=` token is NOT modelled (proxops treats it as
+// PVE-owned; Drift preserves it verbatim).
 func parseEFIDiskPVE(s string) *EFIDisk {
 	info := parseDiskInfo(strings.TrimSpace(s))
 	if info.pool == "" {
@@ -765,7 +861,16 @@ func parseEFIDiskPVE(s string) *EFIDisk {
 			e.Size = strH
 		}
 	}
-	// PVE doesn't report efitype on /config; leave Template empty.
+	if info.efitype != "" {
+		e.Template = info.efitype
+	}
+	if info.preEnrolled != nil {
+		if *info.preEnrolled {
+			e.SecureBoot = "enabled"
+		} else {
+			e.SecureBoot = "disabled"
+		}
+	}
 	return e
 }
 

@@ -672,10 +672,11 @@ func TestAdopt_ClusterNameValidation(t *testing.T) {
 }
 
 // TestAdopt_LXCBindMountsReported pins that PVE's host-path bind mounts
-// (mpN=/host:path) are EXPLICITLY reported as gaps and NOT silently dropped
-// into spec.mount-points (which would fail Validate) or lost from the
-// adopt report (which would hide live configuration). GAPS.md: LXC bind
-// mounts are not modelled by proxops today.
+// (mpN=<host>:<guest> / mpN=<host>,mp=<guest>) are adopted as first-class
+// spec.bind-mounts (M13) and NOT silently dropped into spec.mount-points
+// (the allocated-volume shape) or lost from the adopt report. A bind whose
+// host path is a system-critical directory proxops refuses to declare is
+// surfaced as a gap instead. GAPS.md: LXC bind mounts.
 func TestAdopt_LXCBindMountsReported(t *testing.T) {
 	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
 	t.Cleanup(m.Close)
@@ -718,18 +719,33 @@ func TestAdopt_LXCBindMountsReported(t *testing.T) {
 	if len(lxc.Spec.MountPoints) != 0 {
 		t.Errorf("bind-only LXC must have zero allocated mount-points; got %+v", lxc.Spec.MountPoints)
 	}
-	// AND the bind mp's must be reported as gaps (silent drop = forbidden).
-	bindGaps := 0
-	for _, g := range res.Gaps {
-		if g.Field == "mp0" || g.Field == "mp1" {
-			bindGaps++
-			if !strings.Contains(g.Note, "bind") {
-				t.Errorf("bind-mount gap note must say it is a bind mount: %+v", g)
-			}
+	// M13: the binds are adopted into spec.bind-mounts, distinguished from
+	// allocated volumes, with host path + guest path + ro recovered.
+	if len(lxc.Spec.BindMounts) != 2 {
+		t.Fatalf("spec.bind-mounts = %d, want 2; got %+v", len(lxc.Spec.BindMounts), lxc.Spec.BindMounts)
+	}
+	wantBinds := []struct {
+		slot, host, guest string
+		ro                bool
+	}{
+		{"mp0", "/mnt/host-share", "/srv/data", false},
+		{"mp1", "/mnt/host-share2", "/svc/x", true},
+	}
+	for i, wb := range wantBinds {
+		gb := lxc.Spec.BindMounts[i]
+		if gb.Slot != wb.slot || gb.HostPath != wb.host || gb.MountPoint != wb.guest {
+			t.Errorf("bind[%d] = %+v, want slot=%s host=%s guest=%s", i, gb, wb.slot, wb.host, wb.guest)
+		}
+		gotRO := gb.ReadOnly != nil && *gb.ReadOnly
+		if gotRO != wb.ro {
+			t.Errorf("bind[%d] ro=%v, want %v", i, gotRO, wb.ro)
 		}
 	}
-	if bindGaps != 2 {
-		t.Errorf("bind-mount gaps = %d, want 2 (mp0 + mp1); gaps=%v", bindGaps, m10GapFields(res))
+	// The binds must NOT be reported as gaps (they are now modelled).
+	for _, g := range res.Gaps {
+		if g.Field == "mp0" || g.Field == "mp1" {
+			t.Errorf("adopted bind mount must not be a gap: %+v", g)
+		}
 	}
 }
 

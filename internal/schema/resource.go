@@ -26,6 +26,22 @@ const (
 	// both with type="qm"; the template flag in the per-object /config
 	// report is what distinguishes them.
 	KindTemplateVM Kind = "TemplateVM"
+	// KindTemplateCT is a PVE LXC container that has been promoted to a
+	// template (PVE `template=1` on the /lxc/{id}/config report). It is the
+	// M13 LXC analogue of KindTemplateVM and is DISTINCT from KindCTTemplate
+	// (a storage vztmpl artifact). proxops manages its lifecycle as a
+	// first-class object: create + mark-template (POST /lxc/{id}/template,
+	// a synchronous null response), config drift, ownership-tag prunes, and
+	// — because PVE 9.2 does not implement /lxc/{id}/untemplate — a
+	// non-destructive anomaly when a proxops LXC desired matches a PVE-side
+	// template CT.
+	//
+	// Wire shape: identical to LXC. proxops shares PVE's per-node lxc id
+	// space with LXC, so a TemplateCT and an LXC cannot co-exist on the same
+	// PVE id on the same node. PVE's /cluster/resources reports both with
+	// type="lxc"; the template flag in the per-object /config report is what
+	// distinguishes them.
+	KindTemplateCT Kind = "TemplateCT"
 )
 
 // Ref is the cross-kind identifier used by the Index and prune guards.

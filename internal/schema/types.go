@@ -11,12 +11,13 @@ const APIVersion = "proxops/v1alpha1"
 
 // AllKinds returns the known kinds (used for routing/validation).
 func AllKinds() []Kind {
-	return []Kind{KindVM, KindLXC, KindCTTemplate, KindISO, KindTemplateVM, KindDiskImage}
+	return []Kind{KindVM, KindLXC, KindCTTemplate, KindISO, KindTemplateVM, KindDiskImage, KindTemplateCT}
 }
 
 // ParseKind maps a string to a Kind, case-insensitively. It also accepts the
-// legacy "CTT" spelling for CTTemplate and the M11 aliases "TVM" / "TEMPLATE"
-// for TemplateVM.
+// legacy "CTT" spelling for CTTemplate, the M11 aliases "TVM" / "TEMPLATE"
+// for TemplateVM, and the M13 alias "CTTEMPLATE-CT" is NOT used — TemplateCT
+// is spelled "TemplateCT" or "TCT".
 //
 // The input is normalized to the canonical kind so that callers (manifest
 // routing, depends-on edge resolution) can compare kinds with ==.
@@ -34,8 +35,10 @@ func ParseKind(s string) (Kind, error) {
 		return KindDiskImage, nil
 	case "TEMPLATEVM", "TVM", "TEMPLATE":
 		return KindTemplateVM, nil
+	case "TEMPLATECT", "TCT":
+		return KindTemplateCT, nil
 	default:
-		return "", fmt.Errorf("unknown kind %q (valid: VM, LXC, CTTemplate, ISO, TemplateVM, DiskImage)", s)
+		return "", fmt.Errorf("unknown kind %q (valid: VM, LXC, CTTemplate, ISO, TemplateVM, DiskImage, TemplateCT)", s)
 	}
 }
 

@@ -128,6 +128,9 @@ func relocateForM8(t *testing.T, files map[string]string, cluster string) map[st
 		schema.KindTemplateVM: "templatevm",
 		// M11+: DiskImage artifacts live under the diskimage/ kind root.
 		schema.KindDiskImage: "diskimage",
+		// M13: TemplateCT manifests live under the templatect/ kind root
+		// (mirrors composition.rootDirs and adopt.kindPath).
+		schema.KindTemplateCT: "templatect",
 	}
 	used := map[string]bool{}
 

@@ -98,15 +98,27 @@ type LXCDNS struct {
 	Domain string `yaml:"domain,omitempty" json:"domain,omitempty"`
 }
 
-// LXCMountOptions are per-mountpoint LXC options. PVE 9.2 LXC accepts mpN
-// form-values: storage, size, mountpoint, mpN=storage,size=... for
-// rootdir-allocation mountpoints, plus `fssize=` and `quota=` on LVM
-// pools. The declarative schema exposes only the owned fields.
+// LXCMountOptions are per-mountpoint LXC options (M13). PVE 9.2's mpN
+// grammar accepts these tokens inline on an allocated volume
+// ("mp0=local-lvm:1,mp=/mnt/data,ro=1,backup=0,..."); the report re-echoes
+// each token that differs from PVE's default (probe-verified on
+// conformance-dev: acl/backup/mountoptions/quota/ro/shared all accepted and
+// retained). Tri-state pointer-bools: nil = not owned (proxops neither sends
+// the token nor drifts against a live value); non-nil = pinned 0/1.
 type LXCMountOptions struct {
-	// Quota is PVE's `quota=<bytes or N%>` for dir-based storage.
-	Quota string `yaml:"quota,omitempty" json:"quota,omitempty"`
-	// ReadOnly attaches the mount read-only.
-	ReadOnly bool `yaml:"read-only,omitempty" json:"read-only,omitempty"`
+	// ReadOnly is PVE's `ro=` (default 0 = read-write).
+	ReadOnly *bool `yaml:"read-only,omitempty" json:"read-only,omitempty"`
+	// Backup is PVE's `backup=` (default 1 = included in vzdump).
+	Backup *bool `yaml:"backup,omitempty" json:"backup,omitempty"`
+	// ACL is PVE's `acl=` (default 0).
+	ACL *bool `yaml:"acl,omitempty" json:"acl,omitempty"`
+	// Quota is PVE's `quota=` (default 0).
+	Quota *bool `yaml:"quota,omitempty" json:"quota,omitempty"`
+	// Shared is PVE's `shared=` (default 0; marks the volume cluster-shared).
+	Shared *bool `yaml:"shared,omitempty" json:"shared,omitempty"`
+	// MountOptions is PVE's `mountoptions=` free-form mount(8) option list
+	// (e.g. "noatime"). "" = not owned. PVE's default is "defaults".
+	MountOptions string `yaml:"mount-options,omitempty" json:"mount-options,omitempty"`
 }
 
 // LXCOptions captures PVE LXC common options panel.
@@ -159,7 +171,9 @@ type LXCUnprivileged int
 // LXCExtra mirrors VM's extra: freeform PVE passthrough keys.
 type LXCExtra = map[string]string
 
-// LXCMount is one additional LXC mountpoint (mp0, mp1, ...).
+// LXCMount is one additional LXC mountpoint (mp0, mp1, ...): an ALLOCATED
+// storage volume (PVE's `mpN=<pool>:<GiB>,mp=<guest>` form). Host-path bind
+// mounts are a distinct shape — see LXCBinding / spec.bind-mounts.
 type LXCMount struct {
 	// Storage is the PVE storage id with rootdir content.
 	Storage string `yaml:"storage" json:"storage"`
@@ -170,6 +184,42 @@ type LXCMount struct {
 	MountPoint string `yaml:"mount-point,omitempty" json:"mount-point,omitempty"`
 	// Slot overrides the default mp<i>.
 	Slot string `yaml:"slot,omitempty" json:"slot,omitempty"`
+	// Options are the per-mount PVE tokens (ro/backup/acl/quota/shared/
+	// mountoptions). nil = none owned.
+	Options *LXCMountOptions `yaml:"options,omitempty" json:"options,omitempty"`
+}
+
+// LXCBinding is one host-path bind mount (M13): PVE's `mpN=<host-path>,
+// mp=<guest-path>` form, where the "volume" is an existing directory on the
+// PVE HOST rather than a volume proxops allocates.
+//
+// SAFETY (probe-verified PVE 9.2.2, conformance-dev): PVE restricts bind
+// mountpoint writes to root@pam — an API-token request is rejected with
+// HTTP 403 "mount point type bind is only allowed for root@pam" at BOTH
+// create and /config PUT. proxops therefore:
+//   - models bind mounts faithfully (declarative + adopted + drift-detected);
+//   - NEVER deletes or re-points a live bind mount automatically (host data
+//     could be damaged); divergences that would overwrite live state are
+//     surfaced as anomalies;
+//   - lets PVE enforce the permission: a write proxops cannot perform fails
+//     closed with PVE's 403 on the action, not a silent skip.
+//
+// A bind mount shares the mpN slot namespace with allocated mount points:
+// one slot is either an allocated volume or a bind, never both.
+type LXCBinding struct {
+	// HostPath is the directory on the PVE node that is bind-mounted into
+	// the container. Must be absolute; PVE requires it to exist and to
+	// contain no symlinks. proxops additionally refuses system-critical
+	// roots (docs/pct.conf warning: never bind system dirs).
+	HostPath string `yaml:"host-path" json:"host-path"`
+	// MountPoint is the in-guest path, e.g. "/shared". Required.
+	MountPoint string `yaml:"mount-point" json:"mount-point"`
+	// Slot overrides the default mp<i> (i = index within bind-mounts,
+	// continuing after spec.mount-points when both lists are present).
+	Slot string `yaml:"slot,omitempty" json:"slot,omitempty"`
+	// ReadOnly is PVE's `ro=` token on the bind (default 0 = read-write).
+	// nil = not owned.
+	ReadOnly *bool `yaml:"read-only,omitempty" json:"read-only,omitempty"`
 }
 
 // LXCSpec is the declarative LXC body.
@@ -202,6 +252,11 @@ type LXCSpec struct {
 	Root LXCRoot `yaml:"root" json:"root"`
 	// MountPoints are additional LXC mp* volumes.
 	MountPoints []LXCMount `yaml:"mount-points,omitempty" json:"mount-points,omitempty"`
+	// BindMounts are host-path bind mounts declared on mp* slots (M13).
+	// They share the mpN slot namespace with MountPoints; a slot is either
+	// an allocated volume or a bind, never both. See LXCBinding for the
+	// root@pam write restriction and proxops's fail-closed posture.
+	BindMounts []LXCBinding `yaml:"bind-mounts,omitempty" json:"bind-mounts,omitempty"`
 	// Networks.
 	Networks []LXCNetwork `yaml:"networks" json:"networks"`
 	// DNS is PVE's container DNS + hostname.
@@ -353,6 +408,9 @@ func (l *LXC) Validate() error {
 		if _, err := DiskBytes(m.Size); err != nil {
 			return fmt.Errorf("%s: spec.mount-points[%d].size: %w", l.Ref(), i, err)
 		}
+		if m.MountPoint != "" && !strings.HasPrefix(m.MountPoint, "/") {
+			return fmt.Errorf("%s: spec.mount-points[%d].mount-point %q must be an absolute path", l.Ref(), i, m.MountPoint)
+		}
 		slot := m.Slot
 		if slot == "" {
 			slot = fmt.Sprintf("mp%d", i)
@@ -362,6 +420,30 @@ func (l *LXC) Validate() error {
 		}
 		seenMp[slot] = true
 		m.Slot = slot
+	}
+	// bind mounts (M13): host-path binds on mp* slots. They share the mpN
+	// slot namespace with spec.mount-points, so slot collisions across the
+	// two lists fail closed.
+	for i := range l.Spec.BindMounts {
+		b := &l.Spec.BindMounts[i]
+		if !strings.HasPrefix(b.HostPath, "/") {
+			return fmt.Errorf("%s: spec.bind-mounts[%d].host-path %q must be an absolute path on the PVE node", l.Ref(), i, b.HostPath)
+		}
+		if !strings.HasPrefix(b.MountPoint, "/") {
+			return fmt.Errorf("%s: spec.bind-mounts[%d].mount-point %q must be an absolute path in the guest", l.Ref(), i, b.MountPoint)
+		}
+		if lxcBindHostPathUnsafe(b.HostPath) {
+			return fmt.Errorf("%s: spec.bind-mounts[%d].host-path %q is a system-critical host directory; PVE's pct.conf warns never to bind-mount system dirs (a misconfigured container can damage the host) — choose a dedicated directory", l.Ref(), i, b.HostPath)
+		}
+		slot := b.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("mp%d", len(l.Spec.MountPoints)+i)
+		}
+		if seenMp[slot] {
+			return fmt.Errorf("%s: duplicate mount point slot %q (spec.mount-points and spec.bind-mounts share the mpN namespace)", l.Ref(), slot)
+		}
+		seenMp[slot] = true
+		b.Slot = slot
 	}
 	// arch
 	if l.Spec.Arch != "" && l.Spec.Arch != "amd64" && l.Spec.Arch != "i686" && l.Spec.Arch != "arm64" {
@@ -456,11 +538,18 @@ func (l *LXC) ToCreateParams() (map[string]any, error) {
 		if slot == "" {
 			slot = fmt.Sprintf("mp%d", i)
 		}
-		val := lxcLVMAlloc(m.Storage, m.Size)
-		if m.MountPoint != "" {
-			val += ",mp=" + m.MountPoint
+		p[slot] = lxcMountCreateWire(m)
+	}
+	// Bind mounts (M13): PVE's `mpN=<host-path>,mp=<guest>` form. PVE
+	// restricts bind writes to root@pam (probe-verified 403 with an API
+	// token); proxops submits the declaration and fails closed on PVE's
+	// rejection rather than pretending convergence.
+	for i, b := range l.Spec.BindMounts {
+		slot := b.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("mp%d", len(l.Spec.MountPoints)+i)
 		}
-		p[slot] = val
+		p[slot] = lxcBindCreateWire(b)
 	}
 	// LXC netX: PVE 9.x requires name=<iface> at the head of the property
 	// list. See lxcNetString.
@@ -523,6 +612,107 @@ func (l *LXC) ToCreateParams() (map[string]any, error) {
 // "<pool>:<GiB>" (same unit contract as the QEMU `scsiN` volume spec).
 func lxcLVMAlloc(pool, size string) string {
 	return fmt.Sprintf("%s:%s", pool, GiBString(diskBytes(size)))
+}
+
+// lxcMountCreateWire renders an allocated mpN create-form value:
+// "<pool>:<GiB>[,mp=<path>][,<options>]".
+func lxcMountCreateWire(m LXCMount) string {
+	val := lxcLVMAlloc(m.Storage, m.Size)
+	if m.MountPoint != "" {
+		val += ",mp=" + m.MountPoint
+	}
+	return val + lxcMountOptionTokens(m.Options)
+}
+
+// lxcMountOptionTokens renders the owned per-mount option tokens in a stable
+// order. nil / unset = not owned → omitted (PVE decides).
+func lxcMountOptionTokens(o *LXCMountOptions) string {
+	if o == nil {
+		return ""
+	}
+	var b strings.Builder
+	if o.ReadOnly != nil {
+		b.WriteString(",ro=" + lxcBoolWire(*o.ReadOnly))
+	}
+	if o.Backup != nil {
+		b.WriteString(",backup=" + lxcBoolWire(*o.Backup))
+	}
+	if o.ACL != nil {
+		b.WriteString(",acl=" + lxcBoolWire(*o.ACL))
+	}
+	if o.Quota != nil {
+		b.WriteString(",quota=" + lxcBoolWire(*o.Quota))
+	}
+	if o.Shared != nil {
+		b.WriteString(",shared=" + lxcBoolWire(*o.Shared))
+	}
+	if o.MountOptions != "" {
+		b.WriteString(",mountoptions=" + o.MountOptions)
+	}
+	return b.String()
+}
+
+// lxcBindCreateWire renders a bind-mount mpN create-form value:
+// "<host-path>,mp=<guest-path>[,ro=<0|1>]".
+func lxcBindCreateWire(b LXCBinding) string {
+	s := b.HostPath + ",mp=" + b.MountPoint
+	if b.ReadOnly != nil {
+		s += ",ro=" + lxcBoolWire(*b.ReadOnly)
+	}
+	return s
+}
+
+// lxcBindHostPathUnsafe reports whether a host path is a system-critical
+// directory that pct.conf(5) warns must never be bind-mounted into a
+// container (a misconfigured or escaped container could damage the host).
+// proxops fails closed on these at validation.
+func lxcBindHostPathUnsafe(p string) bool {
+	clean := strings.TrimRight(p, "/")
+	if clean == "" {
+		return true // "/"
+	}
+	switch clean {
+	case "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32",
+		"/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/usr", "/var":
+		return true
+	}
+	return false
+}
+
+// lxcBindParseLive splits PVE's live bind-mount mpN report value into
+// (hostPath, guestPath, ro, ok). PVE reports a bind as
+// "<host-path>,mp=<guest-path>[,ro=1]". ok=false when the value is not in
+// bind form (an allocated volume).
+func lxcBindParseLive(raw string) (host, guest string, ro *bool, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !isLXCBindMount(raw) {
+		return "", "", nil, false
+	}
+	toks := strings.Split(raw, ",")
+	host = strings.TrimSpace(toks[0])
+	for _, t := range toks[1:] {
+		t = strings.TrimSpace(t)
+		if v, found := strings.CutPrefix(t, "mp="); found {
+			guest = strings.TrimSpace(v)
+		} else if v, found := strings.CutPrefix(t, "ro="); found {
+			b := v == "1" || v == "true"
+			ro = &b
+		} else if t == "ro" {
+			// Legacy bare-flag form ("mpN=<host>:<guest>,ro").
+			b := true
+			ro = &b
+		}
+	}
+	// Legacy/colon bind spelling ("<host>:<guest>" with no mp= token): split
+	// the leading token on its first colon so the host path is still
+	// recovered. PVE 9.2 reports the comma + mp= form; this keeps adoption
+	// faithful against older reports.
+	if guest == "" {
+		if h, g, found := strings.Cut(host, ":"); found && strings.HasPrefix(g, "/") {
+			host, guest = strings.TrimSpace(h), strings.TrimSpace(g)
+		}
+	}
+	return host, guest, ro, true
 }
 
 // lxcNetString builds PVE's LXC "netN" value. PVE 9.2 create requires
@@ -741,6 +931,210 @@ func (l *LXC) lxcDiskSlotDrift(slot, wantWire, curWire string) (map[string]any, 
 	return upd, len(upd) > 0, anoms
 }
 
+// lxcMountDrift classifies one ALLOCATED mount-point slot (mpN) against the
+// desired LXCMount. Same data-loss guard as rootfs (pool/size drift on a
+// live volume = anomaly), plus the M13 option surface:
+//   - guest mount path (`mp=`) and the per-mount option tokens (ro/backup/
+//     acl/quota/shared/mountoptions) converge with a LIVE-form rewrite
+//     that preserves PVE's volume id + size spelling (probe-verified PVE
+//     9.2.2: the live form toggles mp path and options in place, 200, no
+//     volume recreation).
+//   - a live bind mount at a slot the manifest declares as allocated is an
+//     anomaly (replacing a bind with an allocated volume would destroy the
+//     bind's configuration and could invite writes onto the wrong target).
+func lxcMountDrift(slot string, m LXCMount, curWire string) (map[string]any, bool, []string) {
+	upd := map[string]any{}
+	anoms := make([]string, 0, 1)
+	if isNewStorageSlot(curWire) {
+		upd[slot] = lxcMountCreateWire(m)
+		return upd, true, anoms
+	}
+	if isLXCBindMount(curWire) {
+		anoms = append(anoms, fmt.Sprintf(
+			"%s is a live host-path bind mount (%q) but spec.mount-points declares an allocated volume — proxops will not replace a live bind mount (host data); reconcile the manifest with PVE or remove the bind deliberately",
+			slot, curWire))
+		return upd, false, anoms
+	}
+	// pool/size guard first (reuses the shared classifier's logic inline so
+	// the option rewrite below only runs on a storage-matched volume).
+	cur := parseDiskInfo(curWire)
+	want := parseDiskInfo(lxcMountCreateWire(m))
+	if cur.pool != want.pool || (want.sizeSet && cur.sizeSet && cur.sizeBytes != want.sizeBytes) {
+		desiredSize := ""
+		if want.sizeSet {
+			desiredSize = fmt.Sprintf("%d bytes", want.sizeBytes)
+		}
+		anoms = append(anoms, fmt.Sprintf(
+			"%s storage/size drift (live=%q; desired pool=%s size=%s); proxops will NOT auto-resize or re-pool a live LXC volume (PVE /config would recreate the volume and lose its data) — resize deliberately on PVE, then update the manifest",
+			slot, curWire, want.pool, desiredSize))
+		return upd, false, anoms
+	}
+	// mp path + option tokens.
+	rewrite, need := lxcMountLiveRewrite(curWire, m)
+	if need {
+		upd[slot] = rewrite
+		return upd, true, anoms
+	}
+	return upd, false, anoms
+}
+
+// lxcMountLiveRewrite compares PVE's live allocated-mp value against the
+// desired mount path/options and, when any OWNED piece diverges, renders the
+// safe live-form rewrite (PVE's volume id + size spelling preserved, owned
+// tokens overridden, non-owned tokens carried verbatim).
+func lxcMountLiveRewrite(curWire string, m LXCMount) (string, bool) {
+	cur := parseDiskInfo(curWire)
+	// mp= and the option tokens land in cur.rawExtra via parseDiskInfo;
+	// re-extract the ones we own from the raw string.
+	liveMP := lxcRawToken(curWire, "mp=")
+	need := m.MountPoint != "" && liveMP != "" && m.MountPoint != liveMP
+	if o := m.Options; o != nil {
+		for _, c := range []struct {
+			want *bool
+			tok  string
+			def  bool
+		}{{o.ReadOnly, "ro=", false}, {o.Backup, "backup=", true}, {o.ACL, "acl=", false}, {o.Quota, "quota=", false}, {o.Shared, "shared=", false}} {
+			lv, present := lxcRawBoolToken(curWire, c.tok)
+			eff := c.def
+			if present {
+				eff = lv
+			}
+			if eff != *c.want {
+				need = true
+			}
+		}
+		if o.MountOptions != "" {
+			if lv := lxcRawToken(curWire, "mountoptions="); lv != "" && lv != o.MountOptions {
+				need = true
+			}
+		}
+	}
+	if !need {
+		return "", false
+	}
+	s := cur.pool + ":" + cur.volumeName
+	if cur.sizeSet {
+		s += ",size=" + cur.sizeToken
+	}
+	mp := liveMP
+	if m.MountPoint != "" {
+		mp = m.MountPoint
+	}
+	if mp != "" {
+		s += ",mp=" + mp
+	}
+	s += lxcMountOptionTokens(m.Options)
+	// Carry every live token we did NOT own or override.
+	s += lxcRawTokensExcept(curWire, "mp", "ro", "backup", "acl", "quota", "shared", "mountoptions", "size")
+	return s, true
+}
+
+// lxcRawToken returns the value of a "k=v" token in PVE's mpN report value,
+// "" when absent.
+func lxcRawToken(raw, kv string) string {
+	for _, t := range strings.Split(raw, ",") {
+		t = strings.TrimSpace(t)
+		if v, found := strings.CutPrefix(t, kv); found {
+			return v
+		}
+	}
+	return ""
+}
+
+// lxcRawBoolToken returns the bool value of a "k=<0|1>" token plus whether
+// the token was present at all.
+func lxcRawBoolToken(raw, kv string) (bool, bool) {
+	for _, t := range strings.Split(raw, ",") {
+		t = strings.TrimSpace(t)
+		if v, found := strings.CutPrefix(t, kv); found {
+			return v == "1" || v == "true", true
+		}
+	}
+	return false, false
+}
+
+// lxcRawTokensExcept re-emits every "k=v" token of PVE's mpN value except
+// the named keys (and the leading volume token / size token), preserving
+// PVE's verbatim spelling for the tokens proxops does not own.
+func lxcRawTokensExcept(raw string, except ...string) string {
+	skip := map[string]bool{"mp": true}
+	for _, e := range except {
+		skip[e] = true
+	}
+	var out []string
+	for i, t := range strings.Split(raw, ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if i == 0 {
+			continue // the volume token (pool:volid)
+		}
+		eq := strings.IndexByte(t, '=')
+		if eq <= 0 {
+			out = append(out, t)
+			continue
+		}
+		if skip[t[:eq]] {
+			continue
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return "," + strings.Join(out, ",")
+}
+
+// lxcBindDrift classifies one BIND-mount slot against the desired
+// LXCBinding. Posture (M13, probe-verified PVE 9.2.2):
+//   - empty slot            -> create-form write. PVE restricts bind writes
+//     to root@pam (API tokens get HTTP 403), so with a token identity the
+//     action FAILS CLOSED at apply time and surfaces as a failed action —
+//     proxops never reports false convergence.
+//   - live allocated volume -> anomaly: swapping a bind for a volume (or
+//     vice versa) touches data-bearing storage; never automatic.
+//   - live bind, different HOST path -> anomaly: re-pointing a bind exposes
+//     a different host directory to the container (potential host-data
+//     damage); operator must reconcile.
+//   - live bind, same host path     -> guest path + ro converge in place.
+func lxcBindDrift(slot string, b LXCBinding, curWire string) (map[string]any, bool, []string) {
+	upd := map[string]any{}
+	anoms := make([]string, 0, 1)
+	if isNewStorageSlot(curWire) {
+		upd[slot] = lxcBindCreateWire(b)
+		return upd, true, anoms
+	}
+	if !isLXCBindMount(curWire) {
+		anoms = append(anoms, fmt.Sprintf(
+			"%s is a live allocated volume (%q) but spec.bind-mounts declares a host-path bind — proxops will not swap a bind mount and a storage volume on one slot (data safety); reconcile the manifest or move one off this slot",
+			slot, curWire))
+		return upd, false, anoms
+	}
+	liveHost, liveGuest, liveRO, _ := lxcBindParseLive(curWire)
+	if liveHost != "" && strings.TrimRight(liveHost, "/") != strings.TrimRight(b.HostPath, "/") {
+		anoms = append(anoms, fmt.Sprintf(
+			"%s bind host path drift (live=%q; desired=%q); proxops will NOT re-point a live bind mount — exposing a different host directory to a running container can damage host data; reconcile deliberately on PVE",
+			slot, liveHost, b.HostPath))
+		return upd, false, anoms
+	}
+	need := b.MountPoint != "" && liveGuest != "" && b.MountPoint != liveGuest
+	if b.ReadOnly != nil {
+		eff := false
+		if liveRO != nil {
+			eff = *liveRO
+		}
+		if eff != *b.ReadOnly {
+			need = true
+		}
+	}
+	if need {
+		upd[slot] = lxcBindCreateWire(b)
+		return upd, true, anoms
+	}
+	return upd, false, anoms
+}
+
 // DriftAnomalies surfaces live-only LXC mount-point slots (mp*) that the
 // manifest does not declare. Same semantics as VM.DriftAnomalies for disks:
 // proxops will not automatically delete a live-only mount point (PVE's
@@ -759,13 +1153,20 @@ func (l *LXC) DriftAnomalies(current map[string]any) []string {
 		}
 		want[slot] = true
 	}
+	for i, b := range l.Spec.BindMounts {
+		slot := b.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("mp%d", len(l.Spec.MountPoints)+i)
+		}
+		want[slot] = true
+	}
 	out := make([]string, 0, 2)
 	for k, raw := range current {
 		if !isMPSlot(k) {
 			continue
 		}
 		if !want[k] && !isNoneSlot(pveStr(raw)) {
-			out = append(out, fmt.Sprintf("live-only LXC mountpoint slot %s=%s is not in spec.mount-points; proxops will not automatically remove it", k, pveStr(raw)))
+			out = append(out, fmt.Sprintf("live-only LXC mountpoint slot %s=%s is not in spec.mount-points or spec.bind-mounts; proxops will not automatically remove it", k, pveStr(raw)))
 		}
 	}
 	out = append(out, l.lxcDiskAnoms...)
@@ -880,9 +1281,26 @@ func (l *LXC) Drift(current map[string]any) (map[string]any, bool, bool) {
 		if slot == "" {
 			slot = fmt.Sprintf("mp%d", i)
 		}
-		du, ds, da := l.lxcDiskSlotDrift(slot, lxcLVMAlloc(m.Storage, m.Size), pveStr(current[slot]))
-		if v, ok := du[slot]; ok {
-			upd[slot] = v
+		du, ds, da := lxcMountDrift(slot, m, pveStr(current[slot]))
+		for k, v := range du {
+			upd[k] = v
+		}
+		if ds {
+			stop = true
+		}
+		l.lxcDiskAnoms = append(l.lxcDiskAnoms, da...)
+	}
+	// bind mounts (M13): host-path binds on mp* slots. See lxcBindDrift for
+	// the fail-closed posture (PVE restricts bind writes to root@pam; a
+	// re-point of a live bind's host path is an anomaly, never automatic).
+	for i, b := range l.Spec.BindMounts {
+		slot := b.Slot
+		if slot == "" {
+			slot = fmt.Sprintf("mp%d", len(l.Spec.MountPoints)+i)
+		}
+		du, ds, da := lxcBindDrift(slot, b, pveStr(current[slot]))
+		for k, v := range du {
+			upd[k] = v
 		}
 		if ds {
 			stop = true
