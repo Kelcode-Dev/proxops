@@ -265,6 +265,12 @@ type SopsClusterSecrets struct {
 // Defaults returns a Config with sensible default values. PVE cluster
 // endpoints are intentionally NOT defaulted: they are environment-specific
 // and Validate() refuses to run the agent when no named cluster is present.
+//
+// M13.1: the git source is intentionally NOT defaulted either — a config
+// needs a source (git.url for remote, or git.path for local) before it can
+// run. The repository-first CLI loaders (LoadLocal / LoadCluster) anchor the
+// source to the operator's work tree for the canonical local workflow;
+// in-memory tests build complete source declarations explicitly.
 func Defaults() *Config {
 	return &Config{
 		Log:  LogConfig{Level: "info"},
@@ -354,11 +360,22 @@ func Load(path string) (*Config, error) {
 	// fails closed with a clear error: proxops never silently picks a git
 	// tree for the operator (task §5: no implicit magic, no silent
 	// selection).
+	// M9: the git.path sentinel. "git.path: ." means "this proxops config
+	// lives inside the GitOps repo; use the repo that contains this config
+	// file as the git work tree". It is only meaningful when written
+	// EXPLICITLY in the file: the Defaults() git block is empty, so a
+	// git.path of "." after Load can only come from the operator. Load
+	// walks upward from the config file's directory to the nearest .git
+	// marker. If no such ancestor exists, Load fails closed with a clear
+	// error: proxops never silently picks a git tree for the operator
+	// (task §5: no implicit magic, no silent selection). The repository-
+	// first CLI loaders (LoadLocal/LoadCluster) anchor a tree-less config
+	// to its discovered root instead — see those functions.
 	if c.Git.Path == "." {
 		if root := walkUpForGitRoot(filepath.Dir(path)); root != "" {
 			c.Git.Path = root
 		} else {
-			return nil, fmt.Errorf("git.path: \".\" was set in %s but no .git worktree was found in any ancestor directory; proxops will not guess the git tree — cd into the GitOps repository and retry, or set an explicit git.path", path)
+			return nil, fmt.Errorf("git.path: \".\" was set in %s but no .git worktree was found in any ancestor directory; proxops will not guess the git tree — keep this config inside its ProxOps GitOps repository and run proxops there, or set an explicit git.path", path)
 		}
 	}
 	return c, nil
@@ -524,6 +541,17 @@ func OverlayFromEnv(c *Config) {
 func (c *Config) Validate() error {
 	var errs []string
 
+	// M13.1: the bare git.path "." is the LOCAL-MODE SENTINEL (Defaults;
+	// cluster-local configs that anchor to their work tree). When a remote
+	// git.url is also present, the sentinel is the default, not an explicit
+	// local selection: drop it here so in-memory configs and Loaded configs
+	// agree. An explicit NON-sentinel local path plus a URL still fails the
+	// mutual-exclusion check below. (Load does the same drop at its own
+	// boundary, before the "." walk-up runs.)
+	if c.Git.URL != "" && c.Git.Path == "." {
+		c.Git.Path = ""
+	}
+
 	switch c.PVE.Auth {
 	case AuthToken:
 		// Global pve.user/token-id/token are the BOOTSTRAP credentials.
@@ -663,11 +691,23 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// M13.1: the repository-first local mode (LoadLocal) and the
+	// advanced single-cluster path (LoadCluster) anchor git.path to the
+	// discovered repository root — and may do so via an implicit default
+	// that reads as a bare "." when the config declares git.url AND an
+	// in-repo process config pins git.path ".". A config that has a
+	// REMOTE git url is not a local-mode config: drop the sentinel so
+	// Validate does not reject the url+path combination. An EXPLICIT
+	// non-sentinel local path plus a URL still fails the mutual-
+	// exclusion check below.
+	if c.Git.URL != "" && c.Git.Path == "." {
+		c.Git.Path = ""
+	}
 	if c.Git.URL != "" && c.Git.Path != "" {
 		errs = append(errs, "git.url and git.path are mutually exclusive; pick one")
 	}
 	if c.Git.URL == "" && c.Git.Path == "" {
-		errs = append(errs, "a git source is required: set git.url or git.path")
+		errs = append(errs, "a git source is required: set git.url or git.path (repository-first invocations anchor this to the work tree you are inside)")
 	}
 	if c.Git.Branch == "" {
 		errs = append(errs, "git.branch must not be empty")
@@ -705,6 +745,183 @@ func (c *Config) sopsCoversCreds() bool {
 		}
 	}
 	return false
+}
+
+// LoadLocal loads a proxops config in the repository-first LOCAL mode that a
+// real user normally runs: ProxOps was invoked from inside a GitOps
+// repository and the source of truth is that working tree (no git fetch, no
+// token).
+//
+// This is the canonical user experience (M13.1):
+//
+//	cd <proxops gitops repository>
+//	proxops diff
+//
+// LoadLocal resolves three things deterministically:
+//
+//  1. repository root — walk up from dir (usually the CWD) to the nearest
+//     .git worktree marker, via DiscoverGitRoot. When no such marker exists,
+//     LoadLocal FAILS CLOSED: ProxOps never silently invents a repository
+//     (the user has not actually cd'ed into one).
+//  2. process-wide configuration — <root>/proxops.yaml if present, else
+//     Defaults(). This file (when present) carries log/reconcile/listen/
+//     data-dir, bootstrap credentials, git URL-mode overrides, etc. It is
+//     OPTIONAL: a repository may ship nothing here and rely on defaults.
+//  3. cluster configuration — every <root>/clusters/<name>/config.yaml.
+//     Each one is a ProxOps config scoped to that PVE cluster (see Load's
+//     cluster-file semantics: relative secrets-file resolves against the
+//     cluster directory, git.path "." resolves to <root>).
+//
+// The repository root is returned as git.path; the caller (the CLI) is
+// responsible for the explicit-path override.
+//
+// LoadLocal does NOT call Validate: the caller chains ResolveSOPS →
+// Validate (the app-layer order), so a repository with a cluster that
+// references SOPS still resolves the secrets before the credential-coverage
+// check runs.
+func LoadLocal(dir string) (*Config, string, error) {
+	root := DiscoverGitRoot(dir)
+	if root == "" {
+		return nil, "", fmt.Errorf("no ProxOps GitOps repository found in %q or any parent: proxops was not invoked from inside a git work tree — cd into the repository and retry, or point proxops at one with --config (URL mode) / PROXOPS_CONFIG", dir)
+	}
+	c := Defaults()
+	procPath := filepath.Join(root, "proxops.yaml")
+	if _, err := os.Stat(procPath); err == nil {
+		if loaded, lerr := Load(procPath); lerr == nil {
+			c = loaded
+		}
+	}
+
+	// Discover clusters: each <root>/clusters/<name>/ with a config.yaml.
+	clusterDir := filepath.Join(root, "clusters")
+	entries, rerr := os.ReadDir(clusterDir)
+	if rerr != nil {
+		if !os.IsNotExist(rerr) {
+			return c, root, fmt.Errorf("read clusters/: %w", rerr)
+		}
+		// No clusters/ directory yet: a repository that has not been composed
+		// fails closed at Validate ("at least one named PVE cluster").
+	} else {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			clPath := filepath.Join(clusterDir, e.Name(), "config.yaml")
+			if _, serr := os.Stat(clPath); serr != nil {
+				continue
+			}
+			cl, cerr := Load(clPath)
+			if cerr != nil {
+				return c, root, fmt.Errorf("cluster %s: %w", e.Name(), cerr)
+			}
+			// A cluster-local config declares exactly ONE entry, named after
+			// its own directory. Any other shape fails closed: it is the
+			// M8 "key == dir" invariant, without which ProxOps could not
+			// tell which endpoint a composition belongs to.
+			if len(cl.PVE.ClusterNames()) == 0 {
+				return c, root, fmt.Errorf("cluster %s: clusters/%s/config.yaml declares no pve.clusters entry; it must name exactly one cluster (%s)", e.Name(), e.Name(), e.Name())
+			}
+			for _, name := range cl.PVE.ClusterNames() {
+				if name != e.Name() {
+					return c, root, fmt.Errorf("cluster %s: clusters/%s/config.yaml declares pve.clusters.%q, which does not match its directory name; a cluster-local config declares exactly one entry named after its directory", e.Name(), e.Name(), name)
+				}
+				// Per-cluster SOPS secret files were already resolved
+				// against clPath's directory by Load; carry the whole entry
+				// into c.
+				c.PVE.Clusters[name] = cl.PVE.Clusters[name]
+			}
+		}
+	}
+
+	// Pin the local source of truth to the discovered root. Rules:
+	//   - a URL-mode process config (git.url set) is honoured as-is; we do
+	//     NOT pin a local path over the operator's explicit remote.
+	//   - a process config that already carries an explicit, non-default
+	//     git.path (the operator wrote their own local work tree path) is
+	//     honoured as-is.
+	//   - otherwise we pin to the discovered root: this is the canonical
+	//     repository-first "cd into your GitOps repo and run proxops"
+	//     contract.
+	if c.Git.URL == "" && c.Git.Path == "" {
+		c.Git.Path = root
+	}
+	return c, root, nil
+}
+
+// LoadCluster loads a single configuration file the operator pointed
+// --config at. This is the advanced, backward-compat path the canonical
+// repository-first mode makes unnecessary; it exists so pre-M13.1
+// workflows keep working unchanged:
+//
+//   - clusters/<name>/config.yaml — a cluster-local config: Load's git.path
+//     "." walk-up anchors it to the repository that contains the file (the
+//     M9 SOPS anchor behaviour), and the CLI merges it under <root>/
+//     proxops.yaml when one is present.
+//   - any other proxops.yaml (root bootstrap / URL-mode / SOPS-anchored
+//     root config) — loaded as-is.
+//
+// LoadCluster loads ONE config file and does NOT discover sibling clusters:
+// use LoadLocal for the canonical multi-cluster discovery.
+func LoadCluster(clusterCfgPath string) (*Config, error) {
+	c, err := Load(clusterCfgPath)
+	if err != nil {
+		return nil, err
+	}
+	// A config that ended up with NO git source at all (URL empty AND path
+	// empty) cannot be run: pin it to the repository that contains the
+	// config file when one is discoverable, else fail closed with a clear
+	// error pointing at the missing source declaration.
+	if c.Git.Path == "" && c.Git.URL == "" {
+		if root := DiscoverGitRoot(filepath.Dir(clusterCfgPath)); root != "" {
+			c.Git.Path = root
+		} else {
+			return nil, fmt.Errorf("%s declares no git source (git.url or git.path) and no .git worktree was found in any ancestor of it; set git.url / git.path in the config, or point --config at a file inside its ProxOps GitOps repository", clusterCfgPath)
+		}
+	}
+	return c, nil
+}
+
+// DiscoverGitRoot finds the root of the git worktree that contains dir.
+// A .git marker (file or directory) is accepted; walking stops at the
+// filesystem root. Returns "" when no .git ancestor exists.
+func DiscoverGitRoot(dir string) string {
+	return walkUpForGitRoot(absDir(dir))
+}
+
+// absDir canonicalises a dir to absolute. It is used as a tiny helper to keep
+// DiscoverGitRoot CWD-independent in the rare case a caller passes ".".
+func absDir(dir string) string {
+	if dir == "" {
+		return "."
+	}
+	if filepath.IsAbs(dir) {
+		return dir
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return dir
+	}
+	return filepath.Join(wd, dir)
+}
+
+// FileHasGitURL reports whether the YAML file at p contains a git.url key
+// (i.e. it is a URL-mode process-wide config). Used by the CLI to disambiguate
+// "proxops.yaml in the CWD" vs "a cluster-local config file that happens to
+// live in the CWD".
+func FileHasGitURL(p string) bool {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		Git struct {
+			URL string `yaml:"url"`
+		} `yaml:"git"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return false
+	}
+	return doc.Git.URL != ""
 }
 
 // GitCacheDir returns the directory the go-git clone cache lives in.

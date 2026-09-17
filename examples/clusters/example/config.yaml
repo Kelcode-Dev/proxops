@@ -1,0 +1,45 @@
+# ProxOps cluster-local configuration for the "example" PVE cluster.
+#
+# This file declares exactly ONE pve.clusters entry, named after its own
+# directory (clusters/example/ -> pve.clusters.example). That
+# "key == directory" identity is enforced: a cluster-local config that
+# declares a different name fails ProxOps closed.
+#
+# It describes configuration that belongs to THIS PVE cluster:
+#   - the PVE API endpoint (base-url)
+#   - the node allowlist (the cluster boundary)
+#   - the SOPS-encrypted credentials (secrets-file + secrets reference)
+#
+# Process-wide concerns (log, reconcile, listen, data-dir) belong in the
+# repository's optional proxops.yaml, NOT here.
+#
+# "SYNTHETIC, TEST-ONLY" — this example uses a fictional endpoint and a
+# fictional age recipient. It demonstrates the shape of the file; it is NOT
+# meant to be used against a real PVE cluster as-is.
+
+pve:
+  auth: token
+  clusters:
+    example:
+      # The single PVE API endpoint for this cluster (one host reaches every
+      # node of the cluster; PVE node names live only in the request path).
+      base-url: https://pve.example.invalid:8006
+      # Node allowlist: the cluster boundary. A manifest whose spec.node is
+      # not in this list aborts this cluster's cycle BEFORE any PVE call.
+      nodes:
+        - pve01
+        - pve02
+      # SOPS-encrypted credentials for THIS cluster. The file lives next to
+      # this config; the public age recipient is in the SOPS file's sops:
+      # metadata (commit-able) and the PRIVATE age key lives OUTSIDE this
+      # repository (never committed, supplied via SOPS_AGE_KEY_FILE).
+      secrets-file: secrets.sops.yaml
+      # Which decrypted SOPS keys carry which ProxOps credential fields.
+      secrets:
+        pve:
+          user: proxops-user
+          token-id: proxops-token-id
+          token: proxops-token
+          # password: proxops-password   # only when pve.auth: ticket
+        git:
+          token: proxops-git-token       # only needed in git URL mode

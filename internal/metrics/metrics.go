@@ -4,12 +4,15 @@
 package metrics
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
 var (
 	registry = prometheus.NewRegistry()
+	registerOnce sync.Once
 
 	// CyclesTotal counts reconcile cycles by result.
 	CyclesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -74,18 +77,24 @@ var (
 )
 
 // Register wires all collectors into the shared registry and returns it.
+// Idempotent across multiple calls within one process (the agent is built
+// once per CLI invocation, but tests may build several agents in the same
+// process): the collectors are registered on the FIRST call, and every
+// subsequent call returns the same already-populated registry.
 func Register() *prometheus.Registry {
-	registry.MustRegister(
-		CyclesTotal,
-		GitLastFetchAgeSeconds,
-		PVELastAuthAgeSeconds,
-		ActionsTotal,
-		PruneDeferred,
-		Anomalies,
-		ReadOnly,
-		DesiredStale,
-		Objects,
-		collectors.NewGoCollector(),
-	)
+	registerOnce.Do(func() {
+		registry.MustRegister(
+			CyclesTotal,
+			GitLastFetchAgeSeconds,
+			PVELastAuthAgeSeconds,
+			ActionsTotal,
+			PruneDeferred,
+			Anomalies,
+			ReadOnly,
+			DesiredStale,
+			Objects,
+			collectors.NewGoCollector(),
+		)
+	})
 	return registry
 }

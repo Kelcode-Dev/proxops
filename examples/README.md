@@ -1,93 +1,78 @@
-# ProxOps example manifest set
+# ProxOps example GitOps repository
 
-A small, realistic stack to try against a development PVE cluster
-(nodes `pve01` + `pve02` in these examples). To use:
+A complete, minimal ProxOps GitOps repository template: **copy this whole tree
+into a new git repository, point it at your PVE cluster, and run ProxOps from
+inside it.** It demonstrates the canonical repository-first workflow and every
+resource kind ProxOps manages.
 
-1. Copy this directory into your manifest repo (git).
-2. Ensure PVE storage on each node has `content` including `iso`, `vztmpl`
-   and `import` (e.g. a `local` dir storage with ISO + container-template +
-   disk-image pools, or a dedicated storage).
-3. Point ProxOps at the repo (see `../config/proxops.yaml`), then
-   `proxops diff` → `proxops apply`.
-
-The examples are arranged in ProxOps's multi-cluster GitOps shape:
+## What you get
 
 ```
+proxops.yaml                    # OPTIONAL process-wide config (defaults work
+                                # without it): log / reconcile / listen /
+                                # data-dir + bootstrap credentials for
+                                # SOPS-less clusters
 clusters/
   example/
-    resources.yaml      # the "example" cluster's composition (NOT a
-                        # Kustomization — ProxOps has no Kustomize
-                        # semantics)
-iso/
-  base/
-    base-iso.yaml       # reusable BASE ISO: a PVE `iso` storage artifact
-ctt/
-  base/
-    golden-base.yaml    # reusable BASE CTTemplate: a PVE `vztmpl` storage
-                        # artifact (downloadable, no numeric PVE id, no
-                        # clone, no mark-template step; LXCs are
-                        # bootstrapped from it by PVE at create time via
-                        # `ostemplate`)
-diskimage/
-  base/
-    debian-13-cloud.yaml # reusable BASE DiskImage: a PVE 9 `import` storage
-                        # artifact (qcow2/vmdk/raw). A VM disk references it
-                        # via `spec.disks[].image` and ProxOps seeds the
-                        # disk at create with PVE's `import-from` form — the
-                        # way to boot a real VM from a cloud image without a
-                        # template.
-vm/
-  example/
-    talos-worker-01.yaml  # cluster-specific VM: Talos worker with pinned
-                          # hardware, options, and the three-state CD/DVD
-                          # documented in its `hardware:` comment
-    app-vm.yaml           # cluster-specific VM: shows the optional
-                          # `proxops/depends-on` annotation escape
-                          # hatch combined with a structured `cdrom.iso`
-                          # reference
-    cloudinit-vm.yaml     # cluster-specific VM: the end-to-end cloud-init
-                          # shape — a DiskImage-seeded disk + cloud-init
-                          # drive + ci-user/ssh-keys/nameservers/ipconfig
-                          # (validated live on PVE 9.2)
-lxc/
-  example/
-    cache-01.yaml         # cluster-specific LXC: cache container pinned to
-                          # pve01; references `golden-base` via
-                          # `spec.template` — a structured `LXC → CTTemplate`
-                          # dependency is inferred; the planner downloads the
-                          # file first
-templatevm/
-  example/
-    almalinux-tpl.yaml    # cluster-specific TemplateVM: a qemu VM promoted to
-                          # a PVE template (template=1); state must be stopped
-templatect/
-  example/
-    debian-tpl.yaml       # cluster-specific TemplateCT: an LXC container
-                          # promoted to a PVE template (template=1); the LXC
-                          # analogue of TemplateVM, DISTINCT from the ctt/
-                          # vztmpl artifact kind; state must be stopped
+    config.yaml                 # cluster-local config: PVE endpoint, node
+                                #   allowlist, SOPS credentials reference
+    secrets.sops.yaml           # SOPS/age-encrypted PVE + git credentials
+                                #   (ALL VALUES SYNTHETIC — replace with your
+                                #   own; never commit a real private age key)
+    resources.yaml              # composition: resource files the "example"
+                                #   cluster consumes
+iso/base/…                      # 1 base ISO (shared, downloadable artifact)
+ctt/base/…                      # 1 base CTTemplate (shared, downloadable)
+diskimage/base/…                # 1 base DiskImage (cloud image for VM disks)
+vm/example/…                    # 4 VMs: talos worker (base ISO cdrom),
+                                #   clone-vm (TemplateVM clone), app-vm
+                                #   (depends-on escape hatch), cloudinit-vm
+                                #   (DiskImage-seeded + cloud-init data)
+lxc/example/…                   # 1 LXC bootstrapped from the base CTTemplate
+templatevm/example/…            # 1 TemplateVM (a VM promoted to PVE template)
+templatect/example/…            # 1 TemplateCT (a CT promoted to PVE template)
 ```
 
-- **base resources** under `<kind>/base/` are reusable: any cluster may list
-  the very same file in its `clusters/<cluster>/resources.yaml`, and the
-  file is not owned by any single cluster.
-- **cluster-specific resources** under `<kind>/<cluster>/` belong to that
-  cluster's composition; another cluster can only reference them if it lists
-  them explicitly.
-- **The cluster's config** lives at `clusters/<cluster>/config.yaml`; the
-  ProxOps process can read its PVE endpoints + credentials either from
-  that cluster-local file (recommended, SOPS-backed — see
-  docs/OPERATIONS.md) or from a root bootstrap config (see
-  `config/proxops.yaml` for the template). The GitOps composition file
-  `resources.yaml` is the per-cluster Git boundary.
-  The parser merges both edge sets before the planner schedules creates.
+The PVE endpoints, node names and credentials in the examples are **synthetic
+fictions** (`pve.example.invalid`, `example@pam`, …). Replace them with your
+real values before using the tree against a live cluster.
 
-PVE id-space note: the kinds that DO carry a numeric PVE id (VM, LXC,
-TemplateVM, TemplateCT) share ONE per-node integer pool. These examples pin
-well-separated ids to keep that obvious to readers: 142 (VM), 400
-(annotation-example VM), 410 (cloud-init VM), 900 (TemplateVM), 910
-(TemplateCT), 9000 (LXC). A TemplateCT shares the LXC id space (PVE lists
-both as type="lxc"), exactly as a TemplateVM shares the qm id space.
-The artifact kinds (`ISO`, `CTTemplate`, `DiskImage`) have **no** numeric
-PVE id — their only identity is `(node, storage, filename)` on the PVE side
-and `metadata.name` on the ProxOps side.
+## First run (repository-first)
+
+```sh
+# 1. Copy this tree into a new git repository:
+mkdir my-gitops && cp -r <operator>/examples/* my-gitops/ && cd my-gitops
+git init -b main && git add -A && git commit -m "initial proxops gitops repo"
+
+# 2. Point the cluster at YOUR PVE:
+#    edit clusters/example/config.yaml (base-url + node allowlist)
+#    rebuild clusters/example/secrets.sops.yaml for your age key (see the
+#    operator's docs/CREDS.md — the private key stays OUTSIDE the repo)
+
+# 3. ProxOps now knows everything from the directory it is launched from:
+export SOPS_AGE_KEY_FILE=~/.local/share/proxops/example.age   # if SOPS mode
+proxops diff              # read-only: shows the plan against PVE
+proxops apply --dry-run   # same, rendered through the full pipeline
+proxops apply             # converge
+```
+
+No `--config`, no work-tree path: `proxops` discovers the repository from the
+current directory and reads its optional process-wide `proxops.yaml` plus each
+`clusters/<cluster>/config.yaml`.
+
+## The composition
+
+`clusters/example/resources.yaml` explicitly lists every resource file the
+"example" cluster reconciles (NOT a Kustomization — ProxOps has no Kustomize
+semantics). Bases under `<kind>/base/` are shared by reference (any cluster
+may list the very same file); cluster-specific files under
+`<kind>/example/` belong to this cluster's composition.
+
+PVE id-space note: the kinds that carry a numeric PVE id (VM, LXC, TemplateVM,
+TemplateCT) share ONE per-node integer pool. These examples pin well-separated
+ids: 142 (VM), 400 (app-vm), 410 (cloudinit-vm), 900 (TemplateVM), 910
+(TemplateCT), 9000 (LXC), 901 (clone-vm). A TemplateCT shares the LXC id
+space (PVE lists both as `type="lxc"`), exactly as a TemplateVM shares the qm
+id space. The artifact kinds (`ISO`, `CTTemplate`, `DiskImage`) have **no**
+numeric PVE id — their identity is `(node, storage, filename)` on the PVE
+side and `metadata.name` on the ProxOps side.

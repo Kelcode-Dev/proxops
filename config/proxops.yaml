@@ -1,59 +1,47 @@
-# ProxOps — reference configuration (multi-cluster model).
+# ProxOps — PROCESS-WIDE configuration template (repository-first model).
 #
-# Precedence (lowest → highest): built-in defaults → this file → CLI flags →
-# environment (credentials ONLY, never read from this file or flags).
-# Every field is optional; defaults are shown as comments.
+# The canonical workflow does NOT need this file at all: a ProxOps GitOps
+# repository IS the unit of operation. `cd` into the repository and run
+# `proxops diff` — ProxOps discovers the repository from the current
+# directory, uses this file when present (as <repo>/proxops.yaml) for
+# process-wide settings, and reads each clusters/<name>/config.yaml for
+# per-cluster endpoint / allowlist / credentials.
 #
-# Load with:  proxops run --config config/proxops.yaml
+# This template shows every process-wide field (optional; defaults are
+# sensible). Put ONLY process-level concerns here (log, reconcile knobs,
+# listen, data-dir, bootstrap credentials, git URL-mode overrides).
+# Per-cluster concerns belong in clusters/<name>/config.yaml — never here.
 #
-# pve.clusters is a map of NAMED PVE clusters. Each cluster has its own
-# base-url (endpoint) and node allowlist. proxops's reconcile cycle is
-# cluster-scoped: one proxops git composition
-# (clusters/<name>/resources.yaml) → one named cluster → one PVE endpoint →
-# one node allowlist → that cluster's resources. There is no implicit
-# "current cluster".
+# Precedence (lowest → highest): built-in defaults → this file → CLI flags
+# → environment (credentials ONLY; never read from this file or flags).
 
 log:
   level: info              # debug | info | warn | error
 
 pve:
-  auth: token              # token (PVE API token, recommended) | ticket (user+password)
-  user: root@pam           # PVE user id (token owner, or ticket user)
-  token-id: proxops     # token name for auth=token (user@pam!token-id=<uuid>)
+  # Bootstrap credentials, used ONLY by clusters that do not carry a SOPS
+  # secrets-file reference (clusters whose credentials come from env).
+  auth: token              # token (PVE API token, recommended) | ticket
+  user: ""                 # PVE user id (token owner, or ticket user)
+  token-id: ""             # token name for auth=token (user@realm!token-id=<uuid>)
   # token: ""              # token uuid — use env PROXOPS_PVE_TOKEN
   # token-value: ""        # fully-composed "user@realm!tokenid=uuid" —
                            # use env PROXOPS_PVE_TOKEN_VALUE (overrides the pair)
   # password: ""           # ticket auth only — use env PROXOPS_PVE_PASSWORD
   # ca-file: ""            # PVE cluster CA (shared by every cluster); empty = system trust store
-
-  # Named PVE clusters. At least one is required.
-  # The cluster name MUST match a GitOps composition directory
-  # (clusters/<name>/resources.yaml) — the name is the shared identity.
-  # A composition with no entry here (or vice-versa) fails closed.
-  clusters:
-    conformance-dev:
-      # base-url is the single PVE API endpoint for this cluster: PVE exposes
-      # the whole API on every node, so one FQDN reaches every object on every
-      # node of that cluster; the node name lives only in the request path.
-      # Must be a resolvable hostname, not a bare PVE node name.
-      base-url: https://pve-dev-01.example:8006
-      # Node allowlist (cluster boundary). A manifest spec.node outside this
-      # list aborts the cluster's cycle before any PVE call; every PVE read,
-      # write, and prune candidate is scoped to these nodes.
-      nodes:
-        - pve-dev-01
-        - pve-dev-02
-    # Add more clusters (e.g. prod-a) here when needed. Each cluster
-    # must have its own base-url (endpoints are never shared between named
-    # clusters — that would merge two live inventories into one prune scope).
+  clusters: {}             # clusters are declared CLUSTER-LOCALLY in
+                           # clusters/<name>/config.yaml, not here.
 
 git:
-  # URL mode (default):
-  url: https://github.com/example/proxops-manifests.git
+  # Local (repository-first) mode is the default: the work tree ProxOps was
+  # launched from is the source of truth (no fetch, no token). No git block
+  # is required for that.
+  #
+  # URL mode (optional override): reconcile a REMOTE git repository instead
+  # of the local work tree:
+  # url: https://git.example.com/you/proxops-gitops.git
   branch: main
   # token: ""              # use env PROXOPS_GIT_TOKEN
-  # Local (air-gapped) mode — mutually exclusive with url:
-  # path: /var/lib/proxops/manifests
 
 reconcile:
   poll-interval: 30s       # watch-mode cycle cadence

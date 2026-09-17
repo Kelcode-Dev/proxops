@@ -1,0 +1,55 @@
+# ProxOps process-wide configuration (M13.1 repository-first model).
+#
+# THIS FILE IS OPTIONAL. If a repository does not commit it, ProxOps uses
+# built-in defaults. When present, it carries the process-level concerns
+# shared by every ProxOps invocation in this repository:
+#
+#   - log / reconcile / listen / data-dir (daemon + one-shot behaviour)
+#   - bootstrap PVE credentials (used ONLY for clusters that do not carry a
+#     SOPS secrets-file reference — e.g. clusters that authenticate via env)
+#   - git source overrides (rare: a repository whose work tree is not where
+#     proxops was launched from)
+#
+# Cluster-local concerns live in clusters/<name>/config.yaml (endpoint, node
+# allowlist, SOPS reference). The ProxOps repository is the unit of
+# operation: run `proxops` from inside this repository and it discovers
+# everything from here.
+#
+# Precedence (lowest → highest): built-in defaults → this file
+# → CLI flags → environment (credentials only).
+
+log:
+  level: info              # debug | info | warn | error
+
+# Bootstrap PVE credentials. Only SOPS-less clusters use these; SOPS-using
+# clusters carry their own in clusters/<name>/secrets.sops.yaml.
+pve:
+  auth: token
+  user: ""                 # e.g. root@pam — or leave empty and use env
+                           # PROXOPS_PVE_USER + PROXOPS_PVE_TOKEN
+  token-id: ""
+  # token: ""              # prefer env PROXOPS_PVE_TOKEN
+  # token-value: ""        # prefer env PROXOPS_PVE_TOKEN_VALUE
+  # ca-file: ""            # PVE cluster CA; empty = system trust store
+  clusters: {}             # intentionally empty: this repository's
+                           # clusters are declared cluster-locally, in
+                           # clusters/<name>/config.yaml
+
+git:
+  # Local (repository-first) mode is the default when no file/flag overrides
+  # it: the work tree proxops was launched from IS the source of truth.
+  #
+  # URL mode (optional): reconcile from a REMOTE git repository instead of
+  # the local work tree. Leave unset for the canonical workflow.
+  # url: https://git.example.com/you/proxops-gitops.git
+  branch: main
+  # token: ""              # use env PROXOPS_GIT_TOKEN
+
+reconcile:
+  poll-interval: 30s
+  task-timeout: 30m
+  prune-budget: 3          # max deletions per cycle, PER CLUSTER
+
+listen: 127.0.0.1:9494     # /healthz /metrics /status bind address
+                           # (use 0.0.0.0:9494 for a monitoring scrape)
+data-dir: ~/.local/share/proxops

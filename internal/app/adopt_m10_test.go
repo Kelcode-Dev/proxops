@@ -50,8 +50,11 @@ func m10GitTree(t *testing.T) string {
 	return root
 }
 
-// m10SOPSConfig writes a proxops config + fake SOPS file for one
-// SOPS-backed cluster. Returns the config path.
+// m10SOPSConfig lays a M13.1 repository-first fixture: a .git work tree with
+// a process-wide proxops.yaml (bootstrap credentials for the SOPS-less path)
+// + a single cluster-local config declaring a SOPS reference. Returns ONLY
+// the root path; callers use config.LoadLocal (the same path the canonical
+// user workflow uses, not the M9 cluster-local `git.path: .` anchor).
 func m10SOPSConfig(t *testing.T, cluster string) string {
 	t.Helper()
 	root := m10GitTree(t)
@@ -62,9 +65,21 @@ func m10SOPSConfig(t *testing.T, cluster string) string {
 	if err := os.WriteFile(filepath.Join(clDir, "secrets.sops.yaml"), []byte("ENC[stub-decryption-target]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b := "# proxops M10 test config (SOPS cluster)\n" +
+	if err := os.WriteFile(filepath.Join(clDir, "resources.yaml"), []byte("resources: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proc := "# proxops M10 test process config\n" +
 		"log:\n  level: info\n" +
-		"pve:\n  auth: token\n  clusters:\n" +
+		"pve:\n  auth: token\n" +
+		"git:\n  branch: main\n" +
+		"reconcile:\n  poll-interval: 30s\n  task-timeout: 30m\n  prune-budget: 3\n" +
+		"listen: 127.0.0.1:0\n" +
+		"data-dir: " + filepath.Join(root, "data") + "\n"
+	if err := os.WriteFile(filepath.Join(root, "proxops.yaml"), []byte(proc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clusterCfg := "# proxops M10 test cluster-local config (single-cluster SOPS)\n" +
+		"pve:\n  clusters:\n" +
 		"    " + cluster + ":\n" +
 		"      base-url: https://pve-m10-test.invalid:8006\n" +
 		"      nodes:\n        - pve-m10-test\n" +
@@ -75,15 +90,11 @@ func m10SOPSConfig(t *testing.T, cluster string) string {
 		"          token-id: proxops-token-id\n" +
 		"          token: proxops-token\n" +
 		"        git:\n" +
-		"          token: pve-git-token\n" +
-		"git:\n  branch: main\n  path: .\n" +
-		"reconcile:\n  poll-interval: 30s\n  task-timeout: 30m\n  prune-budget: 3\n" +
-		"listen: 127.0.0.1:0\n" +
-		"data-dir: " + filepath.Join(root, "data") + "\n"
-	if err := os.WriteFile(filepath.Join(clDir, "config.yaml"), []byte(b), 0o600); err != nil {
+		"          token: pve-git-token\n"
+	if err := os.WriteFile(filepath.Join(clDir, "config.yaml"), []byte(clusterCfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Join(clDir, "config.yaml")
+	return root
 }
 
 // m10StubSOPS installs a secrets.SetTestDecrypter that returns the given
@@ -101,6 +112,11 @@ func m10StubSOPS(t *testing.T, vals map[string]string, err error) {
 // agent construction. app.New's order is ResolveSOPS → Validate →
 // gitx.New → pveclient.New: the SOPS resolution step fails first, so NO
 // PVE client is ever built and NO PVE endpoint is ever dialed.
+//
+// M13.1: the agent is constructed FROM A REPOSITORY — config.LoadLocal is
+// the canonical user workflow (cd into the tree, run proxops) — not the
+// M9 cluster-local --config anchor. The SOPS fail-closed guarantee must
+// hold on that path.
 func TestAgentApp_MissingSOPSCredentialsFailsClosed(t *testing.T) {
 	// SOPS doc: everything present EXCEPT proxops-token.
 	m10StubSOPS(t, map[string]string{
@@ -108,10 +124,10 @@ func TestAgentApp_MissingSOPSCredentialsFailsClosed(t *testing.T) {
 		"proxops-token-id": "m10tok",
 		"pve-git-token":    "gittoken",
 	}, nil)
-	cfgPath := m10SOPSConfig(t, "prod-a")
-	cfg, err := config.Load(cfgPath)
+	root := m10SOPSConfig(t, "prod-a")
+	cfg, _, err := config.LoadLocal(root)
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("config.LoadLocal: %v", err)
 	}
 	if _, aerr := app.New(cfg, slog.Default(), m10Registry(), "dev"); aerr == nil {
 		t.Fatal("app.New succeeded despite a SOPS cluster with a missing referenced PVE credential — fail-closed violated")
@@ -121,12 +137,14 @@ func TestAgentApp_MissingSOPSCredentialsFailsClosed(t *testing.T) {
 // TestAgentApp_SOPSWrongIdentityFailsClosed pins that a SOPS decrypt
 // failure (wrong age identity) fails agent construction. The operator
 // never reaches PVE with credentials proxops could not verify.
+//
+// M13.1: constructed via config.LoadLocal (discovery path).
 func TestAgentApp_SOPSWrongIdentityFailsClosed(t *testing.T) {
 	m10StubSOPS(t, nil, secrets.ErrIdentityMismatch)
-	cfgPath := m10SOPSConfig(t, "prod-a")
-	cfg, err := config.Load(cfgPath)
+	root := m10SOPSConfig(t, "prod-a")
+	cfg, _, err := config.LoadLocal(root)
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("config.LoadLocal: %v", err)
 	}
 	if _, aerr := app.New(cfg, slog.Default(), m10Registry(), "dev"); aerr == nil {
 		t.Fatal("app.New succeeded despite SOPS identity mismatch — fail-closed violated")
@@ -136,12 +154,14 @@ func TestAgentApp_SOPSWrongIdentityFailsClosed(t *testing.T) {
 // TestAgentApp_SOPSBinaryMissingFailsClosed pins that a missing sops
 // binary fails agent construction: proxops never bypasses SOPS
 // resolution into a bootstrap credential.
+//
+// M13.1: constructed via config.LoadLocal (discovery path).
 func TestAgentApp_SOPSBinaryMissingFailsClosed(t *testing.T) {
 	m10StubSOPS(t, nil, secrets.ErrSOPSBinaryMissing)
-	cfgPath := m10SOPSConfig(t, "prod-a")
-	cfg, err := config.Load(cfgPath)
+	root := m10SOPSConfig(t, "prod-a")
+	cfg, _, err := config.LoadLocal(root)
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("config.LoadLocal: %v", err)
 	}
 	if _, aerr := app.New(cfg, slog.Default(), m10Registry(), "dev"); aerr == nil {
 		t.Fatal("app.New succeeded despite missing sops binary — fail-closed violated")
@@ -152,12 +172,14 @@ func TestAgentApp_SOPSBinaryMissingFailsClosed(t *testing.T) {
 // is not actually encrypted fails agent construction (the M9
 // ErrUnencryptedSecrets sentinel). A plaintext secrets file next to a
 // production config MUST NOT be silently accepted.
+//
+// M13.1: constructed via config.LoadLocal (discovery path).
 func TestAgentApp_UnencryptedSOPSFileFailsClosed(t *testing.T) {
 	m10StubSOPS(t, nil, secrets.ErrUnencryptedSecrets)
-	cfgPath := m10SOPSConfig(t, "prod-a")
-	cfg, err := config.Load(cfgPath)
+	root := m10SOPSConfig(t, "prod-a")
+	cfg, _, err := config.LoadLocal(root)
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("config.LoadLocal: %v", err)
 	}
 	if _, aerr := app.New(cfg, slog.Default(), m10Registry(), "dev"); aerr == nil {
 		t.Fatal("app.New succeeded despite an unencrypted SOPS file — fail-closed violated")
@@ -165,9 +187,11 @@ func TestAgentApp_UnencryptedSOPSFileFailsClosed(t *testing.T) {
 }
 
 // TestAgentApp_MalformedClusterNameFailsClosed pins that a malformed
-// pve.clusters key (not lowercase-alnum-dash) fails agent construction.
+// pve.clusters key (not lowercase-alnum-dash) fails repository discovery.
 // The M8 composition invariant (cluster name == <kind>/<cluster>/ dir) is
-// caught at Validate() before any PVE client is constructed.
+// caught in LoadLocal (the M13.1 repository-first path) BEFORE any PVE
+// client is constructed: a cluster-local config whose key does not match
+// its own directory name is a malformed repository.
 func TestAgentApp_MalformedClusterNameFailsClosed(t *testing.T) {
 	root := m10GitTree(t)
 	badName := "Bad Prod" // space + uppercase
@@ -175,43 +199,35 @@ func TestAgentApp_MalformedClusterNameFailsClosed(t *testing.T) {
 	if err := os.MkdirAll(clDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// The config's pve.clusters key is malformed; the directory name is
-	// fine but the cross-check invariant requires config key == dir name,
-	// and the key itself fails ValidClusterName first.
 	b := "# proxops M10 test config (malformed cluster name)\n" +
-		"log:\n  level: info\n" +
 		"pve:\n  auth: token\n  user: root@pam\n  token-id: x\n  token: y\n  clusters:\n" +
 		"    \"" + badName + "\":\n" +
 		"      base-url: https://pve-m10-bad.invalid:8006\n" +
-		"      nodes:\n        - pve-m10-bad\n" +
-		"git:\n  branch: main\n  path: .\n" +
-		"reconcile:\n  poll-interval: 30s\n  task-timeout: 30m\n  prune-budget: 3\n" +
-		"listen: 127.0.0.1:0\n" +
-		"data-dir: " + filepath.Join(root, "data") + "\n"
-	cfgPath := filepath.Join(clDir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte(b), 0o600); err != nil {
+		"      nodes:\n        - pve-m10-bad\n"
+	if err := os.WriteFile(filepath.Join(clDir, "config.yaml"), []byte(b), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		// Load may reject the malformed key up front; either way,
-		// construction must not succeed.
-		return
-	}
-	if _, aerr := app.New(cfg, slog.Default(), m10Registry(), "dev"); aerr == nil {
-		t.Fatalf("app.New accepted malformed cluster name %q", badName)
+	if _, _, err := config.LoadLocal(root); err == nil {
+		// Discovery accepted a cluster-local config whose pve.clusters key
+		// does not match its own directory name.
+		t.Fatalf("LoadLocal accepted malformed cluster name %q (key != dir invariant violated)", badName)
 	}
 }
 
-// TestAgentApp_ClusterSelectionIsolated pins that an agent built for ONE
-// configured SOPS cluster exposes exactly that cluster — PVEClientFor on
-// a different (unconfigured) name fails closed. Cluster isolation: the
-// prod-a agent cannot reach any conformance-dev endpoint or vice
-// versa.
+// TestAgentApp_ClusterSelectionIsolated pins that an agent discovered FROM
+// A REPOSITORY (the M13.1 canonical path) exposes exactly the cluster its
+// own clusters/<name>/config.yaml declared — PVEClientFor on a different
+// (unconfigured) name fails closed. Cluster isolation: the prod-a
+// agent cannot reach any conformance-dev endpoint or vice versa.
+//
+// m10RealGitTree builds a REAL git worktree because gitx.New (inside
+// app.New) resolves the work tree's HEAD; the marker-only fixtures from
+// the other m10 tests work up to gitx.New and are sufficient to pin the
+// credential fail-closed paths.
 func TestAgentApp_ClusterSelectionIsolated(t *testing.T) {
 	root := m10RealGitTree(t)
-	// Lay the SOPS cluster config inside a REAL git worktree so
-	// gitx.New (PlainOpen + HEAD resolve) succeeds.
+	// Lay the SOPS cluster config + composition inside the REAL tree so
+	// discovery (LoadLocal) finds them.
 	clDir := filepath.Join(root, "clusters", "prod-a")
 	if err := os.MkdirAll(clDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -219,8 +235,7 @@ func TestAgentApp_ClusterSelectionIsolated(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(clDir, "secrets.sops.yaml"), []byte("ENC[stub-decryption-target]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b := "# proxops M10 test config (SOPS cluster)\n" +
-		"log:\n  level: info\n" +
+	b := "# proxops M10 test config (cluster-local SOPS)\n" +
 		"pve:\n  auth: token\n  clusters:\n" +
 		"    prod-a:\n" +
 		"      base-url: https://pve-m10-test.invalid:8006\n" +
@@ -232,39 +247,33 @@ func TestAgentApp_ClusterSelectionIsolated(t *testing.T) {
 		"          token-id: proxops-token-id\n" +
 		"          token: proxops-token\n" +
 		"        git:\n" +
-		"          token: pve-git-token\n" +
-		"git:\n  branch: main\n  path: .\n" +
-		"reconcile:\n  poll-interval: 30s\n  task-timeout: 30m\n  prune-budget: 3\n" +
-		"listen: 127.0.0.1:0\n" +
-		"data-dir: " + filepath.Join(root, "data") + "\n"
-	cfgPath := filepath.Join(clDir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte(b), 0o600); err != nil {
+		"          token: pve-git-token\n"
+	if err := os.WriteFile(filepath.Join(clDir, "config.yaml"), []byte(b), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Also write the composition pieces gitx.New / validate need:
-	// a resources.yaml with an empty list (a valid zero-resource
-	// composition for prod-a).
+	// Composition pieces: resources.yaml (a valid zero-resource
+	// composition).
 	if err := os.WriteFile(filepath.Join(clDir, "resources.yaml"), []byte("resources: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
 	m10StubSOPS(t, map[string]string{
 		"proxops-user":     "root@pam",
 		"proxops-token-id": "m10tok",
 		"proxops-token":    "deadbeef",
 		"pve-git-token":    "gittoken",
 	}, nil)
-	cfg, err := config.Load(cfgPath)
+	cfg, _, err := config.LoadLocal(root)
 	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+		t.Fatalf("config.LoadLocal: %v", err)
 	}
 	agent, aerr := app.New(cfg, slog.Default(), m10Registry(), "dev")
 	if aerr != nil {
 		// Even here, the guarantee stands: NO PVE endpoint was dialed
-		// (the fail closed at construction, before pveclient use).
-		t.Skipf("agent construction failed at git stage: %v (fail-closed still held; skipping PVEClientFor assertions)", aerr)
+		// (the fails happen in SOPS resolution, credential validation, or
+		// gitx.New — all BEFORE any PVE client).
+		t.Skipf("agent construction failed: %v (fail-closed still held; skipping PVEClientFor assertions)", aerr)
 	}
-	// The agent exposes exactly one cluster.
+	// The discovered agent exposes exactly one cluster.
 	if got := agent.Clusters(); len(got) != 1 || got[0] != "prod-a" {
 		t.Fatalf("Clusters() = %v, want [prod-a] (single-cluster SOPS config)", got)
 	}

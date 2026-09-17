@@ -3,43 +3,50 @@ Description=proxops — Git → Proxmox GitOps reconciler
 Documentation=https://github.com/GizzmoShifu/proxmox-operator
 After=network-online.target
 Wants=network-online.target
-# Do NOT start if no PVE API credentials are configured — the agent would
-# abort every cycle. Override with `EnvironmentFile=` or a drop-in.
-ConditionPathExists=/etc/proxops/proxops.yaml
+# Do NOT start if the ProxOps GitOps checkout is missing — the agent would
+# fail to discover its repository and abort every cycle. Adjust the path for
+# your install layout (matches WorkingDirectory=).
+ConditionPathExists=/var/lib/proxops/gitops
 
 [Service]
 Type=simple
 User=proxops
 Group=proxops
-# Binary + config. Adjust paths to your install layout.
-ExecStart=/usr/local/bin/proxops run --config /etc/proxops/proxops.yaml
+# Repository-first invocation: the WorkingDirectory IS the ProxOps GitOps
+# checkout; proxops discovers the repository from it (no --config needed).
+WorkingDirectory=/var/lib/proxops/gitops
+ExecStart=/usr/local/bin/proxops run
 Restart=on-failure
 RestartSec=5s
 
 # Secrets come only from the environment (see docs/OPERATIONS.md).
 #
-# Bootstrap (env credentials):
+# SOPS-backed cluster-local config (recommended): supply the private age key
+# by path (OUTSIDE the repository), for every SOPS-using cluster the
+# repository declares:
+#   /var/lib/proxops/age/conformance-dev.age (0600 proxops:proxops)
+#   Environment=SOPS_AGE_KEY_FILE=/var/lib/proxops/age/conformance-dev.age
+# The repository's clusters/<name>/secrets.sops.yaml carries only the
+# ENCRYPTED values + the public age recipient (sops metadata) — never the
+# private key. Requires sops + age on PATH (docs/OPERATIONS.md →
+# "Per-cluster SOPS secrets").
+#
+# Bootstrap (env credentials, SOPS-less cluster):
 # Option A: an env file (root-only 0600):
 EnvironmentFile=-/etc/proxops/proxops.env
 # /etc/proxops/proxops.env (0600 root:proxops), e.g.:
 #   PROXOPS_PVE_TOKEN_VALUE=root@pam!proxops=<uuid>
-#   PROXOPS_GIT_TOKEN=<ghp_...>
+#   PROXOPS_GIT_TOKEN=<ghp_...>       (URL mode only; env credentials only)
 # Option B: an inline drop-in:
 #   echo 'Environment="PROXOPS_PVE_TOKEN_VALUE=root@pam!proxops=..."' > \
 #         /etc/systemd/system/proxops.service.d/cred.conf
-#   echo 'Environment="PROXOPS_GIT_TOKEN=..."' >> same file
 #
-# SOPS-backed cluster-local config (recommended):
-# point ExecStart at the cluster-local config inside the GitOps checkout,
-# and supply the private age key by path (OUTSIDE the repository):
-#   ExecStart=/usr/local/bin/proxops run \
-#     --config /var/lib/proxops/gitops/clusters/conformance-dev/config.yaml
-#   /var/lib/proxops/age/conformance-dev.age (0600 proxops:proxops)
-#   Environment=SOPS_AGE_KEY_FILE=/var/lib/proxops/age/conformance-dev.age
-# The repo's clusters/<name>/secrets.sops.yaml carries only the ENCRYPTED
-# values + the public age recipient (sops metadata) — never the private key.
-# Requires sops + age on PATH (see docs/OPERATIONS.md → "Per-cluster SOPS
-# secrets").
+# Advanced overrides (all optional, see `proxops --help`):
+#   ExecStart=/usr/local/bin/proxops run --config <file>   # URL mode or a
+#                                                          # single-cluster
+#                                                          # config file
+#   Environment=PROXOPS_GIT_PATH=/path/to/worktree        # explicit tree
+#                                                          # (no discovery)
 
 # Hardening
 NoNewPrivileges=true
