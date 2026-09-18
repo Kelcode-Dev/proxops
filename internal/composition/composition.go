@@ -1,8 +1,15 @@
 // Package composition is the multi-cluster GitOps boundary for proxops (M8).
 //
-// The repository is the source of truth. Its shape:
+// The repository is the source of truth. Its shape (M13.1
+// repository-first discovery reads the same tree the composition
+// validates):
 //
-//	clusters/<cluster>/config.yaml     # cluster-specific config (future; not SOPS)
+//	proxops.yaml                      # optional process-wide config
+//	clusters/<cluster>/config.yaml    # cluster-local ProxOps config
+//	                                  #   (one pve.clusters entry, named
+//	                                  #   after the directory; endpoint,
+//	                                  #   node allowlist, SOPS reference)
+//	clusters/<cluster>/secrets.sops.yaml # SOPS/age-encrypted creds
 //	clusters/<cluster>/resources.yaml  # declares which resource files this
 //	                                   # cluster consumes (the composition)
 //	<kind>/base/*.yaml                 # reusable resource definitions

@@ -63,8 +63,7 @@ name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
 - **Discovery source**: live adopt of conformance-dev CTs; PVE API
   documentation (`ostemplate` is a /lxc create parameter).
 - **Notes**: the operator's review step is part of the adoption contract
-  (docs/OPERATIONS.md → "Adopting existing PVE objects").
-
+    (docs/adopt.md).
 ### LXC: bind-mount writes require root@pam (fail closed under API tokens)
 
 - **Resource/area**: LXC bind mounts (`spec.bind-mounts`, `mpN` host-path form)
@@ -320,8 +319,7 @@ considered:
     supported — only `age`.
   - **Notes**: the Go module `github.com/getsops/sops/v3` would pull ~160
     transitive deps; the SOPS CLI is already mandatory on any host where
-    SOPS-encrypted secrets are managed. Documented in
-    `docs/OPERATIONS.md` § "Per-cluster SOPS secrets".
+    SOPS-encrypted secrets are managed. Documented in `docs/sops-credentials.md`.
 
 - **SOPS identity (age private key) lifecycle / rotation**
   - **Status**: `planned`

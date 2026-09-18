@@ -9,7 +9,8 @@ resource model.
 
 Before changing adoption, read:
 - `docs/ARCHITECTURE.md`
-- `docs/SCHEMA.md`
+- `docs/adopt.md` (adoption contract + production safety expectations)
+- `docs/SCHEMA.md` + `docs/ref-*.md` (resource model)
 - `docs/OPERATIONS.md`
 - `docs/GAPS.md`
 

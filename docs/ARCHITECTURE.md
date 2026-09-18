@@ -7,7 +7,9 @@ configured PVE cluster**:
 ```
                           proxops agent
         +-----------------------------------------------------------+
-        |        config:  pve.clusters = {conformance-dev, ...}     |
+        |  discovery (repository-first): CWD -> .git root          |
+        |    load optional proxops.yaml + clusters/*/config.yaml   |
+        |    -> pve.clusters = {conformance-dev, ...}              |
         |                                                          |
   git   |        +---------+   clusters/<c>/resources.yaml        |
   repo  +------->|   gitx  |   (composition: which files each     |
@@ -77,35 +79,52 @@ PVE resource        ->  only objects on those nodes are ever read/written/pruned
   two clusters sharing one endpoint -- prune scoping is endpoint-based, and
   merging inventories would be a footgun.)
 
-**Cluster-local configuration (SOPS):** the ProxOps process
-configuration can live INSIDE the GitOps repository, per cluster:
+**Repository-first configuration (M13.1):** the ProxOps GitOps
+repository carries all of its own configuration:
 
 ```
-clusters/<cluster>/config.yaml        # the proxops --config for this cluster
-clusters/<cluster>/secrets.sops.yaml  # SOPS/age-encrypted PVE + git creds
-clusters/<cluster>/resources.yaml     # resource composition
+proxops.yaml                     # OPTIONAL process-wide config
+clusters/<cluster>/config.yaml   # ONE pve.clusters entry, named after the dir
+clusters/<cluster>/secrets.sops.yaml
+clusters/<cluster>/resources.yaml
 ```
 
-A cluster-local `config.yaml` is a *complete* ProxOps config: it carries
-the shared application fields (`log`, `git`, `reconcile`, `listen`,
-`data-dir`) PLUS one entry in `pve.clusters` for that cluster (its
-`base-url`, `nodes` allowlist, and `secrets-file` + `secrets`).
-The root-level `config/proxops.yaml` (bootstrap, multi-cluster,
-env credentials) remains valid for hosts that have not adopted the
-GitOps-local config. ProxOps no longer requires a PVE credential in the
-process environment when a cluster references one via SOPS.
+Running `proxops` from inside the repository (the canonical workflow)
+does NOT require a `--config`. The CLI:
+- walks up from the CWD to the nearest `.git` ancestor (fail-closed if
+  none — ProxOps never invents a repository);
+- loads the optional `<root>/proxops.yaml` when present (log, reconcile
+  knobs, listen, data-dir, bootstrap credentials, git.url URL-mode
+  overrides) — defaults when absent;
+- loads each `<root>/clusters/<name>/config.yaml` and merges its single
+  `pve.clusters.<name>` entry into the process configuration. A
+  cluster-local file that declares a different cluster key than its
+  directory name is refused (the "key == dir" invariant);
+- pins `git.path` to the discovered root (local mode: no fetch, no
+  token, the working tree the operator is standing in IS the source of
+  truth).
+
+The advanced pre-M13.1 path (`--config <file>`) remains: it loads a
+single configuration (URL-mode process config, or a cluster-local
+config), and anchors any tree-less cluster-local config to its own
+`.git` ancestor. When the `--config` file is a cluster-local config
+inside a repository, the repository's optional `proxops.yaml` is merged
+*under* it (explicit operator values win; the process file only fills
+defaults and adds sibling clusters).
 
 Layer behaviour:
 - **config.Load** resolves `secrets-file` relative to the config file's
   own directory, so the same cluster-local config works from any CWD
   (no silent CWD dependence; no implicit magic, no cluster guessing).
-- **`git.path: "."`** is a sentinel meaning "reconcile from the git
-  worktree that contains this config file". Load canonicalises the
-  `--config` path to absolute first, then walks up from the config
-  file's own directory to the nearest `.git` marker; an absolute
-  `git.path` still works for mount / rsync setups. The walk-up is
-  config-anchored, not CWD-anchored: the same cluster-local config
-  behaves identically no matter what directory ProxOps is launched from.
+- **Repository discovery (M13.1)**: `config.LoadLocal(dir)` walks up
+  from `dir` to the nearest `.git` marker (file or directory), and
+  fails closed when none exists. `DiscoverGitRoot(dir)` is the
+  low-level helper. The `.git`-marker walk-up is
+  CWD-anchored, not config-anchored: the same `proxops` binary behaves
+  identically no matter what directory it is launched from, as long
+  as that directory is inside the same work tree. An explicit
+  `--git-path <path>` / `PROXOPS_GIT_PATH` pins the tree for
+  automation / tests, skipping discovery.
 - **`pve.clusters.<name>.secrets`** is a closed reference block:
   `pve.{user,token-id,token,password}` and `git.token`, each naming one
   top-level key under the decrypted SOPS document's `secrets:` mapping.
@@ -152,14 +171,14 @@ Layer behaviour:
   `gitx.Options.Token` carries the SOPS-resolved git token
   (when one was referenced).
 
-The root `.config.yaml` / `config/proxops.yaml` bootstrap shape is
-unchanged: `pve.{auth,user,token-id,token,token-value,password,ca-file}`
-+ `pve.clusters.<name>.{base-url,nodes}`. A cluster that sets
-`secrets-file` adds the SOPS shape but does NOT re-declare the shared
-`pve.user` / `pve.token-id` / `pve.token` in the SOPS reference — the
-SOPS document supplies them via the `secrets:` block. The shared `pve.*`
-fields still act as bootstrap credentials for any SOPS-less cluster in
-the same config.
+A `pve.clusters.<name>` entry is `base-url` + `nodes` (+ optional
+`secrets-file` / `secrets`). A cluster that sets `secrets-file` adds the
+SOPS shape but does NOT re-declare the shared `pve.user` /
+`pve.token-id` / `pve.token` in the SOPS reference — the SOPS document
+supplies them via the `secrets:` block. The shared `pve.*` fields (the
+optional process-wide `proxops.yaml`, the env overlay, or a global
+bootstrap config) still act as bootstrap credentials for any SOPS-less
+cluster in the same invocation.
 
 ## The layers
 
@@ -333,7 +352,7 @@ the multi-cluster object table; `GET /healthz` is ready once a full
 
 `internal/app` builds the agent: one git source, one status store, one
 pveclient + reconciler pair **per configured cluster** (deterministic
-sorted order), one HTTP server. Command surface:
+sorted order), one HTTP server. The M13.1 CLI is repository-first:
 
 - `proxops run` -- daemon: every tick, all clusters in order; a cluster's
   abort does not block the others.
@@ -343,18 +362,35 @@ sorted order), one HTTP server. Command surface:
   any cluster aborts.
 - `proxops status` -- per-cluster convergence table.
 - `proxops adopt --cluster <name>` -- PVE -> YAML for exactly one named
-  cluster (required flag; no implicit default). `--dry-run`/`--diff` still
-  exist on `apply`.
+  cluster (required flag; no implicit default).
 
-All commands accept `--config <path>`; credentials come only from the
-environment (see README).
+Repository-first means each command discovers the tree from the CWD:
+walks up to the nearest `.git` marker, loads the optional
+`<root>/proxops.yaml`, loads every `clusters/<name>/config.yaml`, and
+pins `git.path` to the discovered root. The advanced overrides live on
+the same command (`--config`, `--git-path`, plus the `PROXOPS_CONFIG`
+/ `PROXOPS_GIT_PATH` env vars).
+
+`buildAgent` in `cmd/proxops/main.go` is the only place the CLI and the
+app layer meet: it picks `config.LoadLocal` (repository-first) or
+`config.LoadCluster` / `config.Load` (advanced / URL mode) depending on
+the invocation, applies flag + env overlays, and hands the result to
+`app.New`. `app.New` runs the `ResolveSOPS -> Validate -> gitx.New ->
+pveclient.New -> reconciler.New` chain for every cluster.
+
+All configuration and credential semantics are documented in
+[Configuration reference](reference-config.md) and
+[SOPS & credentials](sops-credentials.md).
 
 ## Failure modes -- what happens, by design
 
 | Failure | Behavior |
 |---|---|
-| git fetch fails (first) | Cluster cycles abort; no PVE reads |
-| git fetch fails (subsequent) | Keep last-good tree; cycle `stale` |
+| No `.git` ancestor from the CWD (repository-first mode) | CLI fails closed before any PVE call ("no ProxOps GitOps repository found") |
+| Cluster-local config's key does not match its directory name | Discovery fails closed before any PVE call |
+| Malformed `proxops.yaml` (or `clusters/<name>/config.yaml`) | Discovery fails closed; the invocation does not run |
+| git fetch fails (URL mode, first) | Cluster cycles abort; no PVE reads |
+| git fetch fails (URL mode, subsequent) | Keep last-good tree; cycle `stale` |
 | Composition invalid (legacy layout, missing ref, unknown cluster) | Parse fails **closed** for the affected cluster(s); no PVE writes |
 | Parse fails on a manifest | That cluster's cycle aborts; other clusters unaffected |
 | PVE inventory read fails (one cluster) | That cluster's cycle aborts |

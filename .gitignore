@@ -6,3 +6,4 @@ proxops.yaml.local
 .env
 .config.yaml
 /proxops
+site/

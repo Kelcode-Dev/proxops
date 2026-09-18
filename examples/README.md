@@ -47,7 +47,12 @@ git init -b main && git add -A && git commit -m "initial proxops gitops repo"
 # 2. Point the cluster at YOUR PVE:
 #    edit clusters/example/config.yaml (base-url + node allowlist)
 #    rebuild clusters/example/secrets.sops.yaml for your age key (see the
-#    operator's docs/CREDS.md — the private key stays OUTSIDE the repo)
+#    operator's docs/sops-credentials.md — the private key stays OUTSIDE the
+#    repository; the committed SOPS file only carries encrypted values + the
+#    public age recipient)
+
+#    Dev shortcut: skip SOPS entirely — drop the secrets-file/secrets block
+#    from config.yaml and export PROXOPS_PVE_TOKEN_VALUE instead.
 
 # 3. ProxOps now knows everything from the directory it is launched from:
 export SOPS_AGE_KEY_FILE=~/.local/share/proxops/example.age   # if SOPS mode

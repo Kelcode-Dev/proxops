@@ -8,7 +8,10 @@ Treat Proxmox VE as an external API contract.
 
 Before changing PVE-facing code:
 1. Read the relevant sections of `docs/ARCHITECTURE.md`,
-   `docs/SCHEMA.md`, `docs/OPERATIONS.md`, and `docs/GAPS.md`.
+   `docs/SCHEMA.md` (resource overview + cross-cutting guarantees), and the
+   kind-specific reference pages (`docs/ref-vm.md`, `docs/ref-lxc.md`,
+   `docs/reference-artifacts.md`, `docs/cloudinit.md`), plus
+   `docs/OPERATIONS.md` and `docs/GAPS.md`.
 2. Inspect existing client code and tests.
 3. Determine whether the wire behaviour is already established.
 4. When uncertain, verify against disposable `conformance-dev` PVE before

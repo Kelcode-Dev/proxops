@@ -9,7 +9,10 @@ and recovering.
 
 ### Systemd (recommended for the agent)
 
-`config/proxops.service` is a template. Install it:
+`config/proxops.service` is a template for the repository-first deployment:
+it sets `WorkingDirectory=` to the ProxOps GitOps checkout and execs
+`proxops run` with no `--config` (the unit condition checks that checkout
+exists). Install it:
 
 ```sh
 sudo systemctl edit proxops   # if you want overrides
@@ -19,10 +22,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now proxops
 ```
 
-Environment credentials (see README) must be set either via
-`Environment=` lines in the unit, a `Drop-In` file under
-`/etc/systemd/system/proxops.service.d/`, or a `systemctl set-environment`
-call. Never bake secrets into `proxops.yaml`.
+Adjust `WorkingDirectory` to your checkout location. Environment credentials
+must be set either via `Environment=` lines in the unit, a `Drop-In` file
+under `/etc/systemd/system/proxops.service.d/`, or a `systemctl
+set-environment` call. Never bake secrets into a committed config: SOPS keys
+are supplied via `SOPS_AGE_KEY_FILE` (see [SOPS &
+credentials](sops-credentials.md)) or `PROXOPS_*` env vars (see
+[CLI reference](cli.md)).
 
 Example drop-in `/etc/systemd/system/proxops.service.d/cred.env`:
 
@@ -32,57 +38,64 @@ Environment="PROXOPS_PVE_TOKEN_VALUE=root@pam!proxops=0f63b28d-...."
 Environment="PROXOPS_GIT_TOKEN=ghp_...."
 ```
 
-### Config file
+### Configuration (repository-first)
 
-`config/proxops.yaml` is the canonical layout. All fields optional;
-defaults are sensible. `internal/config.Load` merges over
-`internal/config.Defaults()`; env vars overwrite credentials last.
+The normal deployment has **no standalone config file at all**: the ProxOps
+GitOps repository carries its own configuration. From inside the repository:
+
+```sh
+cd <gitops repo>
+proxops diff    # discovers the repo from the CWD, no --config needed
+```
+
+ProxOps discovers:
+
+1. the repository root (the nearest `.git` ancestor of the CWD — or of
+   `--git-path <path>` / `PROXOPS_GIT_PATH` when set);
+2. an **optional** process-wide `<root>/proxops.yaml`
+   (`log` / `reconcile` / `listen` / `data-dir` / bootstrap credentials / git
+   URL-mode); absent = defaults; and
+3. **every** `<root>/clusters/<name>/config.yaml` — each declaring exactly
+   one `pve.clusters.<name>` entry (endpoint + node allowlist + SOPS
+   reference), named after its directory.
+
+The full field reference lives in
+[Configuration reference](reference-config.md); the SOPS/credential model in
+[SOPS & credentials](sops-credentials.md).
+
+**Fail-closed configuration rules:** at least one named cluster; each name a
+valid composition identity (lowercase alnum + `-`); each `base-url` parses as
+`http(s)://host`; **two clusters may not share one endpoint** (prune scoping
+is endpoint-based); every `pve.clusters` entry must have a composition at
+`clusters/<name>/resources.yaml` in the tree, and every composition a
+configured endpoint; a cluster-local config key that does not match its
+directory name is refused.
+
+### URL mode (remote git source)
+
+For hosts that are NOT inside the repository (multi-host management, CI
+read-only, mount-based checkouts): the process-wide config declares
+`git.url` (+ `branch`, `token` via env), and ProxOps clones/fetches the
+remote into the data-dir and reconciles its head:
 
 ```yaml
-log:
-  level: info            # debug | info | warn | error
-pve:
-  auth: token            # token | ticket (credentials are SHARED by all clusters)
-  user: root@pam
-  token-id: proxops   # part of user@realm!tokenid=value
-  # token: <uuid>       # prefer PROXOPS_PVE_TOKEN env
-  # token-value: <full> # prefer PROXOPS_PVE_TOKEN_VALUE env — overrides pair
-  ca-file:               # optional PVE cluster CA (shared by every endpoint)
-  clusters:              # NAMED PVE clusters — the multi-cluster model
-    conformance-dev:     #   name MUST match a GitOps composition dir
-      base-url: https://pve-dev-01.example:8006   # endpoint for ALL traffic
-                                         # to THIS cluster
-      nodes:             #   per-cluster node allowlist = the cluster boundary
-        - pve-dev-01     #   (a manifest spec.node outside it aborts the
-        - pve-dev-02     #   cluster's cycle BEFORE any PVE call)
-    # prod-a: ...  #   more clusters added as they come online
 git:
   url: https://github.com/you/proxops-manifests.git
   branch: main
-  # path: /var/lib/proxops/tree   # air-gapped mode (mutually exclusive)
-  # token: <ghp_...>       # prefer PROXOPS_GIT_TOKEN env
-reconcile:
-  poll-interval: 30s
-  task-timeout: 30m
-  prune-budget: 3        # max deletions per cycle, PER CLUSTER
-listen: 127.0.0.1:9494   # or 0.0.0.0:9494
-data-dir: ~/.local/share/proxops
 ```
 
-Rules the config enforces (fail-closed): at least one named cluster; each name
-must be a valid composition identity (lowercase alnum + `-`); each `base-url`
-must parse as `http(s)://host`; **two clusters may not share one endpoint**
-(prune scoping is endpoint-based, and two compositions sharing a live
-inventory would let one prune the other); every `pve.clusters` entry must have
-a composition at `clusters/<name>/resources.yaml` in the git tree, and every
-composition must have a configured endpoint.
+The clusters still come from THAT tree's `clusters/<name>/` directories —
+URL mode supplies the source tree, not the endpoints. Pass it with
+`proxops run --config /etc/proxops/proxops.yaml` (a config that sets
+`git.url` is never repository-discovered).
 
 ### Air-gapped / local mode
 
-Point `git.path` at a work tree you maintain yourself (or mount). The agent
-never writes it. On the first cycle, `gitx.New` initializes the local branch
-if it is not yet checked out. Use this mode when the cluster has no git
-access but `rsync`/`ssh` is allowed.
+An explicit work tree you maintain yourself (or mount) is selected with
+`--git-path <path>` / `PROXOPS_GIT_PATH=<path>` — for automation, tests and
+hosts where the checkout path is not the CWD. The agent never writes the
+tree. In this mode there is no fetch: the tree the operator maintains IS the
+desired state.
 
 ## Observability
 
@@ -265,9 +278,10 @@ per-cycle prune budget, and its own empty-desired anomaly guard. The same PVE
 id and the same name can exist on different clusters (id/name spaces are
 cluster-scoped).
 
-To add a cluster: add `pve.clusters.<name>` to the config AND add
-`clusters/<name>/resources.yaml` to the git tree. Both sides must agree; a
-mismatch fails closed at config validation.
+To add a cluster: create `clusters/<name>/` with a `config.yaml` declaring
+`pve.clusters.<name>` (endpoint + node allowlist + optional SOPS
+reference) AND a `resources.yaml` composition. Both sides must agree; a
+mismatch fails closed at discovery.
 
 ## Working with PVE
 
@@ -307,260 +321,18 @@ surfaces such drift as a non-destructive `anomalous` object state on
 `/status` + `proxops_anomalies_total{type="live_only_slot"}` on `/metrics`.
 Resize deliberately on PVE, then update the manifest.
 
-### Adopting existing PVE objects
+## Adoption
 
-`proxops adopt` reverse-engineers live
-PVE objects into ProxOps YAML. It is READ-ONLY with respect to PVE —
-it performs only GET requests and asserts zero PVE writes at the end of
-the run — and requires an explicit cluster:
+Adopting live PVE objects into ProxOps YAML, the PVE round-trip
+invariants, and production safety expectations are documented in
+[Adoption](adopt.md).
 
-```sh
-# In the GitOps work tree, with the operator's age identity exported:
-export SOPS_AGE_KEY_FILE=~/.local/share/proxops/<cluster>.age   # outside the repo
-proxops adopt --cluster conformance-dev --config clusters/conformance-dev/config.yaml
-```
+## SOPS & credentials
 
-What it does:
-
-- uses that cluster's configured endpoint + node allowlist (or, without an
-  allowlist, PVE's `/cluster/nodes` listing); only allowlisted nodes are
-  ever read — this is the cluster-isolation guarantee;
-- writes one manifest per live object under `<kind>/<cluster>/` in the git
-  work tree (VM, LXC, ISO, CTTemplate, TemplateVM, TemplateCT); `import`
-  content (DiskImage) is not adopted — see GAPS.md;
-- surfaces **unsupported PVE configuration explicitly** (a `gap` line per
-  live key ProxOps does not model; `INCOMPLETE` for generated manifests
-  missing a value PVE cannot re-report, e.g. the LXC `ostemplate`). PVE
-  *template* VMs (`template=1` on a `type=qm` object) are adopted as
-  `kind: TemplateVM` manifests under `templatevm/<cluster>/`, and PVE
-  *template* containers (`template=1` on a `type=lxc` object, M13) as
-  `kind: TemplateCT` manifests under `templatect/<cluster>/`, both with the
-  full lifecycle owned (create + mark, config drift, prune). PVE-side
-  `sshkeys` in the template's cloud-init are redacted to the `["*"]`
-  sentinel so the operator fills in the real key(s) before apply;
-  `cipassword` / `cicustom` stay as gap lines. A ProxOps `kind: VM` (or
-  `kind: LXC`) desired against a live PVE-side template at the same
-  `(node, vmid)` is surfaced as a non-destructive anomaly (no kind-flip
-  write).
-- **redacts sensitive PVE fields** in the gap report: `sshkeys` and
-  `cipassword` values are emitted as `<redacted>` (the field name still
-  reports, so the operator knows ProxOps does not model it);
-- prints the exact `resources.yaml` lines to add. It does NOT modify
-  `clusters/<cluster>/resources.yaml` — listing the generated files is a
-  deliberate, reviewable operator step.
-
-#### Determinism
-
-Two `adopt` runs against an unchanged PVE produce **byte-identical**
-manifests and gap reports: the manifest set, filenames, field ordering,
-gap ordering, and the INCOMPLETE/SKIPPED lists are all total-ordered. No
-timestamps, no PVE-assigned randomness, no credentials appear in the
-output. A second run therefore produces no meaningless git diff.
-
-#### Production safety expectations
-
-When the adopted cluster is a production PVE:
-
-- `adopt` is the **only** proxops command safe to run against it
-  unattended: it issues GETs to `/cluster/nodes`,
-  `/nodes/{n}/{qemu,lxc}`, `/nodes/{n}/storage`,
-  `/nodes/{n}/storage/{s}/content`, `/nodes/{n}/qemu/{v}/config`,
-  `/nodes/{n}/lxc/{c}/config` — and nothing else. Post-run, the client's
-  write counter must read 0 or the run aborts.
-- **Do NOT run `apply` / `run` / a normal reconcile cycle against a
-  freshly adopted production cluster.** Adoption output is reviewed,
-  completed (INCOMPLETE resources), and composed into
-  `resources.yaml` by a human first; only then is `diff` used to verify
-  zero unexpected drift.
-- The generated manifests are stripped of ProxOps's ownership tag from
-  `spec.tags` (adopt never invents tags); the tag is re-appended at create
-  time, and on the first reconcile ProxOps claims the live object by
-  adding that tag. Untagged live objects are never modified or deleted.
-
-#### Round-trip verification
-
-The acceptance round-trip is:
-
-```
-PVE -> adopt -> YAML -> (human review) -> clusters/<cluster>/resources.yaml
-     -> proxops diff -> zero unexpected drift
-```
-
-Every remaining drift line must map to a documented expectation:
-
-- `update ... config drift` on every adopted VM / LXC / TemplateVM /
-  TemplateCT: the ownership-tag claim
-  (PVE objects carry no `proxops` tag; ProxOps adds one when it
-  manages an object). This is expected and is the first write the operator
-  consciously approves — it is not applied by `diff`.
-- `anomaly ... live-only disk slot scsiN=...-cloudinit,media=cdrom` on VMs
-  whose cloud-init volume sits on a non-IDE slot (PVE 9.x places cloud-init
-  on `scsi1` when `ide2` is not used): ProxOps does not own non-IDE
-  cdrom slots; adopt documents them as a gap and leaves them PVE-managed.
-- `skipped (no proxops tag)` for LXC resources whose `spec.template`
-  could not be recovered (INCOMPLETE). PVE-side `template=1` objects are
-  adopted as `kind: TemplateVM` under `templatevm/<cluster>/` (qemu) or
-  `kind: TemplateCT` under `templatect/<cluster>/` (container).
-
-Live-only data disks are preserved: adopt interrogates the PVE /config
-report, so a live second data disk is represented in the adopted manifest
-rather than silently dropped. PVE cloud-init volumes on non-IDE slots, by
-contrast, are PVE-owned and are explicitly reported. See docs/GAPS.md for
-the gap backlog (the source of new entries is exactly this adopt report).
-
-### Per-cluster SOPS secrets
-
-`clusters/<cluster>/` carries this cluster's ProxOps configuration AND its
-encrypted credentials:
-
-```
-clusters/<cluster>/config.yaml        # cluster-local proxops config (the
-                                      #   --config argument)
-clusters/<cluster>/secrets.sops.yaml  # SOPS/age-encrypted PVE + git creds
-clusters/<cluster>/resources.yaml     # resource composition
-```
-
-**Why SOPS + age?** Mozilla SOPS with the `age` backend encrypts each scalar
-individually and records the public age recipient inside the file's `sops:`
-metadata — so the *public* key is safe to commit, while the *private* key
-stays outside the repository. ProxOps shells out to the `sops`
-executable (age backend) rather than linking the SOPS Go module: the module
-would pull ~160 transitive dependencies (multi-cloud KMS backends, gRPC,
-Azure/GCP/Ali/Huawei SDKs) into a standalone single-binary tool; the `sops`
-executable the operator already has for encrypting secrets is the deliberate,
-justified choice. A run that configures NO `secrets-file`
-never invokes sops at all.
-
-**age key handling (bootstrap).** The private age key MUST live
-outside the GitOps repository. ProxOps spawns `sops --decrypt` inheriting
-its own environment, so the operator supplies the key via the standard SOPS
-age identity mechanism:
-
-```sh
-export SOPS_AGE_KEY_FILE=$HOME/.local/share/proxops/conformance-dev.age
-# SOPS_AGE_KEY / AGE_KEY_FILE work too; whatever sops' age backend reads.
-```
-
-Generate a disposable key (development only):
-
-```sh
-age-keygen -o ~/.local/share/proxops/conformance-dev.age
-# the private key now lives ONLY in that file. Never commit it, never echo it.
-```
-
-**The encrypted repository must not contain the private decryption
-identity.** It may contain the public age recipient — inside
-`secrets.sops.yaml`'s `sops:` metadata. That is how authorized operators are
-added without re-encrypting. ProxOps never reads, writes, or manages the
-private key; it only sets `sops`'s environment to what the operator already
-has.
-
-**Credentials precedence (per cluster, highest first):**
-
-```
-SOPS-decrypted value referenced by pve.clusters.<c>.secrets   (explicit cluster secret)
-  > PROXOPS_PVE_* / PROXOPS_GIT_TOKEN environment vars  (bootstrap)
-  > global pve.* fields in config.yaml                        (bootstrap)
-```
-
-When a cluster's `secrets-file` is configured, ProxOps requires every
-field referenced under that cluster's `secrets:` block to be present and
-non-empty in the decrypted document — it does NOT silently fall back to
-env/YAML for that field (fail closed; an empty/missing SOPS secret cannot
-result in an unintended credential being used). For `pve.auth=token`, a
-SOPS cluster additionally suppresses `pve.token-value` for that cluster's
-PVE params (see the PVEParams precedence in ARCHITECTURE.md): a global
-pre-composed `PROXOPS_PVE_TOKEN_VALUE` must never shadow a cluster's SOPS
-reference. Clusters with no `secrets-file` keep the plain env/YAML behaviour
-exactly.
-
-**Create/update the conformance-dev secret** (the plaintext value must only
-exist in your editor + this shell session):
-
-```sh
-AGE_KEY=~/.local/share/proxops/conformance-dev.age
-PUB=$(grep 'public key:' "$AGE_KEY" | cut -d' ' -f6)   # e.g. age1...
-# 1) write the PLAINTEXT into a scratch file OUTSIDE the git worktree:
-cat > /tmp/conformance-dev-secrets-plain.yaml <<'EOF'
-secrets:
-  proxops-user: root@pam
-  proxops-token-id: proxops
-  proxops-token: <PASTE PVE token uuid>
-  proxops-password: ""
-  proxops-git-token: <PASTE git fetch token>
-EOF
-# 2) encrypt against the public recipient (age backend only):
-sops --encrypt --age "$PUB" --input-type yaml --output-type yaml \
-  /tmp/conformance-dev-secrets-plain.yaml > \
-  clusters/conformance-dev/secrets.sops.yaml
-# 3) shred the plaintext and verify no cleartext leaked into the worktree:
-shred -u /tmp/conformance-dev-secrets-plain.yaml
-grep -Rn "<PASTE" clusters/ && echo "LEAK: plaintext still in worktree"
-git add clusters/conformance-dev/secrets.sops.yaml && git commit
-```
-
-For a production cluster / multi-operator: add each operator's public age
-key to the recipient list (`sops --encrypt --age "PUB1,PUB2"`). Rotating
-an operator = drop their key from the list, re-encrypt, commit. ProxOps
-has no auto-rotation: re-encryption is the operator's step.
-
-**Run proxops against the cluster-local config:**
-
-```sh
-git clone <gitops repo> && cd <gitops repo>
-export SOPS_AGE_KEY_FILE=~/.local/share/proxops/conformance-dev.age   # outside the repo
-proxops diff   --config clusters/conformance-dev/config.yaml
-proxops apply  --config clusters/conformance-dev/config.yaml
-proxops status --config clusters/conformance-dev/config.yaml
-proxops run    --config clusters/conformance-dev/config.yaml   # daemon
-```
-
-`git.path: "."` in `config.yaml` means "the git worktree containing this
-config file": ProxOps resolves it by walking up from the config path to
-the nearest `.git` marker. It never guesses; if the config file is copied
-out of a worktree it fails at Load with a clear error (no implicit magic).
-
-**Security guarantees:**
-
-- Decryption happens in memory only: `sops --decrypt` stdout → parsed into
-  the in-memory `Config.SopsResolved` map → applied to PVE auth + git fetch
-  headers. ProxOps writes no decrypted file to disk, ever.
-- Decrypted values appear in NONE of: `diff` / `apply` / `status` / `run`
-  stdout, the `/status` JSON, the `/metrics` labels or log output, error
-  messages, or the `Agent.Config()` accessor. (The in-memory SopsResolved
-  map is deliberately `json:"-" yaml:"-"`.)
-- Unencrypted `secrets.sops.yaml` (no sops metadata) → refused before any
-  PVE call. Malformed SOPS document, missing age identity, wrong age
-  identity → refused, with a clear message that names the *class* of
-  failure (and only the file path, never the secret).
-- The private age key file MUST live outside the git worktree.
-- The SOPS binary is only located/inherited when a cluster actually names a
-  `secrets-file` (a plain env-credential deployment never invokes sops).
-
-**Limitations (deliberate):**
-
-- No automatic key or secret rotation: re-encryption is the operator's
-  step on key change (a recipient can be added and the SOPS file re-encrypted
-  without rotating the secret values, as long as the values haven't changed).
-- One SOPS file per cluster: `clusters/<cluster>/secrets-file` is a
-  path-resolved relative path from the config file's directory. Two
-  clusters can point at the same file if they genuinely share secrets;
-  ProxOps will decrypt each reference exactly once per cluster.
-- The SOPS document is only read at agent startup; ProxOps does not watch
-  the file for changes or poll it (re-reconcile = re-load the config with
-  `systemctl restart proxops` or a new invocation). The same applies to
-  env credentials.
-- SOPS supports KMS/PGP/GCP/Azure/Huawei/Ali backends; ProxOps uses
-  `age` only. The operator is responsible for keeping the age
-  key file available before the ProxOps process starts.
-- No in-band audit log of SOPS decryption events. A ProxOps log line will
-  say "resolve SOPS for cluster X" — that's all.
-
-**Compatibility:** configurations without `secrets-file` behave exactly
-like a plain env-credential deployment (env-over-YAML-over-defaults);
-ProxOps does not even locate the sops binary during `Load` or `Validate` —
-only during `ResolveSOPS` at agent construction, and only for
-SOPS-referenced clusters.
+The per-cluster SOPS/age credential workflow (creating the encrypted
+file, the age key bootstrap, the precedence chain, the fail-closed
+guarantees, and the limitations) is documented in
+[SOPS & credentials](sops-credentials.md).
 
 ## Runbook (typical incident)
 

@@ -1,0 +1,51 @@
+# ProxOps documentation site (MkDocs).
+#
+# The documentation source of truth is this directory (docs/). The site is
+# a generated VIEW of it — never a second source. Build:
+#
+#   mkdocs build            # -> site/
+#   mkdocs serve            # live reload at localhost:8000
+#
+# Pages are published to GitHub Pages via .github/workflows/pages.yml
+# (standard pages workflow permissions; no secrets required).
+
+site_name: ProxOps
+site_description: >-
+  ProxOps is a repository-first GitOps reconciler for Proxmox VE:
+  one git repository as the source of truth, one agent converging every
+  declared PVE cluster — idempotent, deterministic, fail-closed, no
+  persistent state.
+site_url: https://operatorshifu.github.io/proxmox-operator/
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: readthedocs
+  highlight_languages: [go]
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Repository Layout: repo-layout.md
+  - Resource Reference: SCHEMA.md
+  - Reference:
+    - VM & TemplateVM: ref-vm.md
+    - LXC & TemplateCT: ref-lxc.md
+    - Storage Artifacts (ISO, CTTemplate, DiskImage): reference-artifacts.md
+    - Cloud-Init: cloudinit.md
+  - Configuration & CLI:
+    - Configuration Model: reference-config.md
+    - SOPS & Credentials: sops-credentials.md
+    - CLI Reference: cli.md
+  - Adoption: adopt.md
+  - Operations: OPERATIONS.md
+  - Architecture: ARCHITECTURE.md
+  - Compatibility & Gaps: GAPS.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
