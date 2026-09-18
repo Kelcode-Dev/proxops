@@ -404,6 +404,115 @@ func TestDiscoverGitRoot(t *testing.T) {
 	}
 }
 
+// TestLoadLocalNestedReposSelectNearest pins the "commands not
+// accidentally resolving resources from outside the selected repository"
+// guarantee: when a work tree is itself INSIDE another git repository
+// (a nested checkout, or a scratch tree living in an operator's home),
+// discovery stops at the NEAREST .git marker. The inner repository's
+// clusters are the ones reconciled; the outer repository's clusters are
+// never visible to the inner invocation.
+func TestLoadLocalNestedReposSelectNearest(t *testing.T) {
+	// Outer repository: its own cluster "outer", its own process config.
+	outer := t.TempDir()
+	mkGit := func(dir string) {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkGit(outer)
+	if err := os.WriteFile(filepath.Join(outer, "proxops.yaml"), []byte("log:\n  level: debug\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outerCl := filepath.Join(outer, "clusters", "outer")
+	if err := os.MkdirAll(outerCl, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outerCl, "config.yaml"), []byte(
+		"pve:\n  clusters:\n    outer:\n      base-url: https://outer.example:8006\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Inner repository: nested inside the outer one, CWD-equivalent is a
+	// directory inside the inner.
+	innerRoot := filepath.Join(outer, "scratch", "inner")
+	if err := os.MkdirAll(filepath.Join(innerRoot, "clusters", "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkGit(innerRoot)
+	if err := os.WriteFile(filepath.Join(innerRoot, "clusters", "inner", "config.yaml"), []byte(
+		"pve:\n  clusters:\n    inner:\n      base-url: https://inner.example:8006\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Discover from deep inside the inner repository.
+	deep := filepath.Join(innerRoot, "clusters", "inner")
+	c, root, err := LoadLocal(deep)
+	if err != nil {
+		t.Fatalf("LoadLocal(nested): %v", err)
+	}
+	if root != innerRoot {
+		t.Fatalf("discovered root = %q, want the NEAREST .git (%q), not the outer repo", root, innerRoot)
+	}
+	if c.Log.Level == "debug" {
+		t.Fatalf("process config was loaded from the OUTER repository (log.level=debug); the inner repository has no proxops.yaml and must not inherit it")
+	}
+	names := c.PVE.ClusterNames()
+	if len(names) != 1 || names[0] != "inner" {
+		t.Fatalf("clusters = %v, want [inner] only — the outer repository's clusters must not leak in", names)
+	}
+	inner, _ := c.PVE.Cluster("inner")
+	if inner.BaseURL != "https://inner.example:8006" {
+		t.Fatalf("inner base-url = %q", inner.BaseURL)
+	}
+	if _, ok := c.PVE.Cluster("outer"); ok {
+		t.Fatal("outer repository's cluster leaked into the inner invocation")
+	}
+}
+
+// TestLoadLocalExplicitDirectoryCWDIndependent pins that the explicit-tree
+// override (what --git-path / PROXOPS_GIT_PATH pass through to LoadLocal)
+// is CWD-independent: the selected tree is read from its own root, no
+// matter where the process was launched. This is the "explicit
+// repository-path override" regression for development/automation
+// contexts. (The directory passed to LoadLocal is what --git-path gives
+// the CLI; discovery walks up from THAT, never from the real CWD.)
+func TestLoadLocalExplicitDirectoryCWDIndependent(t *testing.T) {
+	// Stand-in CWD, unrelated to the selected tree.
+	otherCWD := t.TempDir()
+	_ = otherCWD
+	// The explicitly selected tree.
+	sel := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(sel, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sel, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	selCl := filepath.Join(sel, "clusters", "sel")
+	if err := os.MkdirAll(selCl, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selCl, "config.yaml"), []byte(
+		"pve:\n  clusters:\n    sel:\n      base-url: https://sel.example:8006\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, root, err := LoadLocal(sel)
+	if err != nil {
+		t.Fatalf("LoadLocal(explicit dir): %v", err)
+	}
+	if root != sel {
+		t.Fatalf("root = %q, want the explicitly selected tree %q", root, sel)
+	}
+	if c.Git.Path != sel {
+		t.Fatalf("git.path = %q, want the selected tree (the unrelated CWD must not influence it)", c.Git.Path)
+	}
+	if names := c.PVE.ClusterNames(); len(names) != 1 || names[0] != "sel" {
+		t.Fatalf("clusters = %v, want [sel]", c.PVE.ClusterNames())
+	}
+}
+
 // TestFileHasGitURL — the URL/cluster disambiguator used by the CLI and
 // LoadCluster.
 func TestFileHasGitURL(t *testing.T) {
