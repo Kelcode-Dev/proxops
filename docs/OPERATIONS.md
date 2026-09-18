@@ -73,21 +73,38 @@ directory name is refused.
 
 ### URL mode (remote git source)
 
-For hosts that are NOT inside the repository (multi-host management, CI
-read-only, mount-based checkouts): the process-wide config declares
-`git.url` (+ `branch`, `token` via env), and ProxOps clones/fetches the
-remote into the data-dir and reconciles its head:
+For hosts that are NOT inside a ProxOps repository checkout (multi-host
+management, CI read-only, mount-free checkouts), the process config
+declares `git.url` (+ `branch`; `token` via `PROXOPS_GIT_TOKEN`), and
+ProxOps clones/fetches the remote into the data-dir and reconciles its
+head:
 
 ```yaml
 git:
-  url: https://github.com/you/proxops-manifests.git
+  url: https://github.com/you/proxops-gitops.git
   branch: main
 ```
 
-The clusters still come from THAT tree's `clusters/<name>/` directories —
-URL mode supplies the source tree, not the endpoints. Pass it with
-`proxops run --config /etc/proxops/proxops.yaml` (a config that sets
-`git.url` is never repository-discovered).
+The remote tree still carries the compositions
+(`clusters/<name>/resources.yaml` + `<kind>/…`), and the **endpoint, node
+allowlist and SOPS reference for every cluster must be declared inline in
+that same process config** — `pve.clusters.<name>` (base-url + nodes +
+optional secrets-file), because that host has no local
+`clusters/<name>/config.yaml` to discover:
+
+```yaml
+pve:
+  clusters:
+    conformance-dev:
+      base-url: https://pve-dev-01.example:8006
+      nodes: [pve-dev-01, pve-dev-02]
+      secrets-file: /etc/proxops/security/conformance-dev.secrets.sops.yaml
+```
+
+Pass such a config explicitly:
+`proxops run --config /etc/proxops/proxops.yaml`. (Inside a repository,
+the repository-first path wins: the local `clusters/<name>/config.yaml`
+files are the source of the endpoints.)
 
 ### Air-gapped / local mode
 

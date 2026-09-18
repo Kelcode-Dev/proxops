@@ -34,7 +34,7 @@ side: each `clusters/<name>/config.yaml` declares `pve.clusters.<name>`
 | `pve` | `user`, `token-id`, `token`, `token-value`, `password` | **bootstrap** PVE credentials, used only by clusters that carry no SOPS reference |
 | `pve` | `ca-file` | PVE cluster CA (shared; default = system trust store) |
 | `pve` | `clusters` | *(leave empty)* — clusters are declared cluster-locally, not here |
-| `git` | `url`, `branch`, `token` | URL mode: reconcile a REMOTE git repository (optional override; the local work tree is the default source) |
+| `git` | `url`, `branch`, `token` | URL mode: reconcile a REMOTE git repository. Declaring `git.url` switches the process into URL mode (the remote head replaces the local tree as the source); clusters are still discovered from the local `clusters/<name>/config.yaml` files when inside a repository, and MUST be declared inline as `pve.clusters.<name>` when the host has no repository checkout |
 | `reconcile` | `poll-interval` | watch-mode cadence (default `30s`) |
 | `reconcile` | `task-timeout` | max wait per PVE async task (default `30m`) |
 | `reconcile` | `prune-budget` | max deletions per cycle **per cluster** (default `3`; `0` = unlimited) |
@@ -66,9 +66,12 @@ keep working unchanged — only the *normal* layout moved.
 - **URL (advanced)** — a `git.url` in the process config (or
   `--git-url <url>`) makes ProxOps clone/fetch the remote into
   `<data-dir>/git-cache` and reconcile its branch head; `git.token`
-  (or the SOPS git token / `PROXOPS_GIT_TOKEN`) authenticates. The
-  cluster composition still comes from that tree's
-  `clusters/<name>/` — the URL supplies the TREE, not the clusters.
+  (or the SOPS git token / `PROXOPS_GIT_TOKEN`) authenticates. The URL
+  supplies the SOURCE TREE (the compositions it parses live in
+  `clusters/<name>/` inside that tree); the CLUSTER ENPOINTS remain in
+  `pve.clusters` — from the local `clusters/<name>/config.yaml` files
+  when ProxOps runs inside a repository, else inline in the process
+  config (see OPERATIONS → "URL mode").
 
 ## Environment variables
 

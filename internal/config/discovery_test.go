@@ -404,6 +404,39 @@ func TestDiscoverGitRoot(t *testing.T) {
 	}
 }
 
+// TestLoadLocalHonoursProcessGitURL pins URL mode inside a repository:
+// a process-wide proxops.yaml that declares git.url is honoured — Load
+// drops the bare git.path "." sentinel next to a git.url, and LoadLocal
+// does NOT pin the local tree over the operator's explicit remote:
+// clusters are still discovered from the local clusters/<name>/
+// directories (endpoint + SOPS reference), but the git source becomes
+// the remote URL.
+func TestLoadLocalHonoursProcessGitURL(t *testing.T) {
+	proc := "git:\n  url: https://git.example.com/you/gitops.git\n  branch: main\n"
+	root, _ := fixtureRepo(t, proc, "alpha",
+		clusterLocalConfig("alpha", "https://alpha.example:8006", false),
+		"beta",
+		clusterLocalConfig("beta", "https://beta.example:8006", false))
+
+	c, _, err := LoadLocal(root)
+	if err != nil {
+		t.Fatalf("LoadLocal: %v", err)
+	}
+	if c.Git.URL != "https://git.example.com/you/gitops.git" {
+		t.Errorf("git.url = %q, want the remote URL from the process config", c.Git.URL)
+	}
+	if c.Git.Path != "" {
+		t.Errorf("git.path = %q, want \"\" (URL mode: the remote is the source, not the local tree)", c.Git.Path)
+	}
+	if c.Git.Branch != "main" {
+		t.Errorf("git.branch = %q, want the process-config's main", c.Git.Branch)
+	}
+	// Clusters discovered from the local cluster-local configs:
+	if got := c.PVE.ClusterNames(); len(got) != 2 {
+		t.Fatalf("clusters = %v, want the two local cluster configs", got)
+	}
+}
+
 // TestLoadLocalNestedReposSelectNearest pins the "commands not
 // accidentally resolving resources from outside the selected repository"
 // guarantee: when a work tree is itself INSIDE another git repository
