@@ -1,0 +1,48 @@
+# M13.2: host PCI passthrough (GPU) VM — structured spec.hardware.pci-devices.
+#
+# PVE wire: hostpci0=0000:17:00,pcie=1
+#
+# How it works:
+#   - spec.hardware.pci-devices declares each PVE hostpci<N> slot:
+#     slot (PVE's hostpci<N>), device (the PVE PCI BDF, domain:bus:slot[.func]
+#     — ProxOps lower-cases it for a stable wire form), and pcie (the PVE
+#     pcie=<0|1> token; omitted = ProxOps does not own the token).
+#   - ProxOps validates the slot/BDF grammar on parse and fails closed on
+#     duplicate slots or unparseable BDFs.
+#   - Drift requires a STOP to add/change/remove a hostpci<N> (host PCI is
+#     not hot-pluggable on a running guest).
+#   - A live PVE hostpci<N> that this manifest does NOT declare is surfaced
+#     as a Drift anomaly (never deleted by ProxOps — a PVE-side GPU must
+#     not just disappear).
+#   - PVE-side option tokens ProxOps does NOT model: x-vga, rombar, mdev
+#     (see GAPS.md).
+#   - The BDF MUST be in PVE's PCI pool on the cluster (or the task will
+#     fail: "only root can set 'hostpci<N>' config for non-mapped devices");
+#     PVE pools are configured on the PVE host, NOT by ProxOps.
+apiVersion: proxops/v1alpha1
+kind: VM
+metadata:
+  name: gpu-passthrough-01
+spec:
+  node: pve01
+  vmid: 412
+  memory: 8GiB
+  cpu:
+    type: host
+    cores: 4
+  disks:
+    - storage: local-lvm
+      interface: scsi0
+      size: 40GiB
+  networks:
+    - model: virtio
+      bridge: vmbr0
+  hardware:
+    machine: q35                # q35 recommended for PCI topology
+    pci-devices:
+      - slot: hostpci0
+        device: "0000:17:00"    # the PVE PCI BDF of the passthrough device
+        pcie: true              # -> hostpci0=0000:17:00,pcie=1
+      - slot: hostpci1
+        device: "0000:73:00"    # a second device on another slot
+        # pcie omitted         -> ProxOps does not own the pcie token

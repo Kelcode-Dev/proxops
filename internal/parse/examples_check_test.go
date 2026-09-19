@@ -16,7 +16,10 @@ func TestExamplesDirParses(t *testing.T) {
 		t.Fatalf("BuildClusterIndex: %v", err)
 	}
 	got := len(idx.List())
-	if want := 10; got != want {
+	// M13.2 added two VM examples (gpu-passthrough-01 + sops-cloudinit-01),
+	// 12 total: base CTTemplate, ISO, DiskImage, LXC, 6 VMs, TemplateVM,
+	// TemplateCT. Guard against docs/examples drift.
+	if want := 12; got != want {
 		t.Fatalf("parsed %d resources for cluster example/, want %d", got, want)
 	}
 }

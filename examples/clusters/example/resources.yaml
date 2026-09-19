@@ -34,5 +34,7 @@ resources:
   - ../../vm/example/cloudinit-vm.yaml
   - ../../vm/example/talos-worker-01.yaml
   - ../../vm/example/clone-vm.yaml
+  - ../../vm/example/gpu-passthrough-01.yaml
+  - ../../vm/example/sops-cloudinit-01.yaml
   - ../../templatevm/example/almalinux-tpl.yaml
   - ../../templatect/example/debian-tpl.yaml

@@ -24,10 +24,13 @@ clusters/
 iso/base/…                      # 1 base ISO (shared, downloadable artifact)
 ctt/base/…                      # 1 base CTTemplate (shared, downloadable)
 diskimage/base/…                # 1 base DiskImage (cloud image for VM disks)
-vm/example/…                    # 4 VMs: talos worker (base ISO cdrom),
+vm/example/…                    # 6 VMs: talos worker (base ISO cdrom),
                                 #   clone-vm (TemplateVM clone), app-vm
                                 #   (depends-on escape hatch), cloudinit-vm
-                                #   (DiskImage-seeded + cloud-init data)
+                                #   (DiskImage-seeded + inline cloud-init data),
+                                #   gpu-passthrough-01 (host PCI passthrough,
+                                #   M13.2 pci-devices), sops-cloudinit-01
+                                #   (M13.2 SOPS ssh-key-refs / ci-password-ref)
 lxc/example/…                   # 1 LXC bootstrapped from the base CTTemplate
 templatevm/example/…            # 1 TemplateVM (a VM promoted to PVE template)
 templatect/example/…            # 1 TemplateCT (a CT promoted to PVE template)
@@ -78,6 +81,12 @@ TemplateCT) share ONE per-node integer pool. These examples pin well-separated
 ids: 142 (VM), 400 (app-vm), 410 (cloudinit-vm), 900 (TemplateVM), 910
 (TemplateCT), 9000 (LXC), 901 (clone-vm). A TemplateCT shares the LXC id
 space (PVE lists both as `type="lxc"`), exactly as a TemplateVM shares the qm
-id space. The artifact kinds (`ISO`, `CTTemplate`, `DiskImage`) have **no**
+id space. M13.2: `vm/example/gpu-passthrough-01.yaml` (vmid 412) demonstrates
+`spec.hardware.pci-devices` (host PCI passthrough → PVE `hostpci<N>`), and
+`vm/example/sops-cloudinit-01.yaml` (vmid 413) demonstrates
+`spec.cloud-init-data.ssh-key-refs` + `ci-password-ref` (structured SOPS
+cloud-init references — no inline public key or plaintext password in the
+manifest; the SOPS doc carries `cloud-init.ssh-keys` /
+`cloud-init.passwords`). The artifact kinds (`ISO`, `CTTemplate`, `DiskImage`) have **no**
 numeric PVE id — their identity is `(node, storage, filename)` on the PVE
 side and `metadata.name` on the ProxOps side.

@@ -80,7 +80,8 @@ type commandFlags struct {
 
 // adoptFlags carries the adopt command's per-command surface.
 type adoptFlags struct {
-	cluster string
+	cluster      string
+	adoptSecrets bool // M13.2: --adopt-secrets opt-in
 }
 
 func main() {
@@ -389,13 +390,22 @@ func newAdoptCmd(gf *globalFlags, root *cobra.Command) *cobra.Command {
 		Long: "Adopt inspects one configured PVE cluster (its endpoint + node " +
 			"allowlist), reads live VM / LXC / ISO / CTTemplate objects, and " +
 			"writes a proxops YAML manifest for each into the git work " +
-			"tree under <kind>/<cluster>/. The command is READ-ONLY with " +
-			"respect to PVE: it does not create, modify, delete, or tag any " +
-			"PVE object.\n" +
+			"tree under <kind>/<cluster>/. Adopt is READ-ONLY with respect " +
+			"to PVE: it does not create, modify, delete, or tag any PVE " +
+			"object, and (without --adopt-secrets) it does not rewrite the " +
+			"cluster's SOPS file either.\n" +
 			"\n" +
 			"A cluster MUST be named with --cluster=<name>; unknown cluster " +
 			"names fail closed. A node outside the cluster's allowlist is " +
-			"skipped and reported.",
+			"skipped and reported.\n" +
+			"\n" +
+			"M13.2 cloud-init secrets: when the cluster is SOPS-backed, plain " +
+			"adopt matches live PVE ssh-keys against the cluster's existing " +
+			"SOPS cloud-init.ssh-keys entries (emitting ssh-key-refs for " +
+			"matches, keeping [*] for others). --adopt-secrets additionally " +
+			"imports unmatched ssh-key lines into the SOPS file with " +
+			"deterministic adopted-* names. The SOPS merge is what makes " +
+			"adopt optionally WRITE — the PVE side remains read-only.",
 		RunE: func(c *cobra.Command, _ []string) error {
 			log := logger.New(levelFor(gf))
 			agent, err := buildAgent(gf, log, c.Root().PersistentFlags(), c.Flags())
@@ -410,7 +420,7 @@ func newAdoptCmd(gf *globalFlags, root *cobra.Command) *cobra.Command {
 			}
 			// The git source's WorkDir is the place adopt writes.
 			adoptRoot := agent.GitSource().WorkDir()
-			out, err := runAdopt(c.Context(), agent, cf.cluster, adoptRoot, log)
+			out, err := runAdopt(c.Context(), agent, cf.cluster, adoptRoot, log, cf.adoptSecrets)
 			if err != nil {
 				return err
 			}
@@ -424,6 +434,7 @@ func newAdoptCmd(gf *globalFlags, root *cobra.Command) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&cf.cluster, "cluster", "", "named PVE cluster to adopt from (required; must be in pve.clusters)")
+	cmd.Flags().BoolVar(&cf.adoptSecrets, "adopt-secrets", false, "M13.2: import PVE-recoverable cloud-init secret material (SSH public keys) into the cluster's secrets-file; without this flag the secrets file is never written")
 	return cmd
 }
 

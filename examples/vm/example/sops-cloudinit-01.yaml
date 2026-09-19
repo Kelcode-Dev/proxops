@@ -1,0 +1,64 @@
+# M13.2: Cloud-Init SOPS references — ssh-key-refs + ci-password-ref.
+#
+# There is NO plaintext SSH key or password in this manifest:
+#   - spec.cloud-init-data.ssh-key-refs (PLURAL) names the cluster SOPS
+#     entries under `cloud-init.ssh-keys.<name>`;
+#   - spec.cloud-init-data.ci-password-ref (SINGULAR) names the cluster
+#     SOPS entry under `cloud-init.passwords.<name>`.
+#
+# The cluster's SOPS document (in this example,
+# clusters/example/secrets.sops.yaml — replace the placeholders with your
+# real SOPS blocks; NEVER commit a real age private key) must look like:
+#
+#     cloud-init:
+#       ssh-keys:
+#         ops-main: "ssh-ed25519 AAAAC3... ops@yourhost"
+#       passwords:
+#         root-default: "<paste password>"
+#
+# ProxOps resolves these at reconcile time (in memory only) and writes:
+#   - PVE `sshkeys` = the concatenated resolved public keys (percent-encoded
+#     on the wire, joined by %0A);
+#   - PVE `cipassword` = the resolved password, ONCE, when PVE reports the
+#     key absent. PVE 9.2 masks `cipassword` on read-back
+#     (`**********`), so ProxOps treats a present value as satisfied and
+#     never rewrites or deletes it. See sops-credentials.md + GAPS.md.
+#
+# Fail-closed rules (all pinned by tests):
+#   - a ref that does not start with cloud-init.ssh-keys. /
+#     cloud-init.passwords. -> parse error naming the ref;
+#   - a ref whose SOPS entry is missing or empty -> the cycle aborts BEFORE
+#     any PVE call (a missing ref never means "no keys");
+#   - mixing ssh-keys + ssh-key-refs on one resource -> parse error.
+#
+# Import live PVE keys into SOPS with:  proxops adopt --cluster example --adopt-secrets
+apiVersion: proxops/v1alpha1
+kind: VM
+metadata:
+  name: sops-cloudinit-01
+spec:
+  node: pve01
+  vmid: 413
+  memory: 2GiB
+  cpu:
+    type: host
+    cores: 1
+  disks:
+    - storage: local-lvm
+      interface: scsi0
+      image: debian-13-cloud    # -> inferred dependency on the DiskImage
+  networks:
+    - model: virtio
+      bridge: vmbr0
+  hardware:
+    cloud-init:
+      enabled: true
+      storage: local-lvm
+  cloud-init-data:
+    ci-user: talos
+    ssh-key-refs:               # PLURAL SOPS dot-paths
+      - cloud-init.ssh-keys.ops-main
+    ci-password-ref:            # SINGULAR SOPS dot-path
+      cloud-init.passwords.root-default
+    nameservers:
+      - 1.1.1.1
