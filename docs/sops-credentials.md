@@ -82,6 +82,14 @@ secrets:
   proxops-token: <PASTE PVE token uuid>
   proxops-password: ""
   proxops-git-token: <PASTE git fetch token>
+
+# M13.2 — structured Cloud-Init material (optional blocks):
+cloud-init:
+  ssh-keys:            # name -> one OpenSSH public-key line
+    main: "ssh-ed25519 AAAAC3... ops@host"  # referenced as cloud-init.ssh-keys.main
+    github: "ssh-ed25519 BBBB... github@host"
+  passwords:           # name -> PVE cipassword plaintext
+    default: "<paste password>"            # referenced as cloud-init.passwords.default
 EOF
 # 2) encrypt against the public recipient (age backend only):
 sops --encrypt --age "$PUB" --input-type yaml --output-type yaml \
@@ -141,6 +149,82 @@ PVE params: a global pre-composed `PROXOPS_PVE_TOKEN_VALUE` must never
 shadow a cluster's SOPS reference. Clusters with no `secrets-file` keep the
 plain env/YAML behaviour exactly.
 
+## M13.2 — Cloud-Init SOPS material
+
+Since M13.2 the SOPS document carries a **structured** `cloud-init` block
+in addition to the flat `secrets:` credential mappings:
+
+```
+cloud-init:
+  ssh-keys:       # name -> one OpenSSH public-key line
+    main: "ssh-ed25519 AAAAC3... ops@host"
+  passwords:      # name -> PVE cipassword plaintext
+    default: "<paste password>"
+```
+
+Key names are operator-defined ([a-z0-9], up to 64 chars, no leading `-`).
+VMs/TemplateVMs reference this material — never carry it inline — via
+`spec.cloud-init-data.ssh-key-refs: [cloud-init.ssh-keys.<name>, ...]` (plural)
+and `spec.cloud-init-data.ci-password-ref: cloud-init.passwords.<name>`
+(singular). There is **no plaintext `ci-password` field** in the
+ProxOps resource schema: the PVE `cipassword` value can only ever enter
+the wire via a SOPS ref. See [Cloud-Init](cloudinit.md) for the full
+semantics, mutual-exclusion rules, and Drift behaviour (PVE 9.2 masks
+`cipassword` as `**********` on read-back; ProxOps only writes it when the
+live value is ABSENT and never deletes it).
+
+`proxops adopt` will, for a SOPS-backed cluster, replace the M10
+`ssh-keys: ["*"]` adoption sentinel with `ssh-key-refs` when the live PVE
+`sshkeys` is present verbatim in the SOPS doc — the committed manifest
+then names the ref, not the key.
+
+### `proxops adopt --adopt-secrets` (importing PVE-recoverable keys)
+
+```sh
+proxops adopt --cluster conformance-dev --adopt-secrets
+```
+
+Imports **PVE-recoverable** cloud-init material into the cluster's SOPS
+file — currently SSH public keys: live keys the SOPS doc already carries
+as `cloud-init.ssh-keys.<name>` (the manifest adopts that ref; name reused
+as-is) plus live keys with **no** SOPS match, which receive a
+deterministic `cloud-init.ssh-keys.adopted-<fingerprint>` name. The
+fingerprint is the first 8 bytes of
+`sha256("sshpki\u0000<type>\u0000<blob>")` in lowercase hex (16 chars) — the
+OpenSSH comment column is deliberately EXCLUDED so the same key with a
+different comment still dedupes to one SOPS entry.
+
+Passwords are **never** auto-imported: PVE 9.2's read-back mask
+(`**********`) is unrecoverable, so `adopt` only records a *census count*
+(`PwResources`) and the operator maps them manually:
+write a `cloud-init.passwords.<name>` value into the SOPS doc and point
+the VM's `ci-password-ref` at it.
+
+**Safety invariants of the import (all pinned by tests)**:
+
+- **Plain `adopt` never writes the SOPS file.** Only `--adopt-secrets`
+  does, and only when it actually found new material. A plain adopt run
+  is byte-for-byte no-op on `secrets.sops.yaml`.
+- **Atomic write.** The merge re-encrypts to a `<file>.proxops-tmp`
+  sidecar and `rename(2)`s it into place; no plaintext is EVER written to
+  disk. On encrypt failure the original file is untouched (the sidecar is
+  unlinked).
+- **Recipients preserved.** The age recipient list of the pre-existing
+  encrypted file is read from its `sops:` metadata and re-used. Dropping
+  one is an operator-lockout; the merge fails closed if no recipients
+  are found.
+- **No clobbering.** A merge with `Result.NewSSHKeys` whose name
+  ALREADY exists in the SOPS doc does NOT overwrite the operator's value
+  (no-op, summary says so). Unrelated blocks (`secrets:`,
+  `cloud-init.passwords:`) survive byte-for-byte.
+- **No new names → no write.** If every live key was already SOPS-backed,
+  the cluster's SOPS file is not re-encrypted (git stays quiet).
+
+The adopted manifests emitted in the SAME run reference the new
+`cloud-init.ssh-keys.adopted-<fingerprint>` names, so the operator commits
+the SOPS file **and** the new manifests together — the cycle after
+commit is already resolvable (no fail-closed ref gap).
+
 ## Fail-closed guarantees
 
 - Decryption happens **in memory only**: `sops --decrypt` stdout → parsed
@@ -156,6 +240,14 @@ plain env/YAML behaviour exactly.
 - `sops` binary missing from PATH → `ErrSOPSBinaryMissing`.
 - A SOPS-referenced key empty in the decoded document → fails closed with
   an error that names the missing reference, never the value.
+- M13.2 cloud-init refs: a `spec.cloud-init-data.ssh-key-refs` / `ci-password-ref`
+  entry that does not resolve against the cluster's `cloud-init` SOPS
+  document fails closed BEFORE any PVE call, with an error that names the
+  REF — never the resolved value (an empty SOPS ref is never
+  interpreted as "no keys").
+- M13.2 `adopt --adopt-secrets` SOPS merge errors surface as
+  `adopt: SOPS merge failed …` and leave the on-disk SOPS file untouched
+  (atomicity via the sidecar + rename, verified by test).
 - The private age key file MUST live outside the git worktree.
 - The `sops` binary is only located/inherited when a cluster actually names
   a `secrets-file` (a plain env-credential deployment never invokes sops).

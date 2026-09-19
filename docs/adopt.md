@@ -42,6 +42,78 @@ What it does:
   `clusters/<cluster>/resources.yaml` — listing the generated files is a
   deliberate, reviewable operator step.
 
+## M13.2 — cloud-init secrets (SSH keys + cipassword census + `--adopt-secrets`)
+
+Adoption of cloud-init secret material is governed by these rules:
+
+### `sshkeys` (recoverable public keys)
+- **SOPS-backed cluster + exact match**: if the cluster's
+  `secrets.sops.yaml` carries a `cloud-init.ssh-keys.<name>` entry whose
+  value is the live PVE `sshkeys` line **verbatim**, the generated
+  manifest uses `ssh-key-refs: [cloud-init.ssh-keys.<name>]` (the ref,
+  never the key). The SOPS name is the **existing** operator-defined name
+  (reused, not re-named).
+- **SOPS-backed cluster + no match**: the manifest keeps the M10
+  `ssh-keys: ["*"]` sentinel; a `sshkeys` census line is emitted
+  (`adopt --adopt-secrets` would import the key under a new
+  deterministic name — see below).
+- **Non-SOPS cluster**: the manifest keeps the `["*"]` sentinel; the PII
+  is redacted in the gap report.
+- **All-or-nothing partial match (fail-closed)**: if the live `sshkeys`
+  field has TWO or more keys, ONE is in SOPS and ONE is not, the manifest
+  uses the `["*"]` sentinel (not a partial `ssh-key-refs` list) — a
+  mixed manifest would reject `Validate()` and the operator's intent is
+  ambiguous. This matches the PVE wire (one urlencoded multi-line value,
+  not one key per ref).
+
+### `cipassword` (masked by PVE; unrecoverable)
+- PVE reports `cipassword` as `**********` whether or not the live value
+  is set (probe-verified PVE 9.2.2: presence ≠ value; read-back does not
+  disclose the plaintext). `adopt` **cannot** reverse-translate a
+  `cipassword` into a SOPS ref: the material is irrecoverable.
+- The adopt census reports how many VMs carry a live `cipassword` value
+  (PVI: operators should manually map each such VM to a
+  `ci-password-ref` + SOPS entry after review). `cipassword` itself
+  stays a `<redacted>` gap.
+
+### `proxops adopt --adopt-secrets` (the flag)
+- **Adds** live `sshkeys` that are NOT already in the cluster's
+  `cloud-init.ssh-keys` SOPS block to that block, under a **deterministic**
+  new name `adopted-<digest>` where `<digest>` is 16 lowercase hex chars:
+  the first 8 bytes of `sha256("sshpki\u0000<type>\u0000<blob>")` (the
+  key's OpenSSH type + base64 body; the comment column is EXCLUDED — so
+  the same key under different labels dedupes to one SOPS entry, and
+  rename-safe SOPS merges are stable). The manifest then references it as
+  `cloud-init.ssh-keys.adopted-<digest>`.
+  PVE reports the live `sshkeys` percent-encoded (PVE 9.2's own encoding:
+  space as `%20`, newline as `%0A`); adopt decodes it to plain key lines
+  before matching against the SOPS doc (plain lines), so the SOPS entry
+  value is a **plain** OpenSSH public-key line, never the PVE-encoded form.
+- **Re-encrypts** the SOPS file **atomically** and **in place**: a sidecar
+  `<file>.proxops-tmp` is written, `sops --encrypt` (age backend,
+  recipients read back from the on-disk SOPS metadata so no operator is
+  locked out), and `rename(2)` swaps it into place. All existing SOPS
+  blocks (M9 `secrets:` flat map + any other `cloud-init.` material) are
+  preserved byte-for-byte.
+- **Fails closed** on any SOPS write failure: the original `.sops.yaml`
+  is never truncated or left half-written (the rename is atomic). The
+  operator can re-run `--adopt-secrets` idempotently — a key that is
+  already in the SOPS doc is NOT re-added.
+- The adopt run with `--adopt-secrets` still emits **zero PVE writes**
+  (the census is read-only); the SOPS file is the only thing written, and
+  only when there is something to import.
+- **Plain `adopt`** (no flag) NEVER writes the SOPS file: the SOPS
+  doc + manifest + git commit remain the operator's reviewable step.
+
+### PII guarantees
+No PVE sshkeys or cipassword material (plaintext) is ever written to the
+gap report, the `INCOMPLETE` / `SKIPPED` census, manifest YAML (except the
+SOPS-matched `ssh-key-refs` dot-paths), or the CLI stdout. The SOPS
+merge step only writes the encrypted `sops.sops.yaml`; the private age
+key is never logged. `Result.NewSSHKeys` (in-memory map of SOPS name →
+plaintext key) is ONLY handed to the encrypt step; it is not
+serialised anywhere else.
+
 ## Determinism
 
 Two `adopt` runs against an unchanged PVE produce **byte-identical**

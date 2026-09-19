@@ -226,25 +226,23 @@ name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
   cloud-init model that targets a data bus) would close this; until then
   such PVE objects are *documented*, not re-created.
 
-### Cloud-init: `cipassword` / `cicustom` / `ciupgrade` are not modelled
+### Cloud-init: `cicustom` / `ciupgrade` are not modelled
 
 - **Resource/area**: VM cloud-init data
-- **PVE field**: `cipassword`, `cicustom`, `ciupgrade`
+- **PVE field**: `cicustom`, `ciupgrade`
 - **Status**: investigated
 - **Priority**: low
-- **What is unsupported**: ProxOps models `ciuser`, `sshkeys` (redacted),
-  `nameserver`, `searchdomain`, and `ipconfig<N>` under
-  `spec.cloud-init-data`. `cipassword` (a secret) and `cicustom` (custom
-  user/meta/network-data references) are **not** adopted or reconciled;
-  `ciupgrade` is PVE-side-only. On adopt, `cipassword`/`sshkeys` gap
-  values are emitted as `<redacted>` (the field name still reports, so the
-  operator knows ProxOps does not model it; the value never reaches
-  stdout, logs, the gap report, or any generated manifest).
+- **What is unsupported**: ProxOps models `ciuser`, `sshkeys` (SOPS-referenced
+  since M13.2, sentinel-redacted when not), `nameserver`, `searchdomain`,
+  `ipconfig<N>`, `cipassword` (via `ci-password-ref`, M13.2) under
+  `spec.cloud-init-data`. `cicustom` (custom user/meta/network-data
+  references) and `ciupgrade` are **not** adopted or reconciled; they stay
+  in the gap report redacted on adopt.
 - **Impact/risk**: none (no write path; PII is redacted at the source).
 - **Discovery source**: live `/qemu/{id}/config` reports. Pinned:
   `TestAdopt_ZeroWritesOnProdFixtureEquivalent` (sentinel values must not
-  appear in the report; `sshkeys`/`cipassword` gap values must contain
-  `<redacted>`), `TestAgent_GeneratedOutputContainsNoCredentialMaterial`.
+  appear in the report; gap values must contain `<redacted>`),
+  `TestAgent_GeneratedOutputContainsNoCredentialMaterial`.
 
 ### Clone-backed VM: undeclared non-identity fields come from the template
 
@@ -496,3 +494,73 @@ test.
   (no demotion), same as the qemu side. Pinned:
   `TestE2ETemplateCTCreateMarksAndIsIdempotent`,
   `TestE2E_LXCDesiredButPVEIsTemplateCTSurfacesAnomaly`.
+
+### M13.2 wire findings (hostpci, cipassword, SOPS cloud-init)
+
+PVE 9.2.2 behaviour probe-verified on conformance-dev (2026-09-15). The
+structured-PCI + cloud-init-SOPS schema is pinned by the tests below; these
+wire findings are recorded so a future change does not silently regress
+them.
+
+- **`hostpci<N>` is a BDF + a small PVE-side token set** — the PVE schema
+  for `hostpci<N>` is
+  `hostpci<N>=<bdf>[,pcie=<0|1>][,x-vga=<0|1>][,rombar=<0|1>][,mdev=<type>/<id>]`
+  where `<bdf>` accepts the forms `0000:17:00`, `0000:17:00.0`, `00:17.0`,
+  `00000:17:00`, `1234:01:00.1` and similar (probe-verified PVE 9.2.2 — a
+  five-hex-digit domain and the short `bus:slot.func` form are BOTH
+  accepted; a non-hex BDF is rejected 400 with "does not match regex").
+  PVE rejects option tokens outside that set (`boot=`, `dimmable=`,
+  `sub-vfid=`, `legacy-irr-qworkaround=` → 400 "property is not defined in
+  schema") and `pcie=2` (400 out-of-range value). ProxOps models `<bdf>`
+  (case-normalised to lowercase for a stable wire form) + `pcie` only; the
+  PVE-side option tokens (`x-vga` / `rombar` / `mdev`) are
+  **deliberately not modelled** — they are passthrough display / ROM /
+  mdev choices the operator makes on the PVE host, and ProxOps must not
+  invent values for them. On write, ProxOps emits the BDF (+ `pcie=` when
+  declared). A `hostpci<N>` whose PVE report carries an option token ProxOps
+  does not own is surfaced via
+  `spec.hardware.pci-devices` + a PVE-side-token note, and ProxOps does NOT
+  rewrite it just to strip the operator's choice. Pinned:
+  `TestPCI_ManifestWireRoundTrip`, `TestPCI_BDFGrammar`,
+  `TestPCI_PveSideTokenDrifts`, `TestPCI_LiveOnlyIsAnomaly`.
+- **A live PVE-side `hostpci<N>` the manifest does NOT own is surfaced,
+  not stripped** — PVE does not let ProxOps delete a PCI slot it did not
+  create (the PVE task gate "only root can set … for non-mapped devices"
+  plus the no-unmap semantics on a running guest). ProxOps's
+  `DriftAnomalies` therefore reports live `hostpci<N>` slots
+  (PVE-owned, unmodelled) as non-destructive anomalies; it does not emit
+  a `delete=hostpci<N>`. Pinned: `TestPCI_LiveOnlyIsAnomaly`.
+- **`cipassword` on PVE 9.2: the wire is a masked, non-comparable value,
+  and re-writing the mask is ACCEPTED (dangerous)** — PVE reports
+  `cipassword=**********` (a fixed ten-asterisk mask) on
+  `/qemu/{id}/config` when a password has EVER been set, regardless of the
+  actual value; the key is absent when none is set. The plaintext (and even
+  the stored form) is NOT recoverable through the API. Critically, a config
+  write of the literal mask value is **accepted** — PVE would then store the
+  password as the ten-asterisk string itself (overwriting the real one), so
+  "rewriting what PVE reports back" is data loss, not a no-op. PVE's task
+  bookkeeping (`digest=`) changes between writes but is not a usable hash.
+  The Drift rule M13.2 pins: when ProxOps OWNS a ci-password (via
+  `ci-password-ref`) and the live `cipassword` ABSENT, ProxOps writes the
+  resolved value once; when PRESENT (masked or not), that is "satisfied" —
+  no write, and NEVER a `delete=` (deleting the live key can lock the
+  operator out of a running guest). A live `cipassword` with NO owned
+  manifest `ci-password-ref` is a PVE-owned gap (never adopted back through
+  the mask, never rewritten, never deleted by ProxOps). This is why there is
+  **no plaintext `ci-password` field** in the ProxOps schema: after the
+  first write the field value is unobservable, and any manifest copy of it
+  would drift-flap or be dangerous to rewrite. PVI: password rotation is
+  out-of-band (set it on PVE, or delete+re-create the ref). Pinned:
+  `TestCIDrift_CIPasswordRules`, `TestAdopt_M132_PII_noLeak_inNewNames`.
+- **SOPS cloud-init material lives under `cloud-init.ssh-keys` /
+  `cloud-init.passwords`** — a second, structured block in the cluster's
+  SOPS document, separate from (and in the same file as) the M9 flat
+  `secrets:` credential map. The SOPS merge (`adopt --adopt-secrets`) is
+  atomic via a `.proxops-tmp` sidecar + `os.Rename(2)`, preserves all
+  pre-existing age recipients, re-uses an existing name's value when
+  merging (no clobber), and never writes plaintext to disk. The private
+  age key stays outside the repository (task §8). Pinned:
+  `cmd/proxops/m13_2_sops_merge_test.go`
+  (`TestM132_SOPS_plainAdoptNeverWrites`, `TestM132_SOPS_mergeImportsPreservesSurvives`,
+  `TestM132_SOPS_mergeDoesNotClobberExistingNames`,
+  `TestM132_SOPS_failureLeavesFileUntouched`, `TestM132_SSHKeyFingerprint`).

@@ -95,6 +95,7 @@ non-destructive anomaly (the data-loss guard), never a re-import.
 | `serial0` | no | `serial0` | e.g. `socket`. |
 | `sockets` | no | `sockets` | CPU socket count (default 1). |
 | `numa` | no | `numa=1` | Turn PVE NUMA on. |
+| `pci-devices` | no | `hostpci<N>=<bdf>[,pcie=N]` | M13.2: structured host PCI passthrough. Each entry has a `slot` (PVE's `hostpci<N>`, `N` 0–999), a `device` (PVE PCI BDF, `domain:bus:slot[.func]`; ProxOps lower-cases it on the wire so the canonical form is stable), and an optional `pcie` (renders the PVE `pcie=1`/`pcie=0` token; omitted = ProxOps does not own the token). ProxOps validates slots (unique, well-formed) and BDF syntax on parse — an unparseable device or duplicate slot fails closed. Drift requires **stop** to add/change/remove a `hostpci<N>` (changing host PCI passthrough on a running guest is not a safe hot operation). A `hostpci<N>` present in PVE that the manifest does NOT declare is surfaced in the **Drift anomaly** report — ProxOps does NOT delete PVE-managed PCI (an operator-added passthrough must not disappear just because it is unstated in the manifest). PVE rejects `hostpci` for devices not in a PCI pool on most clusters ("only root can set 'hostpci<N>' config for non-mapped devices") — on those clusters ProxOps surfaces the PVE task failure, not a config write. See GAPS.md for additional PVE-side option tokens ProxOps does not model (`x-vga`, `rombar`, `mdev`). |
 
 ### Options
 
@@ -120,6 +121,8 @@ A ProxOps VM's top-level PVE keys `ciuser`, `sshkeys`, `nameserver`,
 |---|---|---|---|
 | `ci-user` | no | `ciuser` | PVE cloud-init user. Empty = not owned. |
 | `ssh-keys` | no | `sshkeys` | PVE cloud-init public keys. Empty = not owned. A single `"*"` sentinel = PVE owns the live value; ProxOps does not write `sshkeys`. On the wire ProxOps percent-encodes the value and joins keys with `%0A` (PVE 9.2 requires the field value itself to be urlencoded — a raw key is rejected with "invalid urlencoded string"; probed on conformance-dev 2026-09-13). Drift compares the **decoded key set**, so a re-encode or key reorder is never drift. |
+| `ssh-key-refs` | no | `sshkeys` | M13.2: PLURAL list of SOPS dot-paths (`cloud-init.ssh-keys.<name>`), each resolved against the cluster's decrypted SOPS document. The resolved key material is concatenated **in manifest order** and written to PVE's `sshkeys` (same percent-encoded `%0A`-joined shape as `ssh-keys`). A missing ref, an empty SOPS entry, or an empty resolved set fails closed BEFORE any PVE mutation — ProxOps does NOT treat a missing ref as "no keys". **Mutual exclusion:** `ssh-keys` and `ssh-key-refs` are exclusive; both non-empty is a `Validate()` error. The sentinel `"*"` is only meaningful on the `ssh-keys` field (PVE owns the live keys). |
+| `ci-password-ref` | no | `cipassword` | M13.2: SINGULAR SOPS dot-path (`cloud-init.passwords.<name>`), resolved at reconcile time. **There is no plaintext `ci-password` field.** The resolved value is written to PVE's `cipassword` field on create and on update, but PVE 9.2 masks the value on read-back as `**********` (probe-verified; the plaintext is unrecoverable). The Drift rule: ProxOps writes `cipassword` only when the live `cipassword` is ABSENT; when present (even as `**********`), ProxOps treats it as satisfied and does NOT rewrite. The live value is never compared, and ProxOps never `delete=`s it — an unowned or already-set `cipassword` is not a drift. A malformed ref (not starting with `cloud-init.passwords.`), an empty entry, or a missing SOPS name fails closed. |
 | `nameservers` | no | `nameserver` (space-separated) | PVE cloud-init DNS server CSV. Set-compared on /config vs. desired — order/duplicates are not semantics. |
 | `search-domains` | no | `searchdomain` (space-separated) | PVE cloud-init DNS search domain CSV. Same set semantics. |
 | `ipconfigs` | no | `ipconfig<N>` (`ip=<cidr>[,gw=<addr>]`) | PVE cloud-init static-IP. One entry per proxops-owned NIC; `nic` = PVE slot index. PVE's `dhcp` form is **not** modelled. |
@@ -134,9 +137,16 @@ value survives. Mixing `"*"` with real keys fails `Validate()`
 (ambiguous intent).
 
 Adoption: PVE-side `sshkeys` are redacted to `["*"]` in emitted
-manifests (public-key material is treated as credential-adjacent). `cipassword` /
-`cicustom` / `ciupgrade` are NOT adopted — secret or PVE-side-only — and
-stay in the gap report.
+manifests (public-key material is treated as credential-adjacent).
+M13.2: when the cluster is SOPS-backed AND the live PVE `sshkeys` line is
+present VERBATIM in the cluster's SOPS document as `cloud-init.ssh-keys.<name>`,
+adopt emits the manifest with **`ssh-key-refs`** (a SOPS dot-path) instead of
+the sentinel — the committed manifest names the ref, never the key. When
+nothing matches, the manifest keeps the `"*"` sentinel. `cipassword`,
+`cicustom` / `ciupgrade` are NOT adopted (PVE 9.2 masks cipassword on
+read-back; secret or PVE-side-only) and stay in the gap report.
+`proxops adopt --adopt-secrets` additionally IMPORTS new SOPS names
+(deterministic `adopted-<fingerprint>`); see `adopt.md` + `sops-credentials.md`.
 
 **Deliberately not modelled:** replication jobs (source/destination/schedule
 is a separate concern — a future dedicated resource), `bootspeed`, `netboot`
@@ -171,11 +181,14 @@ Differences from `kind: VM`:
 | PVE /untemplate endpoint | **PVE 9.2 has no `/qemu/{id}/untemplate` endpoint** (probe-verified `HTTP 501 "not implemented"` on conformance-dev 2026-09-11). The planner therefore surfaces a **non-destructive anomaly** when a ProxOps `kind: VM` desired matches a PVE-side template at the same `(node, vmid)`: ProxOps will not attempt a kind-flip write. The operator either changes the manifest to `kind: TemplateVM` (the right ProxOps representation of PVE's state) or manually demotes the PVE object (`qm` from the PVE host, or PVE's Web UI). |
 | Create | `POST /qemu` with `start=0` + `POST /qemu/{id}/template`. The executor combines both into a single `Create` action. |
 | Delete | `DELETE /qemu/{id}`. PVE accepts delete on a templated object. |
-| Cloud-init | `spec.cloud-init-data` is fully supported (see `kind: VM` § Cloud-Init Data above). |
+| Cloud-init | `spec.cloud-init-data` is fully supported (see `kind: VM` § Cloud-Init Data above), including M13.2 SOPS refs. **PCI**: `spec.hardware.pci-devices` is supported but a template with host PCI is unusual (a GPU-VM clone-source is a valid shape); M13.2 drift/stop rules apply. |
 
 Adoption: PVE objects reporting `template=1` produce `kind: TemplateVM`
-manifests under `templatevm/<cluster>/`. PVE-side `sshkeys` are redacted
-to `["*"]`; `cipassword` / `cicustom` remain in the gap report.
+manifests under `templatevm/<cluster>/`. M13.2: PVE-side `sshkeys` are
+SOPS-matched to `ssh-key-refs` (verbatim match on the decrypted SOPS doc);
+on no match they are redacted to `["*"]` (see `kind: VM` § Cloud-Init
+adoption). `cipassword` / `cicustom` remain in the gap report.
+`spec.hardware.pci-devices` adopts from live `hostpci<N>` keys.
 
 ---
 

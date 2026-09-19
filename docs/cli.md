@@ -13,7 +13,7 @@ ProxOps GitOps repository (repository-first mode) unless stated otherwise.
 | `proxops apply --diff` | (with apply) | Also render per-field diffs for each planned action. |
 | `proxops status` | no | Per-cluster convergence table (runs a read-only cycle first if none has completed). |
 | `proxops run` | yes | Daemon: continuously reconcile all clusters every `poll-interval`. |
-| `proxops adopt --cluster <name>` | no | Reverse-engineer one cluster's live PVE objects into ProxOps YAML under `<kind>/<cluster>/` (see [Adoption](adopt.md)). **Always requires `--cluster`.** |
+| `proxops adopt --cluster <name>` | PVE: no / SOPS: optional | Reverse-engineer one cluster's live PVE objects into ProxOps YAML under `<kind>/<cluster>/` (see [Adoption](adopt.md)). **Always requires `--cluster`.** PVE is read-only unless `--adopt-secrets` is set, in which case the cluster's SOPS file is re-encrypted in place to import new `cloud-init.ssh-keys.<name>` entries (see [SOPS & credentials](sops-credentials.md#m132--cloud-init-sops-material)). |
 | `proxops --version` | no | Build version. |
 
 Multi-cluster: `diff`/`apply`/`status`/`run` process **every** discovered
@@ -49,6 +49,13 @@ closed:
 ```
 error: --cluster "ghost" is not in pve.clusters (known: [conformance-dev])
 ```
+
+### `adopt` flags
+
+| Flag | Meaning |
+|---|---|
+| `--cluster <name>` | The named PVE cluster to adopt from (required). |
+| `--adopt-secrets` | M13.2: in addition to generating manifests, import PVE-recoverable cloud-init secret material into the cluster's SOPS file. New `sshkeys` (public keys) become `cloud-init.ssh-keys.adopted-<digest>` entries, written atomically (sidecar + rename) with all existing age recipients preserved. Passwords are NEVER imported (PVE masks them; see [adopt.md § M13.2](adopt.md#m132--cloud-init-secrets-ssh-keys--cipassword-census--adopt-secrets)). Requires the cluster to declare a `secrets-file`. |
 
 ## Environment variables (credentials)
 
