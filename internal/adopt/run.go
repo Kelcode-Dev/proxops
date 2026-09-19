@@ -87,9 +87,9 @@ func gapNoteFor(field, fallback string) string {
 	case "ciupgrade":
 		return "PVE cloud-init upgrade mode; proxops does not model it"
 	case "sshkeys":
-		return "PVE cloud-init SSH public keys; proxops does not model VM cloud-init sshkeys (value redacted)"
+		return "PVE cloud-init SSH public keys are NOT modelled in this manifest (M13.2: PVE reports non-empty sshkeys; the cluster's SOPS store could not produce a matching cloud-init.ssh-keys.<name> reference — either the cluster is not SOPS-backed or none of the live key lines is present verbatim in cloud-init.ssh-keys. Re-run `adopt --cluster <name> --adopt-secrets` to import them, or run plain adopt once the keys live in the SOPS document.) The value is redacted."
 	case "cipassword":
-		return "PVE cloud-init root password; proxops does not model it (value redacted)"
+		return "PVE cloud-init root password is NOT modelled: PVE 9.2 masks the value on readback (\"**********) and the plaintext is unrecoverable, so proxops cannot import it (M13.2). Manually create a cloud-init.passwords.<name> SOPS entry and set spec.cloud-init-data.ci-password-ref on the manifest before listing it."
 	case "kvm":
 		return "PVE KVM nested-virt enable; proxops does not model it"
 	case "balloon":
@@ -149,6 +149,7 @@ func (s *artifactSpec) sortedNodes() []string {
 }
 
 // adoptContext threads the per-run state (git root, pve client, discovered
+// M13.2: adoption options (SOPS document + --adopt-secrets flag).
 // artifact names, volume-size listings, result).
 type adoptContext struct {
 	pve     *pveclient.Client
@@ -159,9 +160,38 @@ type adoptContext struct {
 	// volumeSizes: node -> storage -> volid -> bytes, accumulated lazily by
 	// nodeVolumeSizes.
 	volumeSizes map[string]map[string]map[string]int64
+
+	// M13.2: adoption options (SOPS document + --adopt-secrets flag).
+	opts Options
+	// sshUniqueNames: distinct SOPS names (existing OR adopted) referenced
+	// by any resource in this run → the "unique keys" census count.
+	sshUniqueNames map[string]bool
+	// sshReusedNames: SOPS names that came from the EXISTING store (no new
+	// name was created for them).
+	sshReusedNames map[string]bool
+	// sshConfigured: number of resources that had live sshkeys.
+	sshConfigured int
+	// pwConfigured: number of resources that had a live cipassword.
+	pwConfigured int
+	// New SSH keys: SOPS name -> key line (for the CLI to merge into the
+	// SOPS file). Populated ONLY when opts.AdoptSecrets is true.
+	newNames map[string]string
 }
 
-// Run performs a read-only adopt of one cluster:
+// RunWithOptions is the M13.2 entry point that accepts an Options (SOPS
+// document + --adopt-secrets). See Options for the semantic difference
+// from plain Run.
+func RunWithOptions(ctx context.Context, pve *pveclient.Client, cluster string, allowedNodes []string, gitRoot string, opts Options) (*Result, error) {
+	return runWithOptions(ctx, pve, cluster, allowedNodes, gitRoot, opts)
+}
+
+// Run is the M8/M10/M11/M13 zero-Options form: no SOPS matching, no
+// --adopt-secrets. Preserved for existing callers + tests.
+func Run(ctx context.Context, pve *pveclient.Client, cluster string, allowedNodes []string, gitRoot string) (*Result, error) {
+	return runWithOptions(ctx, pve, cluster, allowedNodes, gitRoot, Options{})
+}
+
+// runWithOptions performs a read-only adopt of one cluster:
 //
 //  1. node enumeration (the configured allowlist; otherwise PVE's cluster
 //     node list),
@@ -173,7 +203,7 @@ type adoptContext struct {
 //
 // Generated files land under <kind>/<cluster>/ in the git root. Run never
 // edits clusters/<cluster>/resources.yaml.
-func Run(ctx context.Context, pve *pveclient.Client, cluster string, allowedNodes []string, gitRoot string) (*Result, error) {
+func runWithOptions(ctx context.Context, pve *pveclient.Client, cluster string, allowedNodes []string, gitRoot string, opts Options) (*Result, error) {
 	if strings.TrimSpace(cluster) == "" {
 		return nil, fmt.Errorf("adopt: cluster name required")
 	}
@@ -182,7 +212,18 @@ func Run(ctx context.Context, pve *pveclient.Client, cluster string, allowedNode
 	}
 	writesBefore := pve.WritesPerformed()
 	res := &Result{Cluster: cluster, PVE: pve}
-	ac := &adoptContext{pve: pve, cluster: cluster, gitRoot: gitRoot, res: res, names: &artifactNames{iso: map[string]string{}, vzt: map[string]string{}}, volumeSizes: map[string]map[string]map[string]int64{}}
+	ac := &adoptContext{
+		pve:            pve,
+		cluster:        cluster,
+		gitRoot:        gitRoot,
+		res:            res,
+		opts:           opts,
+		names:          &artifactNames{iso: map[string]string{}, vzt: map[string]string{}},
+		volumeSizes:    map[string]map[string]map[string]int64{},
+		sshUniqueNames: map[string]bool{},
+		sshReusedNames: map[string]bool{},
+		newNames:       map[string]string{},
+	}
 
 	nodes := append([]string{}, allowedNodes...)
 	if len(nodes) == 0 {
@@ -224,6 +265,10 @@ func Run(ctx context.Context, pve *pveclient.Client, cluster string, allowedNode
 			}
 		}
 	}
+
+	// M13.2: finalise the cloud-init secret census + new-SOPS-name set
+	// (deterministic ordering; no secret material in any output field).
+	ac.collectCensus()
 
 	res.Gaps = dedupGaps(res.Gaps)
 	sort.Slice(res.Wrote, func(i, j int) bool { return res.Wrote[i].Path < res.Wrote[j].Path })

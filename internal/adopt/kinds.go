@@ -3,6 +3,7 @@ package adopt
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
@@ -274,21 +275,14 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 
 	//   - ciuser / nameserver / searchdomain / ipconfig<N>: as-is.
 
-	//   - sshkeys: PII. M10 redaction rule applies: adopted as a
+	//   - sshkeys: M13.2. Adopted via SOPS-matched cloud-init.ssh-keys.<name>
+	//     references when the live material matches the cluster's SOPS
+	//     document; otherwise "PVE-owned" sentinel (see ac.cloudInitDataAdopt).
 
-	//     single "*" sentinel entry in the manifest. Operator must
-
-	//     replace the sentinel with their real public key(s) before
-
-	//     first apply. proxops refuses to write sshkeys while
-
-	//     the sentinel is present (schema.CloudInitRedactedSentinel).
-
-	//   - cipassword / cicustom / ciupgrade: NOT adopted. Secret or
-
-	//     PVE-side-only fields; they stay in the gap report.
-
-	vm.Spec.CloudInitData = schema.PveCloudInitDataFromPVE(raw)
+	//   - cipassword / cicustom / ciupgrade: NOT adopted. PVE 9.2 masks
+	//     cipassword on readback (M13.2 probe: plaintext unrecoverable);
+	//     census-only.
+	vm.Spec.CloudInitData = ac.cloudInitDataAdopt(raw)
 
 	if wErr := ac.writeManifest(schema.KindVM, vm, vm.Metadata.Name); wErr != nil {
 		return wErr
@@ -311,6 +305,18 @@ func (ac *adoptContext) adoptVM(ctx context.Context, node string, e pveclient.VM
 		}
 		if VMKeyIsDynamic(k) {
 			continue
+		}
+		// M13.2: hostpciN keys are owned by the VM hardware when they
+		// parse as BDF+pcie (PvePCIDevicesFromPVE already extracted them
+		// into spec.hardware.pci-devices). PVE also reports non-parsable
+		// hostpciN values (x-vga-only without a BDF, rejected mdev/pool
+		// forms, ...) — those stay in the gap report so the operator sees
+		// an unmodelled PVE-side PCI slot rather than a silent adoption.
+		if schema.PvePCIKeyIsOwned(k) {
+			if _, ok := schema.PvePCIDeviceFromPVE(k, raw[k]); ok {
+				continue
+			}
+			// non-parsable -> fall through to gap.
 		}
 		// M11: cloud-init data keys owned by proxops (ciuser, sshkeys,
 		// nameserver, searchdomain, ipconfig*) are NOT gaps; they are
@@ -747,10 +753,11 @@ func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pvec
 		}
 		t.Spec.Tags = kept
 	}
-	// M11: cloud-init data fields (ciuser, ssh-keys→["*"], nameservers,
-	// search-domains, ipconfigs). PVE-side cipassword + cicustom +
-	// ciupgrade are NOT adopted (secret / PVE-side-only / out-of-model).
-	t.Spec.CloudInitData = schema.PveCloudInitDataFromPVE(raw)
+	// M11 + M13.2: cloud-init data fields. ssh-keys are SOPS-matched
+	// (or sentinel when the SOPS document is empty / no matching
+	// existing ref + --adopt-secrets off); cipassword is census-only
+	// (PVE 9.2 masks it on readback).
+	t.Spec.CloudInitData = ac.cloudInitDataAdopt(raw)
 	// state: always "stopped" for a PVE template (PVE refuses to start).
 	t.Spec.State = "stopped"
 
@@ -788,6 +795,14 @@ func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pvec
 		if VMKeyIsDynamic(k) {
 			continue
 		}
+		// M13.2: hostpciN keys on a TemplateVM are owned by the
+		// embedded VM surface when they parse; non-parsable PVE-side
+		// forms stay gaps (same rule as ordinary VM).
+		if schema.PvePCIKeyIsOwned(k) {
+			if _, ok := schema.PvePCIDeviceFromPVE(k, raw[k]); ok {
+				continue
+			}
+		}
 		gap := Gap{Kind: schema.KindTemplateVM, Node: node, ID: e.VMID, Field: k, Value: redactGapValue(k, pveStr(raw[k])), Note: gapNoteFor(k, "live PVE config proxops does not model for TemplateVMs; not represented in the generated manifest")}
 		gaps = append(gaps, gap)
 	}
@@ -796,13 +811,188 @@ func (ac *adoptContext) adoptTemplateVM(ctx context.Context, node string, e pvec
 }
 
 // isM11OwnedCloudInitDataKey reports whether a PVE /config key is in M11's
-// owned cloud-init data surface: ciuser, sshkeys, nameserver, searchdomain,
-// ipconfig<N>. cipassword, cicustom, ciupgrade are NOT in this set (they are
-// M10 PII / PVE-side-only fields, deliberately not modelled in M11).
+// owned cloud-init data surface: ciuser, sshkeys (M13.2: now SOPS-referenced
+// or sentinel), nameserver, searchdomain, ipconfig<N>. cipassword, cicustom,
+// ciupgrade are NOT in this set — cipassword remains a redacted gap with an
+// M13.2 note (PVE masks it on readback; the census in Result.CloudInit is the
+// M13.2 operator signal), cicustom/ciupgrade are PVE-side-only.
 func isM11OwnedCloudInitDataKey(k string) bool {
 	switch k {
 	case "ciuser", "sshkeys", "nameserver", "searchdomain":
 		return true
 	}
 	return strings.HasPrefix(k, "ipconfig")
+}
+
+// M13.2: cloud-init data adoption with SOPS ssh-keys matching.
+//
+// Semantics (VM + TemplateVM):
+//   - ciuser / nameservers / search-domains / ipconfigs: adopted as-is
+//     (M11 behaviour, inherited from PveCloudInitDataFromPVE).
+//   - sshkeys: M13.2 SOPS-matching.
+//     * For every live ssh-key line, look up an EXISTING SOPS name whose
+//       key material matches exactly (byte-for-byte line equality):
+//       emit `cloud-init.ssh-keys.<existing-name>`.
+//     * If opts.AdoptSecrets is true and no existing match exists, assign
+//       a deterministic new SOPS name (`adopted-<fingerprint>` — see
+//       schema.SSHKeyFingerprint) and record it on Result.NewSSHKeys
+//       (for the CLI to write into the encrypted SOPS document) AND on
+//       Result.AdoptedSSHRefs; the manifest's ssh-key-refs entry carries
+//       the NEW name so a subsequent plain-run adopt reuses it.
+//     * Otherwise (no match + --adopt-secrets not set) → fall back to the
+//       M10 redacted-sentinel ssh-keys: ["*"] (PVE-owned, never written).
+//   - cipassword: census only. PVE 9.2 masks it on readback (M13.2
+//     probe-verified: '**********', plaintext unrecoverable). No manifest
+//     field; the gap report carries a "manual ci-password-ref mapping"
+//     note + the Result.CloudInit census counts the resource.
+//
+// Determinism: new-name assignment is keyed by the SSHKeyFingerprint so
+// two resources sharing the same key land on the SAME SOPS entry regardless
+// of order. The fingerprint is 16 lowercase hex chars of
+// sha256("sshpki\x00<type>\x00<blob>") — stable across adopt runs AND
+// stable when the operator renames the key later (the user can rename the
+// SOPS key freely; the manifest's ref will be the NEW name after they re-adopt,
+// but the PVE material is still recoverable via the old key until they
+// re-adopt; that is a manual step, documented in sops-credentials.md).
+func (ac *adoptContext) cloudInitDataAdopt(raw map[string]any) schema.CloudInitData {
+	cd := schema.PveCloudInitDataFromPVE(raw)
+	// M10 sentinel was filled by PveCloudInitDataFromPVE when PVE carried
+	// non-empty sshkeys; M13.2 now refines that: replace the sentinel with
+	// SOPS refs whenever EVERY live key line resolves to one (existing SOPS
+	// name match, or a freshly generated "adopted-<fingerprint>" name under
+	// --adopt-secrets). The all-or-nothing rule is what makes this safe:
+	// schema.Validate rejects mixing ssh-keys + ssh-key-refs, so a partially
+	// matched resource keeps the M10 ["*"] sentinel (PVE-owned, no loss)
+	// rather than dropping unadopted keys. The store's SSHKeys map may be
+	// EMPTY: matchOrAdoptLines still imports under --adopt-secrets.
+	if len(cd.SSHKeys) > 0 {
+		lines, present := schema.PveCISshLinesFromPVE(raw)
+		if present {
+			ac.sshConfigured++
+			refs, allMatched := ac.matchOrAdoptLines(lines)
+			if allMatched {
+				cd.SSHKeys = nil
+				cd.SSHKeyRefs = refs
+			}
+			// else: keep the sentinel (M10 shape)
+		}
+	}
+	if schema.PveCIPasswordPresent(raw) {
+		ac.recordPasswordPresent()
+	}
+	return cd
+}
+
+// matchOrAdoptLines maps live ssh-key lines to SOPS refs. Returns (refs,
+// allMatched). When opts.AdoptSecrets is false, every line MUST already
+// have an existing SOPS name or allMatched=false (sentinel fallback).
+// When opts.AdoptSecrets is true, lines without an existing name are
+// assigned deterministic "adopted-<fingerprint>" names into ac.newNames.
+//
+// The census is committed ONLY on the allMatched=true path: a failed match
+// MUST NOT pollute Result.CloudInit with SOPS names the resource did not
+// actually reference (that would mislead operators about their SOPS store).
+func (ac *adoptContext) matchOrAdoptLines(lines []string) (refs []string, allMatched bool) {
+	// Build the existing SOPS name -> line map for matching.
+	existingByLine := map[string]string{}
+	for name, line := range ac.opts.SOPS.SSHKeys {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		existingByLine[line] = name
+	}
+
+	localUnique := map[string]bool{}
+	localReused := map[string]bool{}
+	localNew := map[string]string{}   // adopted name -> key line (for ac.newNames)
+	seen := map[string]bool{}
+	refs = make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || line == schema.CloudInitRedactedSentinel {
+			// A sentinel in LIVE PVE material should NOT happen (PVE does
+			// not store "*" as a key); treat as unresolvable → fall back
+			// to sentinel for the WHOLE resource (no partial census).
+			return nil, false
+		}
+		if name, existing := existingByLine[line]; existing {
+			localUnique[name] = true
+			localReused[name] = true
+			if !seen[name] {
+				seen[name] = true
+				refs = append(refs, schema.CloudInitSSHRefPrefix+name)
+			}
+			continue
+		}
+		// No existing SOPS entry for this material.
+		if !ac.opts.AdoptSecrets {
+			// Without --adopt-secrets, partial adoption is not allowed
+			// (schema rejects mixing refs + sentinel). Fall back to the
+			// all-keys sentinel. Census stays empty (no refs emitted).
+			return nil, false
+		}
+		// --adopt-secrets: deterministic new name = adopted-<fingerprint>.
+		//
+		// Fingerprint is derived from the OpenSSH key line (type + base64
+		// body; comment is intentionally EXCLUDED so "the same key under a
+		// different comment" is still deduped to one SOPS entry).
+		fp := schema.SSHKeyFingerprint(line)
+		if fp == "" {
+			// line is not a parseable OpenSSH key → fail closed: leave the
+			// resource on the sentinel; census stays empty.
+			return nil, false
+		}
+		name := "adopted-" + fp
+		localUnique[name] = true
+		localNew[name] = line
+		if !seen[name] {
+			seen[name] = true
+			refs = append(refs, schema.CloudInitSSHRefPrefix+name)
+		}
+	}
+
+	// All lines resolved: commit to the context census + import map.
+	for k := range localUnique {
+		ac.sshUniqueNames[k] = true
+	}
+	for k := range localReused {
+		ac.sshReusedNames[k] = true
+	}
+	for k, v := range localNew {
+		// Belt-and-braces: adopt may be called once per run but the same
+		// fingerprint name could recur from a prior resource in the same
+		// run; keep the existing entry (first-writer wins; the lines are
+		// deduped by fingerprint anyway).
+		if _, existed := ac.newNames[k]; !existed {
+			ac.newNames[k] = v
+		}
+	}
+	return refs, true
+}
+
+func (ac *adoptContext) recordPasswordPresent() {
+	ac.pwConfigured++
+}
+
+// collectCensus finalises Result.CloudInit + Result.AdoptedSSHRefs at the
+// tail of runWithOptions. Called ONCE per run.
+func (ac *adoptContext) collectCensus() {
+	ac.res.CloudInit = CloudInitSummary{
+		SSHUniqueKeys: len(ac.sshUniqueNames),
+		SSHReused:     len(ac.sshReusedNames),
+		SSHAdded:      len(ac.newNames),
+		SSHResources:  ac.sshConfigured,
+		PwResources:   ac.pwConfigured,
+		SOPSBacked:    len(ac.opts.SOPS.SSHKeys) > 0 || len(ac.opts.SOPS.Passwords) > 0,
+	}
+	ac.res.NewSSHKeys = ac.newNames
+	// AdoptedSSHRefs = every SOPS name this run actually referenced on a
+	// manifest (existing AND adopted), sorted. NOT just new ones: that is
+	// what Result.NewSSHKeys is for.
+	for k := range ac.sshUniqueNames {
+		ac.res.AdoptedSSHRefs = append(ac.res.AdoptedSSHRefs, k)
+	}
+	sort.Strings(ac.res.AdoptedSSHRefs)
 }
