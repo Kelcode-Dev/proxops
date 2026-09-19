@@ -13,6 +13,7 @@ package schema
 // could not be mapped to a proxops field.
 
 import (
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -232,6 +233,42 @@ func PveCINameserversFromPVE(current map[string]any) []string {
 	return pveCSVField(current["nameserver"])
 }
 
+// PveCISshLinesFromPVE decodes PVE's `sshkeys` /config value (urlencoded,
+// newline-joined) into plain OpenSSH public-key lines. It returns the
+// decoded lines + whether ANY key was present.
+//
+// PVE percent-encodes the whole field (M11 wire finding: spaces -> %20,
+// '@' -> %40; Go's url.QueryUnescape treats '+' as a literal plus, matching
+// PVE's encoding). The comment column of each line is preserved.
+//
+// No PII leaves this function: callers (adopt) may pass the decoded lines to
+// SOPS-matching (which fingerprints them) or redact them. Adopt never logs
+// the lines directly.
+func PveCISshLinesFromPVE(current map[string]any) (lines []string, present bool) {
+	raw := pveStr(current["sshkeys"])
+	if strings.TrimSpace(raw) == "" {
+		return nil, false
+	}
+	decoded := raw
+	if s, err := url.QueryUnescape(strings.ReplaceAll(raw, "+", "%2B")); err == nil {
+		decoded = s
+	}
+	for _, l := range strings.Split(decoded, "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			lines = append(lines, t)
+		}
+	}
+	return lines, len(lines) > 0
+}
+
+// PveCIPasswordPresent reports whether PVE's /config carries a
+// cipassword value. PVE 9.2 always masks it (probe-verified M13.2: a fixed
+// '********' string, plaintext unrecoverable); presence itself is the only
+// signal adopt can use. Used for the M13.2 cloud-init secret census.
+func PveCIPasswordPresent(current map[string]any) bool {
+	return strings.TrimSpace(pveStr(current["cipassword"])) != ""
+}
+
 // PveCISearchDomainsFromPVE returns PVE's `searchdomain` CSV split.
 func PveCISearchDomainsFromPVE(current map[string]any) []string {
 	return pveCSVField(current["searchdomain"])
@@ -420,6 +457,11 @@ func PveVMHardwareFromPVE(current map[string]any) VMHardware {
 	if s := pveStr(current["serial0"]); s != "" && s != "none" {
 		h.Serial0 = s
 	}
+	// M13.2: hostpciN PCI passthrough. Adopt every hostpciN PVE reports;
+	// PvePCIDevicesFromPVE collects them in deterministic slot order,
+	// modelling only the BDF + the pcie token (PVE-side-only tokens are
+	// surfaced by the adopt caller as PVE-owned gaps).
+	h.PCIDevices = PvePCIDevicesFromPVE(current)
 	return h
 }
 

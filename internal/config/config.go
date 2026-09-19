@@ -247,16 +247,30 @@ type Config struct {
 	SopsResolved map[string]SopsClusterSecrets `json:"-" yaml:"-"`
 }
 
-// SopsClusterSecrets holds the decrypted, in-memory PVE credentials for one
-// cluster, keyed by the PVE credential fields proxops needs. The git
-// fetch token is shared (not per-cluster) because proxops has a single
-// git source (URL mode) that serves every cluster.
+// SopsClusterSecrets holds the decrypted, in-memory credential material for
+// one cluster. The PVE / git credential fields (M9) are flat scalars; the
+// M13.2 Cloud-Init material is structured maps (ssh-keys + passwords) that
+// are referenced by VM / TemplateVM manifests via
+// spec.cloud-init-data.ssh-key-refs / .ci-password-ref.
+//
+// All values are in-memory only: this struct is never (de)(mar)shalled to
+// disk, and the Config.SopsResolved map that holds it is `json:"-" yaml:"-"`.
 type SopsClusterSecrets struct {
 	User     string
 	TokenID  string
 	Token    string
 	Password string
 	GitToken string
+
+	// CloudInitSSHKeys is the SOPS document's `cloud-init.ssh-keys` mapping:
+	// name -> one OpenSSH public-key line. M13.2. May be empty when the
+	// cluster's SOPS file has no such block (or when the cluster uses only
+	// flat M9 credentials with no cloud-init material).
+	CloudInitSSHKeys map[string]string
+	// CloudInitPasswords is the SOPS document's `cloud-init.passwords`
+	// mapping: name -> plaintext password. M13.2. May be empty.
+	CloudInitPasswords map[string]string
+
 	// SourceFile records the SOPS file that produced these values. It is
 	// an on-disk path, not secret material. Used in error text only.
 	SourceFile string
@@ -432,11 +446,17 @@ func (c *Config) ResolveSOPS() error {
 		if cl.SecretsFile == "" {
 			continue
 		}
-		val, err := secrets.DecryptFile(cl.SecretsFile)
+		doc, err := secrets.DecryptFile(cl.SecretsFile)
 		if err != nil {
 			return fmt.Errorf("cluster %s: SOPS decrypt %s: %w", name, cl.SecretsFile, err)
 		}
-		sc := SopsClusterSecrets{SourceFile: cl.SecretsFile}
+		sc := SopsClusterSecrets{
+			SourceFile:         cl.SecretsFile,
+			CloudInitSSHKeys:   doc.SSHKeys,
+			CloudInitPasswords: doc.Passwords,
+		}
+		// val is the flat `secrets:` document mapping (M9 credentials).
+		val := doc
 		if ref := cl.Secrets.PVE.User; ref != "" {
 			v, ok := val.Get(ref)
 			if !ok {

@@ -63,7 +63,13 @@ type Reconciler struct {
 	// to cross-check the composition against the endpoint list (a
 	// composition with no configured endpoint fails closed).
 	ConfiguredClusters []string
-	log                *slog.Logger
+	// M13.2: CloudInitSecrets carries this cluster's SOPS-referenced
+	// cloud-init material (ssh-keys / passwords) already resolved into
+	// memory by the config layer. Reconciler.ResolveCloudInitSecrets runs
+	// at cycle start, after parse, and fails the cycle when a manifest
+	// names a ref the store does not carry.
+	CloudInitSecrets schema.CloudInitSecretStores
+	log              *slog.Logger
 
 	exec         *exec.Executor // nil ⇒ dry-run
 	lastGood     *parse.Index
@@ -83,7 +89,11 @@ type Options struct {
 	// ConfiguredClusters is the full pve.clusters key set (for the
 	// BuildClusterIndex cross-check).
 	ConfiguredClusters []string
-	Log                *slog.Logger
+	// M13.2: SOPS-referenced cloud-init material for this cluster
+	// (empty store = no SOPS cloud-init material available; any
+	// manifest declaring refs against it fails closed).
+	CloudInitSecrets schema.CloudInitSecretStores
+	Log              *slog.Logger
 }
 
 // New builds a Reconciler.
@@ -114,6 +124,7 @@ func New(o Options) (*Reconciler, error) {
 		Cluster:            o.Cluster,
 		NodeAllowlist:      o.NodeAllowlist,
 		ConfiguredClusters: o.ConfiguredClusters,
+		CloudInitSecrets:   o.CloudInitSecrets,
 		exec:               o.Executor,
 		log:                o.Log,
 	}, nil
@@ -191,6 +202,21 @@ func (r *Reconciler) RunOneCycle(ctx context.Context) (Result, *plan.Plan, error
 			slog.String("err", err.Error()),
 			slog.String("commit", res.Commit))
 		return res, nil, nil // cycle aborted by design, not a fatal error
+	}
+	// M13.2: resolve SOPS-referenced cloud-init secret material for every
+	// resource in this cluster's index. Fails the cycle when a manifest
+	// names a ref the cluster's SOPS store does not carry (or the store is
+	// empty but refs exist). Runs BEFORE the node allowlist check and the
+	// live reads, so no PVE call can happen against an unresolvable ref.
+	if err := schema.ResolveCloudInitSecrets(idx.List(), r.CloudInitSecrets); err != nil {
+		res.Aborted = true
+		res.AbortReason = "cloud-init secret resolution: " + err.Error()
+		r.Store.FinishCycle(true, res.AbortReason)
+		metrics.CyclesTotal.WithLabelValues("parse_error").Inc()
+		r.log.Error("cloud-init SOPS reference resolution failed; aborting cycle",
+			slog.String("err", err.Error()),
+			slog.String("commit", res.Commit))
+		return res, nil, nil
 	}
 	r.lastGood = idx
 	r.lastCommit = res.Commit
