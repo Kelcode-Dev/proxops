@@ -206,20 +206,56 @@ type CloudInitIPConfig struct {
 // struct value is non-empty. Empty desired values mean "proxops does not
 // own this PVE key; PVE's live state survives untouched".
 //
-// Not modelled in M11 (documented in GAPS.md): cipassword, cicustom,
-// ciupgrade. cipassword is a secret (AGENTS.md no-secret rule + PVE stores
-// it in plaintext — proxops will not round-trip secrets through git).
-// cicustom is a storage-backed keyset (PVE-side); ciupgrade is a PVE-only
-// guest-agent knob.
+// M13.2: two new fields carry SOPS-referenced secret material.
+//   - SSHKeyRefs (plural): cloud-init.ssh-keys.<name> dot-paths that resolve
+//     to OpenSSH public keys in the cluster's SOPS document.
+//   - CIPasswordRef (singular): cloud-init.passwords.<name> dot-path that
+//     resolves to PVE's cipassword value. ProxOps NEVER stores the plaintext
+//     password in a Git-managed manifest; PVE 9.2 masks the password on
+//     readback (probe-verified M13.2: fixed '**********' — the plaintext is
+//     unrecoverable and cannot be compared on drift).
+//
+// Not modelled (still in GAPS.md): cicustom, ciupgrade.
 type CloudInitData struct {
 	// CIUser is PVE's `ciuser`: the first configdrive username PVE creates
 	// for cloud-init. Empty → not owned.
 	CIUser string `yaml:"ci-user,omitempty" json:"ci-user,omitempty"`
-	// SSHKeys is PVE's `sshkeys` (comma-separated public keys on the wire).
-	// Each entry may be "user@host:key" (per-user) or just a public key.
-	// Empty → not owned. A single `*` entry is the redacted-sentinel and
-	// means "PVE owns this; do not write it".
+	// SSHKeys is PVE's `sshkeys` (each entry is one OpenSSH public key line;
+	// PVE joins them with the \n equivalent `%0A` at wire time). Empty →
+	// not owned. A single `*` entry is the redacted-sentinel and means
+	// "PVE owns this; do not write it".
+	//
+	// M13.2 backwards-compat: existing manifests that carry plaintext keys
+	// remain valid. New manifests SHOULD use SSHKeyRefs (SOPS-resolved).
+	// Mixing SSHKeys + SSHKeyRefs on the same manifest fails closed at
+	// Validate() (ambiguous intent).
 	SSHKeys []string `yaml:"ssh-keys,omitempty" json:"ssh-keys,omitempty"`
+	// SSHKeyRefs is M13.2: a PLURAL list of SOPS doc dot-paths, each in the
+	// form "cloud-init.ssh-keys.<name>". The cluster's SOPS document must
+	// carry a `cloud-init.ssh-keys` mapping with matching keys; the
+	// referenced values are concatenated IN MANIFEST ORDER into PVE's
+	// `sshkeys` field at create/diff time. Empty → no SOPS-resolved keys.
+	SSHKeyRefs []string `yaml:"ssh-key-refs,omitempty" json:"ssh-key-refs,omitempty"`
+	// CIPasswordRef is M13.2 (singular): a SOPS doc dot-path of the form
+	// "cloud-init.passwords.<name>". Resolved to PVE's `cipassword` wire
+	// value. The PVE readback mask (`**********`) means ProxOps CANNOT
+	// verify password equality on update; the Drift rule is:
+	//   - create: if ref set and no live cipassword yet, PVE receives the
+	//     resolved password.
+	//   - update: if ref set and live reports the mask form (any
+	//     non-empty `cipassword=` value is treated as "a password exists"),
+	//     PROXOPS DOES NOT REWRITE — PVE has stored something the operator
+	//     previously set; proxops has no way to verify which password it
+	//     is, and rewriting would clobber it. The resolved value is still
+	//     emitted in the create-form params (so a from-scratch recreate
+	//     reuses the manifest's declared password), but the update path
+	//     is satisfied.
+	//   - if ref is EMPTY, ProxOps does NOT own the PVE cipassword field and
+	//     leaves a live mask alone.
+	// The SOPS-resolved value lives ONLY in memory for the lifetime of the
+	// reconcile operation; it never reaches logs, diffs, manifests, or
+	// errors.
+	CIPasswordRef string `yaml:"ci-password-ref,omitempty" json:"ci-password-ref,omitempty"`
 	// Nameservers is PVE's `nameserver` (space-separated CSV on the wire).
 	// Empty → not owned.
 	Nameservers []string `yaml:"nameservers,omitempty" json:"nameservers,omitempty"`
@@ -229,6 +265,18 @@ type CloudInitData struct {
 	// IPConfigs is PVE's `ipconfig<N>` static-IP set — one entry per NIC slot
 	// proxops wants a cloud-init static IP on. Empty NIC defaults to 0.
 	IPConfigs []CloudInitIPConfig `yaml:"ipconfigs,omitempty" json:"ipconfigs,omitempty"`
+
+	// resolvedSshKeys (M13.2) is the SOPS-resolved concatenation of
+	// CloudInitData.SSHKeyRefs, populated by schema.ResolveCloudInitSecrets
+	// at the start of every reconcile cycle. Empty before resolution.
+	// Unexported so the manifest does not round-trip SOPS values through
+	// YAML/JSON (secret safety: plaintext / public keys must never appear
+	// in a committed manifest — only the reference name does).
+	resolvedSshKeys []string
+	// resolvedCIPassword (M13.2) is the SOPS-resolved password for
+	// CloudInitData.CIPasswordRef. Populated by ResolveCloudInitSecrets.
+	// Unexported for the same reason as resolvedSshKeys.
+	resolvedCIPassword string
 }
 
 // TPM models PVE's `tpm0` device (only meaningful with bios=ovmf + q35).
@@ -260,6 +308,13 @@ type VMHardware struct {
 	NUMA bool `yaml:"numa,omitempty" json:"numa,omitempty"`
 	// Sockets is PVE's socket count (default 1).
 	Sockets int `yaml:"sockets,omitempty" json:"sockets,omitempty"`
+	// PCIDevices are PVE's host PCI passthrough slots (`hostpci<N>`).
+	// M13.2 (the reference estate Talos GPU VMs). The structured shape intentionally
+	// models only PVE's BDF + `pcie=` token; PVE's other optional tokens
+	// (x-vga, rombar, mdev, boot, dimmable, sub-vfid, legacy-irr-qworkaround)
+	// are out of schema scope — see docs/GAPS.md. The schema validates every
+	// `hostpciN` slot + BDF syntactically and fails closed on duplicates.
+	PCIDevices []PCIDevice `yaml:"pci-devices,omitempty" json:"pci-devices,omitempty"`
 }
 
 // VMOpts captures the VM-side "Options" UI panel knobs.
@@ -611,6 +666,16 @@ func (v *VM) Validate() error {
 	if hw.Sockets < 0 {
 		return fmt.Errorf("%s: spec.hardware.sockets must be non-negative", v.Ref())
 	}
+	// M13.2: PCI passthrough (hostpciN). Validate slot/BDF grammar +
+	// deterministic ordering + duplicate slots. (Validates + normalises in
+	// place so the wire render reads a stable list.)
+	if err := ValidatePCIDevices(v.Ref().String(), hw.PCIDevices); err != nil {
+		return err
+	}
+	// M13.2: Cloud-Init SOPS references (ssh-key-refs / ci-password-ref).
+	if err := ValidateCloudInitRefs(v.Ref().String(), v.Spec.CloudInitData); err != nil {
+		return err
+	}
 	// M11: cloud-init data — ssh-keys sentinel rule + static IPs must be
 	// CIDRs, gateways plain IPs.
 	{
@@ -806,6 +871,10 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 	if hw.Serial0 != "" {
 		p["serial0"] = hw.Serial0
 	}
+	// M13.2: PCI passthrough hostpci<N>.
+	for _, pd := range hw.PCIDevices {
+		p[pd.Slot] = pciDeviceWire(pd)
+	}
 	// M11: top-level cloud-init DATA fields.
 	//
 	// proxops uses "empty = not owned" semantics: if a CloudInitData
@@ -817,8 +886,15 @@ func (v *VM) ToCreateParams() (map[string]any, error) {
 	if v.Spec.CloudInitData.CIUser != "" {
 		p["ciuser"] = v.Spec.CloudInitData.CIUser
 	}
-	if sshkeys := cloudInitSSHKeysWire(v.Spec.CloudInitData.SSHKeys); sshkeys != "" {
+	if sshkeys := cloudInitSSHKeysWire(CloudInitSSHKeysEffective(v.Spec.CloudInitData)); sshkeys != "" {
 		p["sshkeys"] = sshkeys
+	}
+	// M13.2: cloud-init root password via SOPS reference. ProxOps writes the
+	// resolved password on CREATE so the guest has its declared root password;
+	// the value exists only in memory for the lifetime of this call and never
+	// lands in logs / status / diff.
+	if pw := CloudInitCIPasswordEffective(v.Spec.CloudInitData); pw != "" {
+		p["cipassword"] = pw
 	}
 	if len(v.Spec.CloudInitData.Nameservers) > 0 {
 		p["nameserver"] = strings.Join(v.Spec.CloudInitData.Nameservers, " ")
@@ -1035,12 +1111,14 @@ func (v *VM) cloneClearKeys(current map[string]any) []string {
 		}
 	}
 	add("ciuser", v.Spec.CloudInitData.CIUser != "")
-	add("sshkeys", cloudInitSSHKeysWire(v.Spec.CloudInitData.SSHKeys) != "")
+	add("sshkeys", cloudInitSSHKeysWire(CloudInitSSHKeysEffective(v.Spec.CloudInitData)) != "")
 	add("nameserver", len(v.Spec.CloudInitData.Nameservers) > 0)
 	add("searchdomain", len(v.Spec.CloudInitData.SearchDomains) > 0)
-	// cipassword / cicustom are never modelled (secret / PVE-owned): if a
-	// clone carries them, they are the template's — clear.
-	add("cipassword", false)
+	// M13.2: cipassword is now cloud-init SOPS-reference owned when the
+	// manifest declares a ci-password-ref (the clone's own declared
+	// password overrides the template's). Otherwise it remains template-
+	// owned → cleared.
+	add("cipassword", CloudInitCIPasswordEffective(v.Spec.CloudInitData) != "")
 	add("cicustom", false)
 	for i := 0; i < v.ipconfigSlotCount(); i++ {
 		k := "ipconfig" + strconv.Itoa(i)
@@ -1143,6 +1221,21 @@ func (v *VM) DriftAnomalies(current map[string]any) []string {
 			}
 			if !want[k] {
 				out = append(out, fmt.Sprintf("live-only NIC slot %s=%s is not in spec.networks; proxops will not automatically remove it", k, pveStr(raw)))
+			}
+		case PvePCIKeyIsOwned(k):
+			// M13.2: a live hostpciN slot that the manifest does not own is
+			// a PVE-side passthrough. proxops NEVER strips a live PCI device
+			// (pulling the token can drop a physical GPU off a running VM,
+			// and PVE gates hostpci writes on "only root ... for
+			// non-mapped devices"). Surface, don't touch.
+			if raw != nil && pveStr(raw) != "" && !isNoneSlot(pveStr(raw)) {
+				wanted := map[string]bool{}
+				for _, pd := range v.Spec.Hardware.PCIDevices {
+					wanted[pd.Slot] = true
+				}
+				if !wanted[k] {
+					out = append(out, fmt.Sprintf("live-only PCI slot %s=%s is not in spec.hardware.pci-devices; proxops will not automatically remove a PVE-side hostpciN device", k, pveStr(raw)))
+				}
 			}
 		}
 	}
@@ -1506,6 +1599,19 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 			stop = true
 		}
 	}
+	// M13.2: PCI passthrough hostpci<N>. PVE replaces the whole hostpciN
+	// value on a config write, so compare the owned token set (device +
+	// pcie when owned) against the live report. A live value with only
+	// PVE-side tokens proxops does not model (x-vga/rombar/mdev) reads as
+	// drift once the slot is in the manifest — the write owns the slot
+	// end-to-end. Device topology changes require a stop.
+	for _, pd := range hw.PCIDevices {
+		cur := pveStr(current[pd.Slot])
+		if !hostpciTokensEqual(cur, pd) {
+			upd[pd.Slot] = pciDeviceWire(pd)
+			stop = true
+		}
+	}
 
 	// M11: top-level cloud-init DATA fields.
 	//
@@ -1529,9 +1635,27 @@ func (v *VM) Drift(current map[string]any) (map[string]any, bool, bool) {
 			upd["ciuser"] = v.Spec.CloudInitData.CIUser
 		}
 	}
-	if sshkeys := cloudInitSSHKeysWire(v.Spec.CloudInitData.SSHKeys); sshkeys != "" {
+	if sshkeys := cloudInitSSHKeysWire(CloudInitSSHKeysEffective(v.Spec.CloudInitData)); sshkeys != "" {
 		if !sshKeysWireMatch(pveStr(current["sshkeys"]), sshkeys) {
 			upd["sshkeys"] = sshkeys
+		}
+	}
+	// M13.2: PVE's cipassword drift rule. When ProxOps OWNS a cloud-init
+	// password (spec.cloud-init-data.ci-password-ref declared + SOPS-resolved),
+	// PVE 9.2 reports that value on /config as a fixed '**********' mask
+	// (probe-verified M13.2 — the plaintext is unrecoverable and not
+	// comparable). The convergence rule:
+	//   - if the live config HAS a non-empty cipassword key, PVE has stored
+	//     SOME password; ProxOps considers the manifest's declared password
+	//     satisfied (there is no way to verify it matches). No write, no drift.
+	//   - if the live config has NO cipassword key, PVE is missing one; the
+	//     manifest's declared password writes on update (safe: PVE sets it
+	//     once and then the next cycle satisfies the "has cipassword" rule).
+	// The manifest NEVER deletes a live cipassword (doing so can lock the
+	// operator out of a running guest).
+	if pw := CloudInitCIPasswordEffective(v.Spec.CloudInitData); pw != "" {
+		if pveStr(current["cipassword"]) == "" {
+			upd["cipassword"] = pw
 		}
 	}
 	if wantNS := strings.Join(v.Spec.CloudInitData.Nameservers, " "); wantNS != "" {
@@ -2208,6 +2332,20 @@ func parseNICFields(s string) nicFields {
 // The sentinel is exclusive: Validate() rejects mixed sentinel+real keys, so
 // this helper assumes the input already passed validation. Mixed input
 // (if ever reached) returns "" — no write, no flap.
+// cloudInitSSHKeysWire renders PVE's `sshkeys` wire value from a list of
+// public key lines. The `*` redacted sentinel (any entry) returns ""
+// (PVE owns the live sshkeys — never rewrite).
+//
+// M13.2: callers pass CloudInitSSHKeysEffective(v.Spec.CloudInitData),
+// which is the EFFECTIVE key list — SOPS-resolved keys when
+// `ssh-key-refs` are present, else the manifest's plaintext `ssh-keys`
+// (M11 legacy shape), else nil.
+//
+// PVE 9.2 wire grammar (probed on conformance-dev PVE 9.2.2, M13.2):
+// the sshkeys FIELD VALUE must itself be percent-encoded — PVE's API schema
+// declares sshkeys as a urlencoded string and decodes it before writing the
+// config, so a raw `ssh-ed25519 AAAA...` value is REJECTED with "invalid
+// urlencoded string". Keys are joined with \n (encoded %0A).
 func cloudInitSSHKeysWire(keys []string) string {
 	if len(keys) == 0 {
 		return ""
