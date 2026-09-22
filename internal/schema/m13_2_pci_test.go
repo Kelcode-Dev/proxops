@@ -82,7 +82,7 @@ func TestPCI_ManifestWireRoundTrip(t *testing.T) {
 	}
 	upd, stop, changed := v.Drift(livePCI(435, "hostpci0=0000:17:00,pcie=1"))
 	if changed {
-		t.Fatalf("Drift: changed=true, want false (the reference estate shape round-trip); live=%v", livePCI(435, "hostpci0=0000:17:00,pcie=1"))
+		t.Fatalf("Drift: changed=true, want false (reference-estate shape round-trip); live=%v", livePCI(435, "hostpci0=0000:17:00,pcie=1"))
 	}
 	if stop {
 		t.Errorf("Drift: stopRequired=true on a converged PCI VM; want false")

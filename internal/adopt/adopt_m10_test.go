@@ -21,7 +21,7 @@ import (
 // at the HTTP level (the mock saw no POST/PUT/DELETE at all).
 //
 // The tests pin the M10 schema-fidelity improvements that were required to
-// faithfully represent the real prod-a fleet:
+// faithfully represent the observed production cluster fleet shape (estate name withheld):
 //
 //   - PVE template VMs (template=1) → Result.Skipped, NOT a manifest
 //   - VM cloud-init on non-IDE slots (scsi1=…-cloudinit,media=cdrom)

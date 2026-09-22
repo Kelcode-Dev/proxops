@@ -1,0 +1,42 @@
+[
+ {
+  "RuleID": "generic-api-key",
+  "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+  "StartLine": 223,
+  "EndLine": 223,
+  "StartColumn": 3,
+  "EndColumn": 33,
+  "Match": "secret := \"topsecret-uuid-9c13\"",
+  "Secret": "topsecret-uuid-9c13",
+  "File": "internal/app/app_test.go",
+  "SymlinkFile": "",
+  "Commit": "",
+  "Entropy": 3.7216117,
+  "Author": "",
+  "Email": "",
+  "Date": "0001-01-01T00:00:00Z",
+  "Message": "",
+  "Tags": [],
+  "Fingerprint": "internal/app/app_test.go:generic-api-key:223"
+ },
+ {
+  "RuleID": "generic-api-key",
+  "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+  "StartLine": 230,
+  "EndLine": 230,
+  "StartColumn": 3,
+  "EndColumn": 35,
+  "Match": "secretToken := \"secret-uuid-a1b2\"",
+  "Secret": "secret-uuid-a1b2",
+  "File": "internal/pveclient/cred_regression_test.go",
+  "SymlinkFile": "",
+  "Commit": "",
+  "Entropy": 3.625,
+  "Author": "",
+  "Email": "",
+  "Date": "0001-01-01T00:00:00Z",
+  "Message": "",
+  "Tags": [],
+  "Fingerprint": "internal/pveclient/cred_regression_test.go:generic-api-key:230"
+ }
+]

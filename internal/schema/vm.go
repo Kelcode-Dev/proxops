@@ -309,7 +309,7 @@ type VMHardware struct {
 	// Sockets is PVE's socket count (default 1).
 	Sockets int `yaml:"sockets,omitempty" json:"sockets,omitempty"`
 	// PCIDevices are PVE's host PCI passthrough slots (`hostpci<N>`).
-	// M13.2 (the reference estate Talos GPU VMs). The structured shape intentionally
+	// M13.2 (Talos GPU VMs). The structured shape intentionally
 	// models only PVE's BDF + `pcie=` token; PVE's other optional tokens
 	// (x-vga, rombar, mdev, boot, dimmable, sub-vfid, legacy-irr-qworkaround)
 	// are out of schema scope — see docs/GAPS.md. The schema validates every
