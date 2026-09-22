@@ -1,18 +1,28 @@
 # ProxOps — repository-first GitOps reconciler for Proxmox VE
 
-> ## ⚠️ Experimental — Not for Production Use
+> ## ⚠️ Pre-1.0 — experimental. Read `docs/GAPS.md` before using in anger.
 >
-> ProxOps is currently under active development and has **not been validated
-> for production Proxmox management**. Do not use ProxOps to manage
-> production Proxmox systems at this stage.
+> - **Maturity.** ProxOps is a pre-1.0, actively-developed tool. It is not
+>   yet a drop-in for unattended production infrastructure management.
+> - **What has been tested.** Destructive create/update/delete lifecycle
+>   testing has been performed against a disposable PVE cluster
+>   (`conformance-dev`, PVE 9.2). Read-only adoption/audit
+>   (`proxops adopt`, which asserts zero PVE writes) has additionally been
+>   exercised against real PVE estates. That is **observation** coverage,
+>   not **lifecycle** coverage.
+> - **Review before you apply.** Always run `proxops diff` first and read the
+>   plan before `proxops apply`. Convergence is only reached when a second
+>   `proxops diff` reports zero actions.
+> - **No silent guessing.** Live PVE state ProxOps cannot model or recover is
+>   surfaced as a `gap`, `INCOMPLETE`, or anomaly — it is never silently
+>   normalised, dropped, or "completed" for you.
+> - **Ownership is enforced.** Only PVE objects ProxOps created (carrying its
+>   `proxops` ownership tag) are ever deleted; prunings are bounded per
+>   cycle and per cluster.
 >
-> The production testing the project *has* performed is deliberately
-> restricted to **read-only adoption/audit** (`proxops adopt`, which
-> asserts zero PVE writes). That validates observation and
-> reverse-translation fidelity only — it does **not** constitute
-> production **management** validation. All create/update/delete
-> lifecycle validation has been done against a disposable development
-> cluster (`conformance-dev`, PVE 9.2), not production.
+> The full compatibility and known-limitations list lives in
+> [docs/GAPS.md](docs/GAPS.md) — keep that page in front of you until the
+> project reaches 1.0.
 
 ProxOps converges one or more Proxmox VE clusters to the state declared in
 a **git repository — the ProxOps GitOps repository is the unit of

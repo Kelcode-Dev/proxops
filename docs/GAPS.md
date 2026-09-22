@@ -549,7 +549,7 @@ them.
   the mask, never rewritten, never deleted by ProxOps). This is why there is
   **no plaintext `ci-password` field** in the ProxOps schema: after the
   first write the field value is unobservable, and any manifest copy of it
-  would drift-flap or be dangerous to rewrite. PVI: password rotation is
+  would drift-flap or be dangerous to rewrite. Password rotation is
   out-of-band (set it on PVE, or delete+re-create the ref). Pinned:
   `TestCIDrift_CIPasswordRules`, `TestAdopt_M132_PII_noLeak_inNewNames`.
 - **SOPS cloud-init material lives under `cloud-init.ssh-keys` /
