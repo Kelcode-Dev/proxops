@@ -1,7 +1,12 @@
 GO      ?= go
 BIN     := bin
 DIST    := dist
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Embedded build version. Derived from SemVer-style git tags only (--match
+# 'v[0-9]*'): a checkout AT tag vX.Y.Z reports vX.Y.Z; a commit after the tag
+# carries describe distance metadata (vX.Y.Z-N-gSHA); a tree with no matching
+# tag falls back to the commit hash. Release CI overrides VERSION with the
+# exact tag name so release binaries are deterministic.
+VERSION ?= $(shell git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .PHONY: all build test vet cross clean

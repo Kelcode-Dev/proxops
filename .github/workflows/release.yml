@@ -1,0 +1,158 @@
+# Create a GitHub Release for a SemVer tag (vX.Y.Z, optionally with a
+# pre-release segment).
+#
+# Trigger: `push` of a tag matching v* only. GitHub only delivers tag push
+# events for tags in THIS repository — fork pull requests cannot trigger this
+# workflow, and no secrets are required: the release is created with the
+# workflow's own GITHUB_TOKEN (contents: write).
+#
+# A release is only made after the tag has been explicitly validated as
+# SemVer AND the exact tagged tree has passed the full repository quality
+# gates (the same gates CI runs on main/PRs).
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege: contents: write is the GitHub requirement for creating
+# release + attachments; nothing else.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: release notes read commits since the previous tag.
+          fetch-depth: 0
+
+      - name: Validate tag as SemVer
+        # Accepts: v0.6.0, v1.0.0, v0.7.0-rc.1
+        # Rejects: v0.6, v0.6.0.0 (4-part), vbanana, 0.6.0, test-v0.6.0,
+        #          v0.6.0- (empty prerelease), v-1.0.0
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          echo "Validating tag: ${tag}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::Tag ${tag} is not a valid semantic version (expected vX.Y.Z or vX.Y.Z-prerelease)"
+            exit 1
+          fi
+          echo "is_prerelease=false" >> "$GITHUB_ENV"
+          case "${tag}" in *-*) echo "is_prerelease=true" >> "$GITHUB_ENV" ;; esac
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Quality gates
+        # The exact tagged tree must pass every gate the repository applies
+        # in normal CI before it becomes a public release.
+        run: |
+          set -euo pipefail
+          echo '=== go build ==='
+          go build ./...
+          echo '=== go vet ==='
+          go vet ./...
+          echo '=== go test -count=1 ==='
+          go test -count=1 ./...
+          echo '=== go test -race -count=1 ==='
+          go test -race -count=1 ./...
+
+      - name: Lint (golangci-lint)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+
+      - name: Docs build (mkdocs strict)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet mkdocs==1.4.2
+          mkdocs build --strict
+
+      - name: Build release binary
+        # Platform policy: linux/amd64 is the documented prebuilt target
+        # (PVE hosts). Other platforms install from source via `go install`;
+        # we do not publish untested prebuilt binaries for them.
+        #
+        # `make cross VERSION=<tag>` writes dist/proxops-linux-amd64 with the
+        # EXACT tag name embedded (reproducible, traceable --version output).
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          make cross VERSION="${tag}"
+          mv "dist/proxops-linux-amd64" "dist/proxops_${tag}_linux_amd64"
+          ls -la dist/
+          ./dist/proxops_${tag}_linux_amd64 --version
+
+      - name: Generate SHA256SUMS
+        # A manifest covering ONLY the published artifacts (no temp files),
+        # in deterministic sorted order, self-verified with sha256sum -c.
+        run: |
+          set -euo pipefail
+          artifacts=$(cd dist && LC_ALL=C sort proxops_*)
+          echo "Artifacts: ${artifacts}"
+          ( cd dist
+            for f in ${artifacts}; do
+              sha256sum "${f}"
+            done > SHA256SUMS
+            # Self-verify from inside dist/ (manifest lines are bare paths,
+            # matching how a user lays the files out after downloading).
+            sha256sum -c SHA256SUMS
+          )
+          echo '--- SHA256SUMS ---'
+          cat dist/SHA256SUMS
+
+      - name: Create the GitHub Release
+        # gh is pre-installed on ubuntu-* runners; GH_TOKEN is the workflow
+        # GITHUB_TOKEN (contents: write). No PAT, no release bot.
+        # Notes are generated from the commit range since the previous v*
+        # tag (or the repo root if this is the first) — deterministic,
+        # history-based.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          prev_tag=$(git tag -l 'v*' --sort=-v:refname | grep -v "^${tag}$" | head -1 || true)
+          if [ -n "${prev_tag}" ]; then
+            range="${prev_tag}..${tag}"
+            since="since ${prev_tag}"
+          else
+            range="${tag}"
+            since="since the first commit"
+          fi
+          notes=$( {
+            echo "## What changed ${since}"
+            echo
+            git log --reverse --no-merges --format='- %s' "${range}"
+            echo
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "go install github.com/Kelcode-Dev/proxops/cmd/proxops@${tag}"
+            echo '```'
+            echo
+            echo 'Or download \`proxops_'"${tag}"'_linux_amd64\` and verify against \`SHA256SUMS\`.'
+          } )
+          args=(release create "${tag}"
+            --title "ProxOps ${tag}"
+            --target main
+            --notes "${notes}"
+            "dist/proxops_${tag}_linux_amd64"
+            "dist/SHA256SUMS"
+          )
+          if [ "${is_prerelease}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          printf 'gh %q\n' "${args[@]}"
+          gh "${args[@]}"
