@@ -1,4 +1,4 @@
-module github.com/GizzmoShifu/proxmox-operator
+module github.com/Kelcode-Dev/proxops
 
 go 1.26.5
 

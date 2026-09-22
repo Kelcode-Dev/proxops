@@ -3,8 +3,8 @@ package reconcile_test
 import (
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/plan"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // M13 e2e: TemplateCT lifecycle against the stateful mock PVE, mirroring the

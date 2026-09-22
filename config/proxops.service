@@ -1,6 +1,6 @@
 [Unit]
 Description=proxops — Git → Proxmox GitOps reconciler
-Documentation=https://github.com/GizzmoShifu/proxmox-operator
+Documentation=https://github.com/Kelcode-Dev/proxops
 After=network-online.target
 Wants=network-online.target
 # Do NOT start if the ProxOps GitOps checkout is missing — the agent would

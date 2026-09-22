@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
 )
 
 // newTestClient points the pveclient at a local httptest server.

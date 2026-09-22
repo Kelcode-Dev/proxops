@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
 )
 
 // TestLXCUpdateUsesPUT pins PVE 9.x's LXC config verb: PUT /nodes/{n}/lxc/{id}

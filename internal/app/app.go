@@ -30,16 +30,16 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/config"
-	"github.com/GizzmoShifu/proxmox-operator/internal/exec"
-	"github.com/GizzmoShifu/proxmox-operator/internal/gitx"
-	"github.com/GizzmoShifu/proxmox-operator/internal/metrics"
-	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/reconcile"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
-	"github.com/GizzmoShifu/proxmox-operator/internal/server"
-	"github.com/GizzmoShifu/proxmox-operator/internal/statusx"
+	"github.com/Kelcode-Dev/proxops/internal/config"
+	"github.com/Kelcode-Dev/proxops/internal/exec"
+	"github.com/Kelcode-Dev/proxops/internal/gitx"
+	"github.com/Kelcode-Dev/proxops/internal/metrics"
+	"github.com/Kelcode-Dev/proxops/internal/plan"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/reconcile"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/server"
+	"github.com/Kelcode-Dev/proxops/internal/statusx"
 )
 
 // PVEParamsFrom maps one named cluster from a validated config to a

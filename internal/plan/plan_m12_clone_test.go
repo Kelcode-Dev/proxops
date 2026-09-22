@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/plan"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 func m12PlanResources(t *testing.T) []schema.Resource {

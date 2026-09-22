@@ -16,7 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/secrets"
+	"github.com/Kelcode-Dev/proxops/internal/secrets"
 )
 
 // AuthMethod selects how the agent authenticates against the PVE API.

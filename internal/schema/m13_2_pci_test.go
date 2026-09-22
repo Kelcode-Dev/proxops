@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // livePCI returns a PVE /config-shaped map converged against

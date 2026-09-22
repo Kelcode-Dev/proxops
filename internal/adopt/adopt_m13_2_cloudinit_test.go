@@ -32,10 +32,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/adopt"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient/mock"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
-	"github.com/GizzmoShifu/proxmox-operator/internal/secrets"
+	"github.com/Kelcode-Dev/proxops/internal/adopt"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient/mock"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/secrets"
 )
 
 // M13.2 test keys. Fixtures, not real PII; chosen so the exact bytes are

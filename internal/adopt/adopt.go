@@ -28,9 +28,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
-	"github.com/GizzmoShifu/proxmox-operator/internal/secrets"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/secrets"
 )
 
 // Result is one adopt run outcome.

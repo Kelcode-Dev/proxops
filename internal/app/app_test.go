@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/app"
-	"github.com/GizzmoShifu/proxmox-operator/internal/config"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/app"
+	"github.com/Kelcode-Dev/proxops/internal/config"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
 )
 
 // A valid base URL to satisfy config.Validate().

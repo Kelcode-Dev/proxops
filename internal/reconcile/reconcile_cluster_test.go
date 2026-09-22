@@ -21,13 +21,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/exec"
-	"github.com/GizzmoShifu/proxmox-operator/internal/gitx"
-	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient/mock"
-	"github.com/GizzmoShifu/proxmox-operator/internal/reconcile"
-	"github.com/GizzmoShifu/proxmox-operator/internal/statusx"
+	"github.com/Kelcode-Dev/proxops/internal/exec"
+	"github.com/Kelcode-Dev/proxops/internal/gitx"
+	"github.com/Kelcode-Dev/proxops/internal/plan"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient/mock"
+	"github.com/Kelcode-Dev/proxops/internal/reconcile"
+	"github.com/Kelcode-Dev/proxops/internal/statusx"
 )
 
 // TestClusterAllowlistExcludesLiveObjectsFromPlan — a cluster whose node

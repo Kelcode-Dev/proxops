@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/composition"
+	"github.com/Kelcode-Dev/proxops/internal/composition"
 )
 
 // writeRepo lays out files under a temp repo root.

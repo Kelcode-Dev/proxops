@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // userFailingManifest is the exact manifest that produced the PVE 9

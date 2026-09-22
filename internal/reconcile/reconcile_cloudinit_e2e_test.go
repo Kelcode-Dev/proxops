@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/plan"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // M11+ cloud-init E2E (mock parity for the live conformance-dev validation):

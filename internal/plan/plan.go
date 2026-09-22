@@ -19,8 +19,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // ActionKind is one unit of work the executor may perform.

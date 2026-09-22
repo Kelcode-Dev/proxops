@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"sort"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/adopt"
-	"github.com/GizzmoShifu/proxmox-operator/internal/app"
-	"github.com/GizzmoShifu/proxmox-operator/internal/config"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
-	"github.com/GizzmoShifu/proxmox-operator/internal/secrets"
+	"github.com/Kelcode-Dev/proxops/internal/adopt"
+	"github.com/Kelcode-Dev/proxops/internal/app"
+	"github.com/Kelcode-Dev/proxops/internal/config"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/secrets"
 )
 
 // runAdopt invokes the adopt package against a configured cluster and renders

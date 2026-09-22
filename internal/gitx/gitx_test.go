@@ -9,9 +9,9 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/gitx"
-	"github.com/GizzmoShifu/proxmox-operator/internal/parse"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/gitx"
+	"github.com/Kelcode-Dev/proxops/internal/parse"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // vmManifest is a valid proxops VM manifest.

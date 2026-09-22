@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // This file converts PVE /qemu/{id}/config and /lxc/{cid}/config reports into

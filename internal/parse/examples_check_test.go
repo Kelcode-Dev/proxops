@@ -3,7 +3,7 @@ package parse_test
 import (
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/parse"
+	"github.com/Kelcode-Dev/proxops/internal/parse"
 )
 
 // TestExamplesDirParses verifies that the shipped examples/ directory — in

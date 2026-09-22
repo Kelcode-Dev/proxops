@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/config"
-	"github.com/GizzmoShifu/proxmox-operator/internal/secrets"
+	"github.com/Kelcode-Dev/proxops/internal/config"
+	"github.com/Kelcode-Dev/proxops/internal/secrets"
 )
 
 // TestExamplesRepositoryFirstDiscovery (M13.1) pins that the shipped

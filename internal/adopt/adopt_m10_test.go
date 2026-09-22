@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/adopt"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient/mock"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/adopt"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient/mock"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // M10 — production-read-only adoption hardening tests.

@@ -18,9 +18,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/app"
-	"github.com/GizzmoShifu/proxmox-operator/internal/config"
-	"github.com/GizzmoShifu/proxmox-operator/internal/secrets"
+	"github.com/Kelcode-Dev/proxops/internal/app"
+	"github.com/Kelcode-Dev/proxops/internal/config"
+	"github.com/Kelcode-Dev/proxops/internal/secrets"
 )
 
 // cliFixtureCreds supplies the bootstrap PVE credential env pair the

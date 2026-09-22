@@ -26,8 +26,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/composition"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/composition"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // Index is the parsed, validated desired state.

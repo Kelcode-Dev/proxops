@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/parse"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/parse"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // cttManifestV1 returns a CTTemplate manifest (downloadable vztmpl artifact).

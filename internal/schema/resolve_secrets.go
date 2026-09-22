@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/config"
+	"github.com/Kelcode-Dev/proxops/internal/config"
 )
 
 // CloudInitSecretStores carries the per-cluster SOPS-referenced

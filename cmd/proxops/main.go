@@ -49,10 +49,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/app"
-	"github.com/GizzmoShifu/proxmox-operator/internal/config"
-	"github.com/GizzmoShifu/proxmox-operator/internal/logger"
-	"github.com/GizzmoShifu/proxmox-operator/internal/metrics"
+	"github.com/Kelcode-Dev/proxops/internal/app"
+	"github.com/Kelcode-Dev/proxops/internal/config"
+	"github.com/Kelcode-Dev/proxops/internal/logger"
+	"github.com/Kelcode-Dev/proxops/internal/metrics"
 )
 
 // version is set at build time via -ldflags.

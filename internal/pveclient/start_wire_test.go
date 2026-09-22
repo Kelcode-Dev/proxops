@@ -17,7 +17,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
 )
 
 func startFormRecorder(t *testing.T, got *url.Values) *httptest.Server {

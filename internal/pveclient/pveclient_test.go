@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient/mock"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient/mock"
 )
 
 // newClientToken wires a pveclient with API-token auth at the mock root.

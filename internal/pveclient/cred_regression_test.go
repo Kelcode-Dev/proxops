@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
 )
 
 // recordingServer returns an httptest.Server that:

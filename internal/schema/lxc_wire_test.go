@@ -3,7 +3,7 @@ package schema_test
 import (
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // lxcWireManifest mirrors PVE 9.2 LXC shapes: root on local-lvm, one

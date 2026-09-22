@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
+	"github.com/Kelcode-Dev/proxops/internal/plan"
 )
 
 // renderClusterPlan produces a human-readable --diff report from a plan.

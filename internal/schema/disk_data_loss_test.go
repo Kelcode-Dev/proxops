@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // PVE 9.2 data-loss guard (probed 2026-09-08 on conformance-dev):

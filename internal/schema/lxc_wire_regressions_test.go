@@ -39,7 +39,7 @@ package schema_test
 import (
 	"testing"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // TestLXCToCreateParams_NestingAsComposite pins the PVE 9.x nesting

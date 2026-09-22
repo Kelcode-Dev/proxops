@@ -39,7 +39,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/config"
+	"github.com/Kelcode-Dev/proxops/internal/config"
 )
 
 // rootDirs are the resource kind roots. Any *.yaml placed DIRECTLY under one of

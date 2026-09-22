@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // PVEBookkeepingKeys are PVE /config report fields that PVE generates and

@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/adopt"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient/mock"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/adopt"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient/mock"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 const apiToken = "root@pam!proxops=deadbeef"

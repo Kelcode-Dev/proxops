@@ -14,7 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/statusx"
+	"github.com/Kelcode-Dev/proxops/internal/statusx"
 )
 
 // Info inputs to /healthz, captured by the caller (the agent) each poll.

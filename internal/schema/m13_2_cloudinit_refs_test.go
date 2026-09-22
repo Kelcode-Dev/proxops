@@ -19,8 +19,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/config"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/config"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 const ciSSHStoreKey = "ssh-ed25519 AAAAC3NzMyMDEyMw== ops@gitzmo"

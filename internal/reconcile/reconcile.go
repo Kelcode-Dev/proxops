@@ -21,13 +21,13 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/exec"
-	"github.com/GizzmoShifu/proxmox-operator/internal/metrics"
-	"github.com/GizzmoShifu/proxmox-operator/internal/parse"
-	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
-	"github.com/GizzmoShifu/proxmox-operator/internal/statusx"
+	"github.com/Kelcode-Dev/proxops/internal/exec"
+	"github.com/Kelcode-Dev/proxops/internal/metrics"
+	"github.com/Kelcode-Dev/proxops/internal/parse"
+	"github.com/Kelcode-Dev/proxops/internal/plan"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/statusx"
 )
 
 // Fetcher is the git-source seam. gitx.Source implements it directly

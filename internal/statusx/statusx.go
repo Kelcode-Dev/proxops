@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
 )
 
 // State is the convergence state of one managed object.

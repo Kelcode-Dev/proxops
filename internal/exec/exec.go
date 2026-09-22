@@ -21,11 +21,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GizzmoShifu/proxmox-operator/internal/metrics"
-	"github.com/GizzmoShifu/proxmox-operator/internal/plan"
-	"github.com/GizzmoShifu/proxmox-operator/internal/pveclient"
-	"github.com/GizzmoShifu/proxmox-operator/internal/schema"
-	"github.com/GizzmoShifu/proxmox-operator/internal/statusx"
+	"github.com/Kelcode-Dev/proxops/internal/metrics"
+	"github.com/Kelcode-Dev/proxops/internal/plan"
+	"github.com/Kelcode-Dev/proxops/internal/pveclient"
+	"github.com/Kelcode-Dev/proxops/internal/schema"
+	"github.com/Kelcode-Dev/proxops/internal/statusx"
 )
 
 // Executor applies plan actions. Only one cycle uses it at a time (the agent
