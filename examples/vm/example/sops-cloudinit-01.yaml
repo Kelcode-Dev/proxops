@@ -8,13 +8,14 @@
 #
 # The cluster's SOPS document (in this example,
 # clusters/example/secrets.sops.yaml — replace the placeholders with your
-# real SOPS blocks; NEVER commit a real age private key) must look like:
+#     real SOPS blocks; NEVER commit a real age private key) carries this
+#     logical structure (the committed fixture below shows it ENCRYPTED):
 #
 #     cloud-init:
 #       ssh-keys:
-#         ops-main: "ssh-ed25519 AAAAC3... ops@yourhost"
+#         main: "ssh-ed25519 AAAAC3... main@yourhost"
 #       passwords:
-#         root-default: "<paste password>"
+#         default: "<paste password>"
 #
 # ProxOps resolves these at reconcile time (in memory only) and writes:
 #   - PVE `sshkeys` = the concatenated resolved public keys (percent-encoded
@@ -57,8 +58,8 @@ spec:
   cloud-init-data:
     ci-user: talos
     ssh-key-refs:               # PLURAL SOPS dot-paths
-      - cloud-init.ssh-keys.ops-main
+      - cloud-init.ssh-keys.main
     ci-password-ref:            # SINGULAR SOPS dot-path
-      cloud-init.passwords.root-default
+      cloud-init.passwords.default
     nameservers:
       - 1.1.1.1

@@ -16,9 +16,15 @@ clusters/
   example/
     config.yaml                 # cluster-local config: PVE endpoint, node
                                 #   allowlist, SOPS credentials reference
-    secrets.sops.yaml           # SOPS/age-encrypted PVE + git credentials
-                                #   (ALL VALUES SYNTHETIC — replace with your
-                                #   own; never commit a real private age key)
+    secrets.sops.yaml           # SOPS/age-encrypted credentials: a flat
+                                #   `secrets:` block (PVE + git auth, named by
+                                #   config.yaml) AND a structured `cloud-init:`
+                                #   block (`ssh-keys` + `passwords`) that the
+                                #   ssh-key-refs / ci-password-ref manifests
+                                #   resolve against. ALL VALUES SYNTHETIC and
+                                #   ENCRYPTED to a throwaway age identity (no
+                                #   one can decrypt it; replace with your own;
+                                #   never commit a real private age key).
     resources.yaml              # composition: resource files the "example"
                                 #   cluster consumes
 iso/base/…                      # 1 base ISO (shared, downloadable artifact)
