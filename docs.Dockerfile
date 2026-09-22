@@ -7,7 +7,12 @@ WORKDIR /src
 COPY mkdocs.yml .
 COPY docs/ docs/
 
-RUN pip install --no-cache-dir mkdocs mkdocs-material \
+# Pinned to the version the CI docs job + local quality gate run, so the
+# container build and the GitHub Pages build produce the same site. (The
+# site uses the readthedocs theme; mkdocs-material is installed for
+# compatibility with downstream image builds and is not referenced by
+# mkdocs.yml.)
+RUN pip install --no-cache-dir "mkdocs==1.4.2" mkdocs-material \
     && mkdocs build --strict
 
 FROM docker.io/library/nginx:1.31-alpine AS production
