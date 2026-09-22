@@ -5,6 +5,16 @@ on:
     branches: [main]
   pull_request:
 
+# Least-privilege default for every job in this workflow. Untrusted pull
+# requests (from forks) additionally receive a token with no permissions at
+# all; this repository's CI needs no secrets to run unit tests or lint.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,12 +25,27 @@ jobs:
           go-version-file: go.mod
       - run: go build ./...
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test -count=1 ./...
+      - run: go test -race -count=1 ./...
 
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Pinned to the toolchain version the repository's quality gate uses
+      # (see docs + AGENTS.md); upgrade deliberately, one commit at a time.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.13.2
+
+  docs:
+    # The documentation build is part of CI: `mkdocs build --strict` must
+    # pass for the merge to be allowed. Pinned to the version the local
+    # quality gate runs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the docs site (strict)
+        run: |
+          pip install --quiet mkdocs==1.4.2
+          mkdocs build --strict
