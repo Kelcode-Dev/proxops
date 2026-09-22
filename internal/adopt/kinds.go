@@ -869,10 +869,15 @@ func (ac *adoptContext) cloudInitDataAdopt(raw map[string]any) schema.CloudInitD
 		lines, present := schema.PveCISshLinesFromPVE(raw)
 		if present {
 			ac.sshConfigured++
+			// Live-key census, independent of whether matching resolved the
+			// lines to SOPS refs: "N unique live keys across M resources"
+			// describes PVE material, not the SOPS store.
+			ac.recordLiveSSHKeys(lines)
 			refs, allMatched := ac.matchOrAdoptLines(lines)
 			if allMatched {
 				cd.SSHKeys = nil
 				cd.SSHKeyRefs = refs
+				ac.sshRefResources++
 			}
 			// else: keep the sentinel (M10 shape)
 		}
@@ -978,14 +983,38 @@ func (ac *adoptContext) recordPasswordPresent() {
 
 // collectCensus finalises Result.CloudInit + Result.AdoptedSSHRefs at the
 // tail of runWithOptions. Called ONCE per run.
+//
+// Field semantics (M13.2 UX cleanup):
+//   - SSHUniqueLiveKeys: distinct LIVE PVE ssh-key lines observed in this run,
+//     deduped by SSHKeyFingerprint (type + base64 body; the OpenSSH comment
+//     is NOT part of the identity — matching PVE's storage semantics, so
+//     "the same key under two comments" still counts once). This is the "N
+//     unique across M resources" number operators expect to see even in a
+//     plain SOPS-less adoption: it describes PVE material, not the SOPS store.
+//   - SSHReused: distinct SOPS names already present in the store that the
+//     live material matched (0 unless SOPS matching produced refs).
+//   - SSHAdded: distinct SOPS names newly created by this run (--adopt-secrets
+//     only).
+//   - SSHResources: resources that had live ssh-keys.
+//   - PwResources: resources that had a live cipassword value (PVE 9.2 masks
+//     the value; presence is the only signal — the plaintext is NOT
+//     recoverable, manual ci-password-ref mapping required).
+//   - SOPSBacked: whether the cluster carried a decrypted SOPS store this run
+//     (SOPS.Loaded=true). Independent of whether the ssh-keys / passwords
+//     blocks are populated: a valid but initially-empty SOPS document is still
+//     SOPS-backed — the correct operator instruction is "a store is configured;
+//     re-run with --adopt-secrets to import unmatched keys", not "cluster not
+//     SOPS-backed".
 func (ac *adoptContext) collectCensus() {
 	ac.res.CloudInit = CloudInitSummary{
-		SSHUniqueKeys: len(ac.sshUniqueNames),
-		SSHReused:     len(ac.sshReusedNames),
-		SSHAdded:      len(ac.newNames),
-		SSHResources:  ac.sshConfigured,
-		PwResources:   ac.pwConfigured,
-		SOPSBacked:    len(ac.opts.SOPS.SSHKeys) > 0 || len(ac.opts.SOPS.Passwords) > 0,
+		AdoptSecrets:         ac.opts.AdoptSecrets,
+		SSHUniqueLiveKeys:    len(ac.liveKeyFPs),
+		SSHReused:            len(ac.sshReusedNames),
+		SSHAdded:             len(ac.newNames),
+		SSHResources:         ac.sshConfigured,
+		SSHResourcesWithRefs: ac.sshRefResources,
+		PwResources:          ac.pwConfigured,
+		SOPSBacked:           ac.opts.SOPS.Loaded,
 	}
 	ac.res.NewSSHKeys = ac.newNames
 	// AdoptedSSHRefs = every SOPS name this run actually referenced on a
@@ -995,4 +1024,27 @@ func (ac *adoptContext) collectCensus() {
 		ac.res.AdoptedSSHRefs = append(ac.res.AdoptedSSHRefs, k)
 	}
 	sort.Strings(ac.res.AdoptedSSHRefs)
+}
+
+// recordLiveSSHKeys commits the live-key census for one resource. Distinct
+// lines are deduped by schema.SSHKeyFingerprint (type + base64 body; the
+// OpenSSH comment is NOT part of the identity — matching PVE's own storage
+// semantics, so the same key under two comments counts once). A line PVE
+// reported that is not a parseable OpenSSH key (fingerprint "") is deduped
+// verbatim under "raw:<line>" so distinct unparseable lines still count as
+// distinct live material; matching fails closed for them regardless. This runs
+// whether or not SOPS matching resolved the lines: the "N unique live keys
+// across M resources" number describes PVE material, not the SOPS store.
+func (ac *adoptContext) recordLiveSSHKeys(lines []string) {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || line == schema.CloudInitRedactedSentinel {
+			continue
+		}
+		fp := schema.SSHKeyFingerprint(line)
+		if fp == "" {
+			fp = "raw:" + line
+		}
+		ac.liveKeyFPs[fp] = true
+	}
 }

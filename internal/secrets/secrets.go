@@ -128,6 +128,15 @@ type SecretsFile struct {
 	// SourcePath is the on-disk path that was decrypted (for error text).
 	// It is not secret material.
 	SourcePath string
+	// Loaded reports whether this SecretsFile was decrypted from a
+	// configured SOPS document — as opposed to the zero value, which
+	// means "no SOPS store is configured at all". A valid SOPS document
+	// whose cloud-init blocks are initially empty is still SOPS-backed:
+	// the empty SSHKeys/Passwords maps + Loaded=true is the only correct
+	// representation of that state. Consumers must not infer "SOPS-backed"
+	// from map population (a non-empty Values map proves nothing about
+	// the cloud-init blocks either — it is a credential surface).
+	Loaded bool
 }
 
 // Get returns the value for a SOPS top-level name and whether it is present
@@ -193,21 +202,37 @@ func DecryptFile(path string) (SecretsFile, error) {
 // decryptInner is the internal decryption entry point that honors the
 // test hook. Production callers use DecryptFile; tests that install
 // SetTestDecrypter / SetTestDocDecrypter see the callback invoked here.
+//
+// Every SecretsFile returned here (in either path) carries Loaded=true:
+// a SOPS document that DECRYPTED VALIDLY is SOPS-backed, even when its
+// cloud-init.ssh-keys / cloud-init.passwords blocks are empty at first
+// sight. Callers that want to represent "no SOPS store at all" must use
+// the zero SecretsFile{} and not call DecryptFile.
 func decryptInner(path string) (SecretsFile, error) {
-	decryptMu.RLock()
-	fn := testDocDecrypter
-	decryptMu.RUnlock()
-	if fn != nil {
-		got, err := fn(path)
-		if err != nil {
-			return SecretsFile{}, err
-		}
-		if got.SourcePath == "" {
-			got.SourcePath = path
-		}
-		return got, nil
-	}
-	return decryptWithSops(path)
+        decryptMu.RLock()
+        fn := testDocDecrypter
+        decryptMu.RUnlock()
+        if fn != nil {
+                got, err := fn(path)
+                if err != nil {
+                        return SecretsFile{}, err
+                }
+                if got.SourcePath == "" {
+                        got.SourcePath = path
+                }
+                got.Loaded = true
+                return got, nil
+        }
+        return markLoaded(decryptWithSops(path))
+}
+
+// markLoaded stamps the success return of decryptWithSops with Loaded=true
+// at the single call site that needs it. Error returns are left untouched.
+func markLoaded(got SecretsFile, err error) (SecretsFile, error) {
+        if err == nil {
+                got.Loaded = true
+        }
+        return got, err
 }
 
 // validatePath checks the path is absolute or safely non-empty.

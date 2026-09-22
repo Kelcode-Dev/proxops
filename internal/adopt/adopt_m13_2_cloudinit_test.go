@@ -101,6 +101,11 @@ func preloadM132VM(m *mock.Server, vmid int, sshKeyLines ...string) {
 }
 
 func m132Opts(sops secrets.SecretsFile) adopt.Options {
+	// Test stores are always a "configured SOPS store" (SOPS-backed); Loaded
+	// is true when a SOPS file is set up and successfully decrypted, even if
+	// its cloud-init blocks are empty. If a test wants "no SOPS store at all"
+	// it MUST use Options{} (SOPS.Loaded=false).
+	sops.Loaded = true
 	return adopt.Options{SOPS: sops}
 }
 
@@ -209,11 +214,19 @@ func TestAdopt_M132_PlainRunUnchanged(t *testing.T) {
 	if res.CloudInit.PwResources != 1 {
 		t.Errorf("census PwResources = %d, want 1", res.CloudInit.PwResources)
 	}
-	if res.CloudInit.SSHUniqueKeys != 0 {
-		t.Errorf("census SSHUniqueKeys = %d, want 0 (no SOPS matching in plain mode)", res.CloudInit.SSHUniqueKeys)
+	// M13.2 UX cleanup: SSHUniqueLiveKeys describes PVE material, not SOPS
+	// matching — a plain SOPS-less run still reports the live key it saw.
+	if res.CloudInit.SSHUniqueLiveKeys != 1 {
+		t.Errorf("census SSHUniqueLiveKeys = %d, want 1 (one live key on PVE, regardless of SOPS)", res.CloudInit.SSHUniqueLiveKeys)
+	}
+	if res.CloudInit.SSHReused != 0 || res.CloudInit.SSHAdded != 0 {
+		t.Errorf("census SOPS reused/added = %d/%d, want 0/0 (no SOPS matching in plain mode)", res.CloudInit.SSHReused, res.CloudInit.SSHAdded)
+	}
+	if res.CloudInit.SSHResourcesWithRefs != 0 {
+		t.Errorf("census SSHResourcesWithRefs = %d, want 0 (plain mode keeps the sentinel)", res.CloudInit.SSHResourcesWithRefs)
 	}
 	if res.CloudInit.SOPSBacked {
-		t.Errorf("census SOPSBacked = true; the store was empty")
+		t.Errorf("census SOPSBacked = true; no SOPS store was configured")
 	}
 	if s := m132AllText(res); strings.Contains(s, m132Pw) || strings.Contains(s, m132Key1) {
 		t.Fatalf("PVE PII leaked into the adopt report:\n%s", s)
@@ -269,9 +282,12 @@ func TestAdopt_M132_EXACTMatchEmitsRefs(t *testing.T) {
 		t.Errorf("NewSSHKeys = %v; exact match must not create new names", res.NewSSHKeys)
 	}
 	// Census.
-	if res.CloudInit.SSHUniqueKeys != 1 || res.CloudInit.SSHReused != 1 || res.CloudInit.SSHAdded != 0 {
-		t.Errorf("census unique/reused/added = %d/%d/%d, want 1/1/0",
-			res.CloudInit.SSHUniqueKeys, res.CloudInit.SSHReused, res.CloudInit.SSHAdded)
+	if res.CloudInit.SSHUniqueLiveKeys != 1 || res.CloudInit.SSHReused != 1 || res.CloudInit.SSHAdded != 0 {
+		t.Errorf("census live-unique/reused/added = %d/%d/%d, want 1/1/0",
+			res.CloudInit.SSHUniqueLiveKeys, res.CloudInit.SSHReused, res.CloudInit.SSHAdded)
+	}
+	if res.CloudInit.SSHResourcesWithRefs != 1 {
+		t.Errorf("census resources with refs = %d, want 1", res.CloudInit.SSHResourcesWithRefs)
 	}
 	if res.CloudInit.SOPSBacked != true {
 		t.Errorf("census SOPSBacked = false; the store was populated")
@@ -310,13 +326,18 @@ func TestAdopt_M132_PartialMatchAllOrNothing(t *testing.T) {
 		t.Errorf("partial-match resource: unmatched live key leaked into the manifest:\n%s", vmManifest)
 	}
 	// Census: the resource configured ssh-keys (counted), but NO ref was
-	// adopted (unique/reused = 0).
+	// adopted (all-or-nothing fell back to the sentinel on the WHOLE resource).
+	// M13.2 UX cleanup: 2 live lines were OBSERVED and deduped to 2 distinct
+	// fingerprints (SSHUniqueLiveKeys=2) — independent of match outcome.
 	if res.CloudInit.SSHResources != 1 {
 		t.Errorf("census SSHResources = %d, want 1", res.CloudInit.SSHResources)
 	}
-	if res.CloudInit.SSHUniqueKeys != 0 || res.CloudInit.SSHReused != 0 {
-		t.Errorf("census unique/reused = %d/%d, want 0/0 (all-or-nothing fell back to sentinel)",
-			res.CloudInit.SSHUniqueKeys, res.CloudInit.SSHReused)
+	if res.CloudInit.SSHUniqueLiveKeys != 2 {
+		t.Errorf("census SSHUniqueLiveKeys = %d, want 2 (two live lines observed)", res.CloudInit.SSHUniqueLiveKeys)
+	}
+	if res.CloudInit.SSHReused != 0 || res.CloudInit.SSHResourcesWithRefs != 0 {
+		t.Errorf("census reused/resourcesWithRefs = %d/%d, want 0/0 (all-or-nothing fell back to sentinel)",
+			res.CloudInit.SSHReused, res.CloudInit.SSHResourcesWithRefs)
 	}
 	// No PII anywhere.
 	if s := m132AllText(res); strings.Contains(s, m132Pw) || strings.Contains(s, m132Key2) {
@@ -494,4 +515,135 @@ func extractRefNamesAcross(wrote []adopt.WroteManifest) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// --- M13.2 UX cleanup (public release) regression tests ---
+//
+// The bug: "SOPS-backed" was inferred from whether the cloud-init maps
+// already carried entries. A valid but initially-empty Cloud-Init secret
+// store is still SOPS-backed. The census now distinguishes:
+//   - SOPSBacked: a decrypted SOPS store was configured & usable (Loaded=true)
+//   - live keys:  PVE material observed (SSHUniqueLiveKeys; independent of SOPS)
+//   - SOPS outcome: imported/reused/resources-referencing (the final result)
+
+// TestAdopt_M132_EmptySOPS_StoreStillSOPSBacked pins the exact release-blocker
+// scenario: a cluster with a SOPS file configured (empty cloud-init blocks)
+// runs PLAIN adopt against PVE material carrying ssh-keys + cipassword.
+// The output must NOT claim the cluster "is not SOPS-backed" and the
+// census counts must still report PVE material honestly.
+func TestAdopt_M132_EmptySOPS_StoreStillSOPSBacked(t *testing.T) {
+	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
+	t.Cleanup(m.Close)
+	// Multiple VMs, all carrying the same live PVE key + a cipassword.
+	for _, vmid := range []int{9190, 9191, 9192} {
+		preloadM132VM(m, vmid, m132Key1)
+	}
+	c := newMockClient(t, m)
+
+	// A configured SOPS store whose cloud-init blocks are empty — the
+	// "SOPS-backed but empty" state.
+	emptyStore := secrets.SecretsFile{
+		SSHKeys:    map[string]string{},
+		Passwords:  map[string]string{},
+		SourcePath: "/etc/proxops/secrets.sops.yaml",
+		Loaded:     true,
+	}
+	res, err := adopt.RunWithOptions(context.Background(), c, "m132-dev", []string{"pve01"}, t.TempDir(), adopt.Options{SOPS: emptyStore})
+	if err != nil {
+		t.Fatalf("RunWithOptions: %v", err)
+	}
+	if got := m.WritesObserved(); got != 0 {
+		t.Fatalf("mock PVE observed %d write requests (plain path is read-only)", got)
+	}
+	// SOPS-backed is TRUE: a usable store was configured, even though it is empty.
+	if !res.CloudInit.SOPSBacked {
+		t.Errorf("census SOPSBacked = false; want true (a SOPS store was configured and decrypted)")
+	}
+	// Live PVE material is reported honestly: 1 unique key across 3 resources.
+	if res.CloudInit.SSHUniqueLiveKeys != 1 {
+		t.Errorf("census SSHUniqueLiveKeys = %d, want 1 (1 live key on PVE)", res.CloudInit.SSHUniqueLiveKeys)
+	}
+	if res.CloudInit.SSHResources != 3 {
+		t.Errorf("census SSHResources = %d, want 3", res.CloudInit.SSHResources)
+	}
+	if res.CloudInit.PwResources != 3 {
+		t.Errorf("census PwResources = %d, want 3", res.CloudInit.PwResources)
+	}
+	// No SOPS outcome: nothing imported, nothing reused, nothing referenced.
+	if res.CloudInit.SSHReused != 0 || res.CloudInit.SSHAdded != 0 || res.CloudInit.SSHResourcesWithRefs != 0 {
+		t.Errorf("plain adoptions must not produce SOPS refs: reused/added/withRefs = %d/%d/%d",
+			res.CloudInit.SSHReused, res.CloudInit.SSHAdded, res.CloudInit.SSHResourcesWithRefs)
+	}
+	// Summary: plain shape, no "not SOPS-backed" claim, no PII.
+	sum := res.Summary()
+	if strings.Contains(sum, "not SOPS-backed") || strings.Contains(sum, "NOT SOPS-backed") || strings.Contains(sum, "NOT matched against") {
+		t.Errorf("summary incorrectly claims the cluster is not SOPS-backed:\n%s", sum)
+	}
+	if !strings.Contains(sum, "SSH public keys: 1 unique across 3 resources") {
+		t.Errorf("summary missing the live-key census line:\n%s", sum)
+	}
+	if !strings.Contains(sum, "re-run with --adopt-secrets to import recoverable keys") {
+		t.Errorf("summary must tell the operator their next step:\n%s", sum)
+	}
+	if !strings.Contains(sum, "recoverable: 0") {
+		t.Errorf("summary must report password recoverability:\n%s", sum)
+	}
+	// PII leak check.
+	if s := m132AllText(res) + "\n" + sum; strings.Contains(s, m132Pw) || strings.Contains(s, m132Key1) {
+		t.Fatalf("PVE PII leaked into the adopt report:\n%s", s)
+	}
+}
+
+// TestAdopt_M132_AdoptSecrets_EmptyStore_Imports pins the --adopt-secrets path
+// against an empty SOPS store: the operator-facing output must describe the
+// FINAL RESULT (imported / reused / resources referencing) and must NOT
+// contradict itself with a "not SOPS-backed" line.
+func TestAdopt_M132_AdoptSecrets_EmptyStore_Imports(t *testing.T) {
+	m := mock.New(mock.Config{Token: apiToken, TaskTicks: 1})
+	t.Cleanup(m.Close)
+	for _, vmid := range []int{9193, 9194} {
+		preloadM132VM(m, vmid, m132Key1)
+	}
+	c := newMockClient(t, m)
+
+	emptyStore := secrets.SecretsFile{
+		SSHKeys:    map[string]string{},
+		Passwords:  map[string]string{},
+		SourcePath: "/etc/proxops/secrets.sops.yaml",
+		Loaded:     true,
+	}
+	opts := adopt.Options{SOPS: emptyStore, AdoptSecrets: true}
+	res, err := adopt.RunWithOptions(context.Background(), c, "m132-dev", []string{"pve01"}, t.TempDir(), opts)
+	if err != nil {
+		t.Fatalf("RunWithOptions: %v", err)
+	}
+	if len(res.NewSSHKeys) != 1 {
+		t.Fatalf("NewSSHKeys = %d entries, want 1 (one distinct live key imported)", len(res.NewSSHKeys))
+	}
+	// Census: 1 live key across 2 resources; SOPS outcome = imported 1, reused 0,
+	// resources referencing 2.
+	if res.CloudInit.SSHUniqueLiveKeys != 1 || res.CloudInit.SSHResources != 2 {
+		t.Errorf("census live/resources = %d/%d, want 1/2", res.CloudInit.SSHUniqueLiveKeys, res.CloudInit.SSHResources)
+	}
+	if res.CloudInit.SSHReused != 0 || res.CloudInit.SSHAdded != 1 || res.CloudInit.SSHResourcesWithRefs != 2 {
+		t.Errorf("census reused/added/withRefs = %d/%d/%d, want 0/1/2",
+			res.CloudInit.SSHReused, res.CloudInit.SSHAdded, res.CloudInit.SSHResourcesWithRefs)
+	}
+	if !res.CloudInit.SOPSBacked {
+		t.Errorf("census SOPSBacked = false; a store was configured")
+	}
+	// Summary: secret-adoption shape.
+	sum := res.Summary()
+	if !strings.Contains(sum, "imported: 1") {
+		t.Errorf("summary missing 'imported: 1':\n%s", sum)
+	}
+	if !strings.Contains(sum, "reused existing: 0") {
+		t.Errorf("summary missing 'reused existing: 0':\n%s", sum)
+	}
+	if !strings.Contains(sum, "resources referencing: 2") {
+		t.Errorf("summary missing 'resources referencing: 2':\n%s", sum)
+	}
+	if strings.Contains(sum, "not SOPS-backed") || strings.Contains(sum, "NOT matched against") {
+		t.Errorf("summary contradicts the SOPS store:\n%s", sum)
+	}
 }

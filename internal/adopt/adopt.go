@@ -87,12 +87,31 @@ type Result struct {
 // CloudInitSummary is the M13.2 census of PVE-recoverable cloud-init
 // material across all objects in an adopt run. Counts only — no key
 // material, no password material.
+//
+// Mode distinction (M13.2 UX cleanup): the operator-facing output is
+// "describe the final result, not internal phases". The census carries
+// AdoptSecrets so Summary() can pick the matching report shape:
+//   - plain adoption: "SSH public keys: N unique across M resources; SSH keys
+//     were not imported; re-run with --adopt-secrets to import recoverable
+//     keys."
+//   - --adopt-secrets: "SSH public keys: N unique across M resources; imported:
+//     I; reused existing: K; resources referencing: R."
 type CloudInitSummary struct {
-	// SSHUniqueKeys is the count of DISTINCT public keys referenced by
-	// emitted ssh-key-refs (deduped by SOPS name across resources).
-	SSHUniqueKeys int
-	// SSHReused is how many of those distinct keys matched an EXISTING
-	// SOPS entry (no new SOPS name created).
+	// AdoptSecrets reflects the --adopt-secrets flag this run used. It does
+	// NOT change matching behaviour (see Options.AdoptSecrets) — it tells
+	// Summary() how to phrase the result.
+	AdoptSecrets bool
+	// SSHUniqueLiveKeys is the count of DISTINCT live PVE ssh-key lines
+	// observed in this run, deduped by SSHKeyFingerprint (type + base64
+	// body; the OpenSSH comment is NOT part of the identity — matching PVE's
+	// storage semantics, so "the same key under two comments" still counts
+	// once). Recorded independently of SOPS matching: a plain SOPS-less
+	// adoption still reports the PVE material it saw. This is the "N unique
+	// across M resources" operator-facing number.
+	SSHUniqueLiveKeys int
+	// SSHReused is how many distinct SOPS names already present in the store
+	// had a live ssh-key match this run (0 in plain adoptions with no SOPS
+	// store, or when no match succeeded).
 	SSHReused int
 	// SSHAdded is how many NEW SOPS names this run created
 	// (--adopt-secrets only).
@@ -100,13 +119,23 @@ type CloudInitSummary struct {
 	// SSHResources is the count of resources that had at least one SSH
 	// public key configured on PVE.
 	SSHResources int
+	// SSHResourcesWithRefs is the count of resources whose ssh-keys were
+	// fully resolved to SOPS refs this run (all-or-nothing rule: a partially
+	// matched resource keeps the sentinel and does NOT count). In plain
+	// adoptions without a SOPS store this is 0; in --adopt-secrets runs it
+	// is the number of resources that now carry ssh-key-refs. This is the
+	// final result the operator should see: "resources referencing: R".
+	SSHResourcesWithRefs int
 	// PwResources is the count of resources that had a cipassword value
 	// configured on PVE (PVE 9.2 masks the value: presence is the only
 	// signal; the plaintext is NOT recoverable — manual ci-password-ref
 	// mapping is required).
 	PwResources int
-	// SOPSBacked is true when the cluster carried a SOPS store this run so
-	// matching/importing was possible. When false, ssh-keys stay the sentinel.
+	// SOPSBacked is true when the cluster carried a DECRYPTED SOPS store this
+	// run so matching/importing was possible. A valid SOPS document whose
+	// blocks are empty at first sight is still SOPS-backed — operators should
+	// re-run with --adopt-secrets to import unmatched live keys, not treat
+	// the cluster as "not SOPS-backed".
 	SOPSBacked bool
 }
 
@@ -141,8 +170,13 @@ type CloudInitSummary struct {
 // NewSSHKeys and (when --adopt-secrets) merges + re-encrypts atomically.
 type Options struct {
 	// SOPS is the in-memory, already-decrypted SOPS document for this
-	// cluster. When empty, adopt matches nothing and emits only the
-	// ["*"] sentinel for PVE ssh-keys (pre-M13.2 behaviour).
+	// cluster. When SOPS.Loaded is false (the zero SecretsFile), adopt
+	// matches nothing and emits only the ["*"] sentinel for PVE ssh-keys
+	// (pre-M13.2 behaviour). When SOPS.Loaded is true, adopt treats the
+	// cluster as SOPS-backed regardless of whether the cloud-init
+	// entries are populated: a valid SOPS file whose ssh-keys/passwords
+	// blocks are initially empty is still a SOPS store. Consumers must not
+	// infer "SOPS-backed" from map population.
 	SOPS secrets.SecretsFile
 	// AdoptSecrets is the --adopt-secrets opt-in flag. When true, live
 	// ssh-keys without an existing SOPS match are also imported (named
@@ -262,23 +296,44 @@ func (r Result) Summary() string {
 		}
 	}
 	ci := r.CloudInit
+	// M13.2 UX cleanup: the census describes the FINAL RESULT of this
+	// adoption, not internal phases. The two shapes:
+	//
+	//   plain adoption   -> "SSH keys were not imported; re-run with
+	//                       --adopt-secrets to import recoverable keys"
+	//                       (whether or not a SOPS store is configured:
+	//                       a store with zero cloud-init entries behaves
+	//                       identically to no store for matching, and the
+	//                       operator's next step is the same in both cases).
+	//
+	//   --adopt-secrets  -> "imported: I; reused existing: K;
+	//                       resources referencing: R"
+	//
+	// The Cloud-Init password line is identical in both shapes: PVE 9.2
+	// masks cipassword on readback (a fixed "**********", plaintext
+	// unrecoverable), so passwords are NEVER imported by --adopt-secrets and
+	// always require manual ci-password-ref mapping.
 	if ci.SSHResources > 0 || ci.PwResources > 0 {
-		b.WriteString("adopt: cloud-init secret census (PVE material; values NOT printed):\n")
+		if ci.AdoptSecrets {
+			b.WriteString("adopt: cloud-init secrets (PVE material; values NOT printed):\n")
+		} else {
+			b.WriteString("adopt: cloud-init secret census (PVE material; values NOT printed):\n")
+		}
 		if ci.SSHResources > 0 {
-			fmt.Fprintf(&b, "  SSH public keys: %d unique, across %d resource(s)", ci.SSHUniqueKeys, ci.SSHResources)
-			if ci.SOPSBacked {
-				fmt.Fprintf(&b, ", reused %d existing SOPS ref(s)", ci.SSHReused)
+			fmt.Fprintf(&b, "  SSH public keys: %d unique across %d resources\n", ci.SSHUniqueLiveKeys, ci.SSHResources)
+			if ci.AdoptSecrets {
+				fmt.Fprintf(&b, "  imported: %d\n", ci.SSHAdded)
+				fmt.Fprintf(&b, "  reused existing: %d\n", ci.SSHReused)
+				fmt.Fprintf(&b, "  resources referencing: %d\n", ci.SSHResourcesWithRefs)
+			} else {
+				b.WriteString("  SSH keys were not imported; re-run with --adopt-secrets to import recoverable keys\n")
 			}
 			b.WriteString("\n")
-			if !ci.SOPSBacked {
-				b.WriteString("  SSH keys were NOT matched against a SOPS file (cluster not SOPS-backed): they carry the [*] PVE-owned sentinel; use --adopt-secrets to import them.\n")
-			} else if ci.SSHAdded > 0 {
-				fmt.Fprintf(&b, "  %d new SOPS ssh-key(s) imported this run (--adopt-secrets).\n", ci.SSHAdded)
-			}
 		}
 		if ci.PwResources > 0 {
-			fmt.Fprintf(&b, "  Cloud-Init passwords: configured on %d resource(s); PVE 9.2 masks the value on readback", ci.PwResources)
-			b.WriteString(" (plaintext unrecoverable) — map each to a cloud-init.passwords.<name> SOPS ref manually (ci-password-ref); adopt never guesses passwords.\n")
+			fmt.Fprintf(&b, "  Cloud-Init passwords: configured on %d resources\n", ci.PwResources)
+			b.WriteString("  recoverable: 0 (PVE 9.2 returns only the masked value \"**********\" on readback; the plaintext is unrecoverable)\n")
+			b.WriteString("  manual ci-password-ref mapping required: " + itoa(ci.PwResources) + "\n")
 		}
 	}
 	if len(r.Gaps) > 0 {

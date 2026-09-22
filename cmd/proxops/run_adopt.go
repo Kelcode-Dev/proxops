@@ -38,11 +38,18 @@ func runAdopt(ctx context.Context, agent *app.Agent, cluster string, gitRoot str
 	// M13.2: build in-memory Options from the already-resolved SOPS store.
 	var opts adopt.Options
 	if sc, ok := agent.Config().SopsResolved[cluster]; ok && sc.SourceFile != "" {
+		// SopsResolved entries exist ONLY when a SOPS file was configured AND
+		// successfully decrypted for the cluster. The cloud-init blocks may be
+		// empty at first sight ("SOPS-backed but empty") — that is a different
+		// operator state than "no SOPS store at all" and MUST be surfaced as
+		// SOPS-backed, so re-running with --adopt-secrets imports unmatched keys
+		// into the file rather than claiming the cluster has no store.
 		sdoc := secrets.SecretsFile{
 			Values:     map[string]string{},
 			SSHKeys:    sc.CloudInitSSHKeys,
 			Passwords:  sc.CloudInitPasswords,
 			SourcePath: sc.SourceFile,
+			Loaded:     true,
 		}
 		opts.SOPS = sdoc
 		opts.AdoptSecrets = adoptSecrets

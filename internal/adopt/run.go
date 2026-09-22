@@ -87,9 +87,9 @@ func gapNoteFor(field, fallback string) string {
 	case "ciupgrade":
 		return "PVE cloud-init upgrade mode; proxops does not model it"
 	case "sshkeys":
-		return "PVE cloud-init SSH public keys are NOT modelled in this manifest (M13.2: PVE reports non-empty sshkeys; the cluster's SOPS store could not produce a matching cloud-init.ssh-keys.<name> reference — either the cluster is not SOPS-backed or none of the live key lines is present verbatim in cloud-init.ssh-keys. Re-run `adopt --cluster <name> --adopt-secrets` to import them, or run plain adopt once the keys live in the SOPS document.) The value is redacted."
+		return "PVE cloud-init SSH public keys are NOT modelled in this manifest as live material. The cluster's SOPS store could not produce a matching cloud-init.ssh-keys.<name> reference for some live key (either no SOPS store is configured, or no live key line is present verbatim under cloud-init.ssh-keys in the configured store). The manifest keeps the [*] PVE-owned redacted sentinel — nothing was dropped or clobbered. Re-run `adopt --cluster <name> --adopt-secrets` to import unmatched live keys into the SOPS document, or add the key line manually and re-adopt. The value is redacted."
 	case "cipassword":
-		return "PVE cloud-init root password is NOT modelled: PVE 9.2 masks the value on readback (\"**********) and the plaintext is unrecoverable, so proxops cannot import it (M13.2). Manually create a cloud-init.passwords.<name> SOPS entry and set spec.cloud-init-data.ci-password-ref on the manifest before listing it."
+		return "PVE cloud-init root password is NOT modelled: PVE 9.2 masks the value on readback (\"**********\") and the plaintext is unrecoverable, so proxops cannot import it (M13.2). Manually create a cloud-init.passwords.<name> SOPS entry and set spec.cloud-init-data.ci-password-ref on the manifest before listing it."
 	case "kvm":
 		return "PVE KVM nested-virt enable; proxops does not model it"
 	case "balloon":
@@ -171,11 +171,28 @@ type adoptContext struct {
 	sshReusedNames map[string]bool
 	// sshConfigured: number of resources that had live sshkeys.
 	sshConfigured int
+	// sshRefResources: number of resources whose live ssh-keys FULLY
+	// resolved to SOPS refs this run (all-or-nothing rule: a partially
+	// matched resource keeps the sentinel and does not count here; it still
+	// counts in sshConfigured). This is the final "resources referencing"
+	// number the operator should see after a SOPS-backed adoption.
+	sshRefResources int
 	// pwConfigured: number of resources that had a live cipassword.
 	pwConfigured int
 	// New SSH keys: SOPS name -> key line (for the CLI to merge into the
 	// SOPS file). Populated ONLY when opts.AdoptSecrets is true.
 	newNames map[string]string
+	// liveKeyFPs: SET of SSHKeyFingerprint values across every LIVE ssh-key
+	// line observed in this run, deduped by fingerprint (type + base64 body;
+	// the OpenSSH comment is NOT part of the identity — matching PVE's own
+	// storage semantics, so the same key under two comments counts once).
+	// Recorded independently of SOPS matching: the "N unique live keys across
+	// M resources" census number comes from PVE material, not from the SOPS
+	// store. A line PVE reported but that is not a parseable OpenSSH key
+	// (fingerprint "") is deduped verbatim under "raw:<line>" so distinct
+	// unparseable lines still count as distinct live material; matching fails
+	// closed for them regardless.
+	liveKeyFPs map[string]bool
 }
 
 // RunWithOptions is the M13.2 entry point that accepts an Options (SOPS
@@ -223,6 +240,7 @@ func runWithOptions(ctx context.Context, pve *pveclient.Client, cluster string, 
 		sshUniqueNames: map[string]bool{},
 		sshReusedNames: map[string]bool{},
 		newNames:       map[string]string{},
+		liveKeyFPs:     map[string]bool{},
 	}
 
 	nodes := append([]string{}, allowedNodes...)
