@@ -4,6 +4,12 @@
 >
 > - **Maturity.** ProxOps is a pre-1.0, actively-developed tool. It is not
 >   yet a drop-in for unattended production infrastructure management.
+> - **Versioning.** The application ships versioned releases (the first
+>   public release is `v0.6.0`), but the **manifest schema is still
+>   alpha** — manifests use `apiVersion: proxops/v1alpha1` and may change
+>   until the schema is declared stable. Supported features are tested and
+>   dogfooded; unsupported PVE surface is documented in
+>   [docs/GAPS.md](docs/GAPS.md).
 > - **What has been tested.** Destructive create/update/delete lifecycle
 >   testing has been performed against a disposable PVE cluster
 >   (`conformance-dev`, PVE 9.2). Read-only adoption/audit
@@ -89,23 +95,20 @@ synthetic secrets) ships in [`examples/`](examples/README.md).
 
 ## Install / build
 
-The supported path is a **from-source build**:
-
 ```sh
-git clone <this repository> && cd <repo>
+# from a released tag (binaries also attach to each GitHub Release):
+go install github.com/Kelcode-Dev/proxops/cmd/proxops@v0.6.0
+
+# or build from source:
+git clone https://github.com/Kelcode-Dev/proxops && cd proxops
 make build          # -> bin/proxops
-make cross          # static linux/amd64 binary for a PVE host -> dist/
 ```
 
-A quick install-from-branch alternative (no tag / release binary is
-published yet — see `docs/getting-started.md`):
-
-```sh
-go install github.com/GizzmoShifu/proxmox-operator/cmd/proxops@main
-```
-
-`go install` reads the module from `github.com`, so the repository must be
-public for it to work (a `git clone` + `make build` works either way).
+Versioned releases follow SemVer tags (`vX.Y.Z`); `@main` installs the
+current main-branch build instead. For PVE hosts without a Go toolchain,
+each GitHub Release also carries static `proxops_vX.Y.Z_<os>_<arch>`
+binaries (`make cross` produces the linux/amd64 one). See
+`docs/getting-started.md`.
 
 SOPS-backed credentials additionally require `sops` (+ `age`) on PATH.
 
@@ -155,7 +158,8 @@ repo), see [Getting started](docs/getting-started.md).
 
 Documentation is generated from source-controlled Markdown in
 [`docs/`](docs) and published to
-[GitHub Pages](https://github.com/operatorshifu/proxmox-operator/tree/main/.github/workflows/pages.yml):
+([GitHub Pages](https://kelcode-dev.github.io/proxops/), built by
+[`.github/workflows/pages.yml`](https://github.com/Kelcode-Dev/proxops/blob/main/.github/workflows/pages.yml)):
 
 - **[docs/getting-started.md](docs/getting-started.md)** — first diff & apply, SOPS setup
 - **[docs/SCHEMA.md](docs/SCHEMA.md)** — resource reference / cross-cutting guarantees

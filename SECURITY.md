@@ -70,6 +70,7 @@ leak, or a destructive-prune race.
 ## Disclosure timeline
 
 Because ProxOps is pre-1.0 with a small maintainer base, we will:
+
 - acknowledge a report within ~5 working days,
 - confirm whether it falls inside scope within ~10 working days,
 - aim to publish a fix or an interim mitigation for an in-scope report within

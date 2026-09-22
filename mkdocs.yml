@@ -15,7 +15,7 @@ site_description: >-
   one git repository as the source of truth, one agent converging every
   declared PVE cluster — idempotent, deterministic, fail-closed, no
   persistent state.
-site_url: https://operatorshifu.github.io/proxmox-operator/
+site_url: https://kelcode-dev.github.io/proxops/
 
 docs_dir: docs
 site_dir: site

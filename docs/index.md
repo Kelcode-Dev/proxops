@@ -72,3 +72,14 @@ production testing performed to date is deliberately restricted to
 that validates observation and reverse-translation fidelity, not
 management. All create/update/delete lifecycle validation is against a
 disposable development cluster (PVE 9.2).
+
+## Versioning & schema maturity
+
+The application itself ships versioned releases (the first public release is
+`v0.6.0`). The **manifest schema is deliberately still alpha**: manifests use
+`apiVersion: proxops/v1alpha1` and the schema may change before it is declared
+stable. This means the two version streams are intentionally decoupled: an
+application release does not imply a stable manifest contract.
+
+ProxOps is licensed under the **Apache License 2.0** — see
+[LICENSE](https://github.com/Kelcode-Dev/proxops/blob/main/LICENSE).

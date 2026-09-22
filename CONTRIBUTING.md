@@ -5,6 +5,11 @@ what a contributor needs to know to make a safe, reviewable change.
 Everything else is in `AGENTS.md` (the engineering principles this project
 operates under) and the authoritative docs under `docs/`.
 
+- Canonical repository: <https://github.com/Kelcode-Dev/proxops>
+- Go module: `github.com/Kelcode-Dev/proxops`
+- First public release: `v0.6.0` (the manifest schema remains
+  `proxops/v1alpha1` — see `docs/index.md` on the two version streams).
+
 ## What ProxOps is
 
 A stateless GitOps reconciler for Proxmox VE: a git repository describes
@@ -72,8 +77,23 @@ a manual, opt-in workflow for compatibility investigations.
   `docs/sops-credentials.md`). Never commit a real age private key, a real
   PVE token, or a real password.
 
+## Releases
+
+ProxOps releases are SemVer git tags (`vX.Y.Z`). The release workflow
+(`.github/workflows/release.yml`) triggers on a tag push, explicitly
+validates the tag as SemVer, runs the full quality gate suite on the exact
+tagged tree, builds the `linux/amd64` binary with the tag name embedded,
+generates a `SHA256SUMS` manifest, and creates the GitHub Release with the
+binary + manifest attached. `go install` at a tag works because the Go
+module IS the repository — a tag is a module release.
+
+Contributors do NOT tag releases; maintainers cut a tag from an approved
+`main` commit. Prereleases use `vX.Y.Z-rc.N` and are flagged as GitHub
+prereleases automatically.
+
 ## License
 
 ProxOps is licensed under the **Apache License 2.0** — see
 [LICENSE](LICENSE). Contributions submitted to this repository are licensed
 under the same terms.
+

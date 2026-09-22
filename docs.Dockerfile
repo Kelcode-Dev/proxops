@@ -20,9 +20,9 @@ FROM docker.io/library/nginx:1.31-alpine AS production
 # Set labels for image metadata
 LABEL org.opencontainers.image.title="proxops-docs" \
   org.opencontainers.image.description="ProxOps Documentation Site" \
-  org.opencontainers.image.source="https://github.com/GizzmoShifu/proxmox-operator" \
-  org.opencontainers.image.vendor="GizzmoShifu" \
-  org.opencontainers.image.author="GizzmoShifu"
+  org.opencontainers.image.source="https://github.com/Kelcode-Dev/proxops" \
+  org.opencontainers.image.vendor="Kelcode-Dev" \
+  org.opencontainers.image.author="Kelcode-Dev"
 
 # Create non-root user and group simultaneously
 RUN addgroup -g 1001 -S nginx-user && \
