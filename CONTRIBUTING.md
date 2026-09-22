@@ -74,8 +74,6 @@ a manual, opt-in workflow for compatibility investigations.
 
 ## License
 
-<!-- OWNER DECISION: this project currently has no LICENSE file. This must
-     be resolved by the owner before the repository is made public — do not
-     assume a default. Until then, contributions are made under the terms
-     the owner publishes. -->
-
+ProxOps is licensed under the **Apache License 2.0** — see
+[LICENSE](LICENSE). Contributions submitted to this repository are licensed
+under the same terms.
