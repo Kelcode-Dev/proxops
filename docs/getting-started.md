@@ -7,9 +7,29 @@ configuration. This page takes you from a fresh clone to your first
 ## 1. Install ProxOps
 
 ```sh
+git clone <this repository> && cd <repo>
 make build          # -> bin/proxops
-# or:
-go install github.com/GizzmoShifu/proxmox-operator/cmd/proxops@latest
+```
+
+Alternatively, install the latest main-branch build directly (Go is
+required; ProxOps is a single static-friendly binary):
+
+```sh
+go install github.com/GizzmoShifu/proxmox-operator/cmd/proxops@main
+```
+
+**Current limitation (pre-1.0):** no versioned release binaries or tags are
+published yet, so `go install` at a semantic version (e.g. `@v0.1.0`) will
+fail until the first clean pre-release tag is cut. Build from source.
+
+**Installing on a PVE host** (the canonical target — it has no Go toolchain
+and ProxOps runs there as the agent):
+
+```sh
+make cross   # -> dist/proxops-linux-amd64, a static binary
+# copy it onto each PVE node, e.g.:
+#   scp dist/proxops-linux-amd64 root@pve-node:/usr/local/bin/proxops
+#   chmod +x /usr/local/bin/proxops
 ```
 
 SOPS-backed credentials also require the `sops` binary on PATH (age
@@ -22,7 +42,7 @@ Start from the template that ships with the ProxOps source
 
 ```sh
 mkdir my-gitops && cd my-gitops
-cp -r /path/to/proxmox-operator/examples/* .
+cp -r /path/to/proxops/examples/* .
 git init -b main && git add -A && git commit -m "initial proxops gitops repo"
 ```
 

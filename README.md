@@ -89,12 +89,23 @@ synthetic secrets) ships in [`examples/`](examples/README.md).
 
 ## Install / build
 
+The supported path is a **from-source build**:
+
 ```sh
-go install github.com/GizzmoShifu/proxmox-operator/cmd/proxops@latest
-# or from a checkout:
+git clone <this repository> && cd <repo>
 make build          # -> bin/proxops
 make cross          # static linux/amd64 binary for a PVE host -> dist/
 ```
+
+A quick install-from-branch alternative (no tag / release binary is
+published yet — see `docs/getting-started.md`):
+
+```sh
+go install github.com/GizzmoShifu/proxmox-operator/cmd/proxops@main
+```
+
+`go install` reads the module from `github.com`, so the repository must be
+public for it to work (a `git clone` + `make build` works either way).
 
 SOPS-backed credentials additionally require `sops` (+ `age`) on PATH.
 
