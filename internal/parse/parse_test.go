@@ -160,6 +160,11 @@ spec:
 }
 
 func TestUnsupportedAPIVersionRejected(t *testing.T) {
+	// Pins the fail-closed contract: ONLY schema.APIVersion (proxops/v1alpha1)
+	// is accepted. Any other apiVersion — including a future proxops/v1beta1
+	// and retired namespaces — MUST be rejected, not silently coerced. We use
+	// an in-scheme-but-different-version value so the test stays meaningful
+	// across schema-identity changes.
 	root := writeRepo(t, map[string]string{
 		"vm.yaml": `apiVersion: proxops/v1beta1
 kind: VM
