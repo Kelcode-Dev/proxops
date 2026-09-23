@@ -1,6 +1,7 @@
 GO      ?= go
 BIN     := bin
 DIST    := dist
+
 # Embedded build version. Derived from SemVer-style git tags only (--match
 # 'v[0-9]*'): a checkout AT tag vX.Y.Z reports vX.Y.Z; a commit after the tag
 # carries describe distance metadata (vX.Y.Z-N-gSHA); a tree with no matching
@@ -14,6 +15,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 all: build
 
 build:
+	mkdir -p $(BIN)
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN)/proxops ./cmd/proxops
 
 test:
@@ -22,9 +24,11 @@ test:
 vet:
 	$(GO) vet ./...
 
-# Static binary for a typical PVE host (no toolchain required there).
+# Static Linux binaries for common ProxOps deployment architectures.
 cross:
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/proxops-linux-amd64 ./cmd/proxops
+	mkdir -p $(DIST)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/proxops-linux-amd64 ./cmd/proxops
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/proxops-linux-arm64 ./cmd/proxops
 
 clean:
 	rm -rf $(BIN) $(DIST)
