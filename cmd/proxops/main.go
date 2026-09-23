@@ -43,6 +43,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -55,8 +56,31 @@ import (
 	"github.com/Kelcode-Dev/proxops/internal/metrics"
 )
 
-// version is set at build time via -ldflags.
+// version is overridden at build time via -ldflags. Module-aware builds
+// fall back to the version embedded by the Go toolchain.
 var version = "dev"
+
+func resolveVersion(linked, module string) string {
+	if linked != "dev" {
+		return linked
+	}
+
+	if module != "" && module != "(devel)" {
+		return module
+	}
+
+	return linked
+}
+
+func resolvedVersion() string {
+	moduleVersion := ""
+
+	if info, ok := debug.ReadBuildInfo(); ok {
+		moduleVersion = info.Main.Version
+	}
+
+	return resolveVersion(version, moduleVersion)
+}
 
 type globalFlags struct {
 	configPath  string
@@ -98,6 +122,7 @@ var errSilent = errors.New("silent")
 
 func newRootCmd() *cobra.Command {
 	var gf globalFlags
+	v := resolvedVersion()
 
 	root := &cobra.Command{
 		Use:   "proxops",
@@ -125,7 +150,7 @@ func newRootCmd() *cobra.Command {
 			"(a proxops.yaml with git.url) and single-cluster configs.\n" +
 			"diff/apply/status/run process every discovered cluster in sorted\n" +
 			"name order; adopt requires an explicit --cluster=<name>.\n",
-		Version:       version,
+		Version:       v,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -268,7 +293,7 @@ func buildAgent(gf *globalFlags, log *slog.Logger, persistent, local *pflag.Flag
 	// Validate() with empty SopsResolved, causing SOPS configs that have
 	// no global pve.user/token triple (which is correct — SOPS supplies
 	// them) to fail validation prematurely.
-	return app.New(cfg, log, metrics.Register(), version)
+	return app.New(cfg, log, metrics.Register(), resolvedVersion())
 }
 
 // newRunCmd is the daemon mode: poll git and reconcile PVE continuously,
