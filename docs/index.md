@@ -12,7 +12,7 @@ explicit safety rails on deletion.
 
 ## How it works
 
-```
+```text
                        ProxOps GitOps repository
                        ┌─────────────────────────────┐
                        │ proxops.yaml   (optional)   │

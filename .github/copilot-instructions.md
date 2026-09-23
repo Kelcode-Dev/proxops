@@ -1,18 +1,21 @@
----
-description: Investigate Proxmox API behaviour safely
----
+# ProxOps contributor instructions
 
-Investigate the requested Proxmox behaviour.
+Read `AGENTS.md` before making changes. It contains the authoritative
+engineering, safety, testing, Git, and Proxmox interaction rules.
 
-Start with existing code, tests, and project documentation. Verify unknown
-wire semantics against `conformance-dev` only.
+Keep these invariants in mind:
 
-Capture the exact endpoint, method, request fields, response shape, PVE
-version behaviour, and failure modes. Prefer observed behaviour over
-assumptions.
+- Git is desired state; do not introduce hidden persistent controller state.
+- Production PVE environments are read-only unless explicitly authorised.
+- Use `conformance-dev` for destructive lifecycle and compatibility testing.
+- Prefer fail-closed behaviour where state is ambiguous or destructive.
+- Never expose credentials, tokens, passwords, private keys, or decrypted
+  secret material.
+- Preserve deterministic and idempotent reconciliation and adoption behaviour.
+- Verify unknown Proxmox VE wire semantics rather than guessing them.
+- Update authoritative documentation and `docs/GAPS.md` when behaviour changes.
+- Use focused Conventional/Commitizen commits.
+- Do not push unless explicitly requested.
 
-Turn confirmed behaviour into regression tests and update `docs/GAPS.md` or
-other authoritative documentation when appropriate.
-
-Do not write to production. Make a focused commit using
-`<type>[optional scope]: <description>`. Do not push.
+`.github/instructions/proxops.instructions.md` contains the shared implementation
+rules. Reusable prompts under `.github/prompts/` cover common project workflows.

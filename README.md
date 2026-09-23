@@ -1,6 +1,6 @@
 # ProxOps — repository-first GitOps reconciler for Proxmox VE
 
-> ## ⚠️ Pre-1.0 — experimental. Read `docs/GAPS.md` before using in anger.
+> ## ⚠️ Pre-1.0 — experimental. Read `docs/GAPS.md` before using in anger
 >
 > - **Maturity.** ProxOps is a pre-1.0, actively-developed tool. It is not
 >   yet a drop-in for unattended production infrastructure management.
@@ -43,7 +43,7 @@ isolated, never cross-pruned.
 ## What it manages
 
 | Kind | PVE object | Notes |
-|---|---|---|
+| ---- | ---------- | ----- |
 | VM | qemu VM | Disks (incl. image-seeded from a `DiskImage`), networks, CPU/memory, hardware (bios/EFI/Secure Boot/TPM/cloud-init drive), options, cloud-init data, power state |
 | TemplateVM | qemu VM marked `template=1` | Identical schema to VM; provision VMs from it with `VM.spec.clone` (PVE full-clone + own config) |
 | LXC | PVE container | Root FS, allocated mount points, host-path bind mounts, networks (incl. static ip/gw), DNS, options |
@@ -61,7 +61,7 @@ file.
 Everything a cluster needs lives in the repository — no external config
 file that points at the repository itself:
 
-```
+```sh
 proxops.yaml                     # OPTIONAL process-wide config
 clusters/<cluster>/
   config.yaml                    # the cluster's PVE endpoint, node allowlist,

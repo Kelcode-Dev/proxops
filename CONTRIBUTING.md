@@ -96,4 +96,3 @@ prereleases automatically.
 ProxOps is licensed under the **Apache License 2.0** — see
 [LICENSE](LICENSE). Contributions submitted to this repository are licensed
 under the same terms.
-

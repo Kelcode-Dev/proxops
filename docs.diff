@@ -1,0 +1,653 @@
+diff --git a/.github/adopt.prompt.md b/.github/adopt.prompt.md
+deleted file mode 100644
+index b9f935e..0000000
+--- a/.github/adopt.prompt.md
++++ /dev/null
+@@ -1,25 +0,0 @@
+----
+-applyTo: "**/*.go"
+----
+-
+-# Go implementation rules
+-
+-Read `AGENTS.md` and the relevant project docs before changing behaviour.
+-
+-- Follow existing package boundaries, naming, typing, and error-handling
+-  patterns.
+-- Prefer small, explicit changes over broad refactors.
+-- Reuse existing config, schema, PVE client, planner, executor, and adoption
+-  abstractions.
+-- Keep pure logic pure where the existing architecture does so.
+-- Return actionable errors without exposing credentials or sensitive data.
+-- Add regression tests for changed behaviour.
+-- Do not weaken safety checks, ownership checks, or fail-closed behaviour just
+-  to make a test pass.
+-- Avoid `nolint` directives unless the exception is genuinely unavoidable and
+-  documented.
+-- Keep exported APIs minimal and intentional.
+-
+-For Go changes, run the repository quality gates that apply to the change:
+-`go build ./...`, `go vet ./...`, `go test ./...`, `go test -race ./...`,
+-and `golangci-lint run`.
+diff --git a/.github/copilot-instructions.md b/.github/copilot-instructions.md
+index a4ff03d..7aa725d 100644
+--- a/.github/copilot-instructions.md
++++ b/.github/copilot-instructions.md
+@@ -1,18 +1,21 @@
+----
+-description: Investigate Proxmox API behaviour safely
+----
++# ProxOps contributor instructions
+ 
+-Investigate the requested Proxmox behaviour.
++Read `AGENTS.md` before making changes. It contains the authoritative
++engineering, safety, testing, Git, and Proxmox interaction rules.
+ 
+-Start with existing code, tests, and project documentation. Verify unknown
+-wire semantics against `conformance-dev` only.
++Keep these invariants in mind:
+ 
+-Capture the exact endpoint, method, request fields, response shape, PVE
+-version behaviour, and failure modes. Prefer observed behaviour over
+-assumptions.
++- Git is desired state; do not introduce hidden persistent controller state.
++- Production PVE environments are read-only unless explicitly authorised.
++- Use `conformance-dev` for destructive lifecycle and compatibility testing.
++- Prefer fail-closed behaviour where state is ambiguous or destructive.
++- Never expose credentials, tokens, passwords, private keys, or decrypted
++  secret material.
++- Preserve deterministic and idempotent reconciliation and adoption behaviour.
++- Verify unknown Proxmox VE wire semantics rather than guessing them.
++- Update authoritative documentation and `docs/GAPS.md` when behaviour changes.
++- Use focused Conventional/Commitizen commits.
++- Do not push unless explicitly requested.
+ 
+-Turn confirmed behaviour into regression tests and update `docs/GAPS.md` or
+-other authoritative documentation when appropriate.
+-
+-Do not write to production. Make a focused commit using
+-`<type>[optional scope]: <description>`. Do not push.
++`.github/instructions/proxops.instructions.md` contains the shared implementation
++rules. Reusable prompts under `.github/prompts/` cover common project workflows.
+diff --git a/.github/docs.instructions.md b/.github/docs.instructions.md
+deleted file mode 100644
+index 052071b..0000000
+--- a/.github/docs.instructions.md
++++ /dev/null
+@@ -1,28 +0,0 @@
+----
+-applyTo: "**/*pve*.go,**/*proxmox*.go,**/pveclient/**/*.go,**/pve/**/*.go"
+----
+-
+-# Proxmox API rules
+-
+-Treat Proxmox VE as an external API contract.
+-
+-Before changing PVE-facing code:
+-1. Read the relevant sections of `docs/ARCHITECTURE.md`,
+-   `docs/SCHEMA.md` (resource overview + cross-cutting guarantees), and the
+-   kind-specific reference pages (`docs/ref-vm.md`, `docs/ref-lxc.md`,
+-   `docs/reference-artifacts.md`, `docs/cloudinit.md`), plus
+-   `docs/OPERATIONS.md` and `docs/GAPS.md`.
+-2. Inspect existing client code and tests.
+-3. Determine whether the wire behaviour is already established.
+-4. When uncertain, verify against disposable `conformance-dev` PVE before
+-   implementing a new assumption.
+-
+-Rules:
+-- Do not infer wire parameter names from UI labels.
+-- Preserve exact endpoint and HTTP-method semantics already established.
+-- Be explicit about PVE-version-specific behaviour.
+-- Do not silently translate unsupported or ambiguous state.
+-- Prefer fail-closed handling when an operation could be destructive.
+-- Keep production read-only during investigation and compatibility probing.
+-- Record newly discovered compatibility behaviour in regression tests and
+-  `docs/GAPS.md` where appropriate.
+diff --git a/.github/go.instructions.md b/.github/go.instructions.md
+deleted file mode 100644
+index 61d5368..0000000
+--- a/.github/go.instructions.md
++++ /dev/null
+@@ -1,25 +0,0 @@
+----
+-applyTo: "docs/**/*.md"
+----
+-
+-# Documentation rules
+-
+-The project documentation is an authoritative engineering contract.
+-
+-Use:
+-- `docs/ARCHITECTURE.md` for architecture and data flow
+-- `docs/SCHEMA.md` for the resource overview + cross-cutting guarantees
+-- `docs/ref-vm.md`, `docs/ref-lxc.md`, `docs/reference-artifacts.md`,
+-  `docs/cloudinit.md` for the kind-level schema detail
+-- `docs/repo-layout.md` + `docs/reference-config.md` for repository/config model
+-- `docs/OPERATIONS.md` for runtime/operator behaviour
+-- `docs/GAPS.md` for known compatibility limitations
+-
+-When code changes behaviour:
+-- update the authoritative document when its contract changes
+-- avoid duplicating the same detail across documents
+-- document why important safety decisions exist, not only what they do
+-- distinguish current behaviour from planned work
+-- keep examples consistent with the implementation
+-
+-Do not invent behaviour that the code and tests do not support.
+diff --git a/.github/instructions/proxops.instructions.md b/.github/instructions/proxops.instructions.md
+new file mode 100644
+index 0000000..99a54aa
+--- /dev/null
++++ b/.github/instructions/proxops.instructions.md
+@@ -0,0 +1,145 @@
++---
++applyTo: "**/*"
++---
++
++# ProxOps implementation rules
++
++Read `AGENTS.md` and the relevant project documentation before changing
++behaviour.
++
++## General implementation
++
++- Follow existing package boundaries, naming, typing, and error-handling
++  patterns.
++- Prefer small, explicit changes over broad refactors.
++- Reuse existing config, schema, PVE client, planner, executor, adoption, and
++  secret-handling abstractions.
++- Keep exported APIs minimal and intentional.
++- Add regression tests for changed behaviour.
++- Do not weaken safety checks, ownership checks, validation, or fail-closed
++  behaviour merely to make a test pass.
++- Avoid `nolint` directives unless an exception is genuinely unavoidable and
++  documented.
++
++For Go changes, run the applicable quality gates:
++
++- `go build ./...`
++- `go vet ./...`
++- `go test ./...`
++- `go test -race ./...`
++- `golangci-lint run`
++
++## Documentation contract
++
++Treat project documentation as an engineering contract.
++
++Use:
++
++- `docs/ARCHITECTURE.md` for architecture and data flow
++- `docs/SCHEMA.md` for the resource overview and cross-cutting guarantees
++- `docs/ref-vm.md`, `docs/ref-lxc.md`, `docs/reference-artifacts.md`, and
++  `docs/cloudinit.md` for kind-level schema detail
++- `docs/repo-layout.md` and `docs/reference-config.md` for repository/config
++  behaviour
++- `docs/OPERATIONS.md` for runtime/operator behaviour
++- `docs/GAPS.md` for known compatibility limitations
++
++When behaviour changes, update the authoritative document rather than
++duplicating the same detail elsewhere. Distinguish current behaviour from
++planned work, and do not document behaviour that code and tests do not support.
++
++## Proxmox API and compatibility
++
++Treat Proxmox VE as an external API contract.
++
++Before changing PVE-facing behaviour:
++
++1. Inspect the relevant code, tests, and documentation.
++2. Determine whether the wire behaviour is already established.
++3. When uncertain, verify against disposable `conformance-dev` only.
++4. Record confirmed behaviour in regression tests and `docs/GAPS.md` where
++   appropriate.
++
++Do not:
++
++- infer wire parameter names from UI labels
++- silently translate unsupported or ambiguous state
++- guess values that PVE does not retain
++- write to production while investigating compatibility
++
++Be explicit about endpoint, HTTP method, request fields, response shape,
++failure modes, and PVE-version-specific behaviour.
++
++## Schema and resource model
++
++When changing a resource kind or field, consider the complete lifecycle:
++
++- validation and parsing
++- desired-to-PVE translation
++- observation and drift comparison
++- planning and execution
++- adoption
++- dependencies
++- ownership
++- documentation
++
++Preserve established YAML naming and deterministic ordering. Reject conflicting
++or ambiguous representations. Keep desired state separate from
++PVE-owned/generated values. Do not add fields merely because PVE exposes them.
++
++## Planning and reconciliation
++
++Preserve these invariants:
++
++- planning is derived from desired and observed state
++- plan generation does not perform PVE writes
++- execution follows established action ordering
++- dependencies are honoured
++- failed prerequisites defer dependants where required
++- failed actions are not reported as converged
++- destructive operations remain bounded and ownership-gated
++- unsafe or unreconcilable live state is surfaced as an anomaly/error
++- repeated convergence is idempotent
++
++Do not introduce persistent reconciliation state unless the architecture
++explicitly requires it.
++
++Use `conformance-dev` only for destructive lifecycle testing.
++
++## Adoption
++
++Adoption is reverse engineering of observed PVE state into the ProxOps resource
++model.
++
++Preserve:
++
++- production read-only behaviour unless explicitly authorised
++- deterministic output
++- faithful recovery of supported state
++- explicit reporting of unsupported or unrecoverable state
++- ownership safety
++- secret redaction and non-disclosure
++
++Never guess a value that PVE does not retain.
++
++Production adoption must not silently become reconciliation or mutation.
++
++## Secrets and security
++
++Credentials, tokens, passwords, SSH material, and private keys are sensitive.
++
++Never:
++
++- print or log secrets
++- include secrets in errors
++- persist decrypted secrets unnecessarily
++- include real secrets in fixtures, snapshots, generated output, or tests
++- weaken secret validation to keep execution moving
++- introduce a second secret mechanism without an architectural reason
++
++When changing secret handling, preserve existing precedence and validation,
++test missing/malformed/conflicting cases, and verify that secret values cannot
++reach user-visible output.
++
++For security-sensitive changes, prefer fail-closed behaviour and add regression
++tests for the boundary being protected.
+diff --git a/.github/new-resource.prompt.md b/.github/new-resource.prompt.md
+deleted file mode 100644
+index b8305cf..0000000
+--- a/.github/new-resource.prompt.md
++++ /dev/null
+@@ -1,23 +0,0 @@
+----
+-description: Prepare ProxOps for a release
+----
+-
+-Prepare the repository for a release.
+-
+-Inspect current Git state, recent commits, versioning, CI, docs, and known
+-gaps. Check for accidental secrets or sensitive generated material.
+-
+-Run the applicable quality gates:
+-
+-`go build ./...`
+-`go vet ./...`
+-`go test ./...`
+-`go test -race ./...`
+-`golangci-lint run`
+-
+-Also run applicable documentation/configuration validation.
+-
+-Do not make unrelated cleanup changes. Do not push or publish unless
+-explicitly requested.
+-
+-Report release readiness, remaining risks, tests/checks run, and commits made.
+diff --git a/.github/prompts/new-resource.prompt.md b/.github/prompts/new-resource.prompt.md
+new file mode 100644
+index 0000000..1b58e9e
+--- /dev/null
++++ b/.github/prompts/new-resource.prompt.md
+@@ -0,0 +1,44 @@
++---
++description: Add or extend a ProxOps resource capability safely
++---
++
++Implement the requested ProxOps resource capability.
++
++Read `AGENTS.md`, `.github/instructions/proxops.instructions.md`, and the
++relevant project documentation before changing behaviour.
++
++Work through the capability end-to-end rather than adding only a schema field:
++
++1. Inspect existing neighbouring resource implementations and tests.
++2. Establish the required Proxmox VE API semantics.
++3. If wire behaviour is uncertain, verify it against `conformance-dev` only.
++4. Define the desired-state schema and validation rules.
++5. Implement parsing and deterministic rendering.
++6. Implement desired-to-PVE translation.
++7. Implement live-state observation and drift comparison.
++8. Implement planning and execution while preserving dependency and ownership
++   safety.
++9. Implement adoption for supported recoverable state.
++10. Surface unsupported or unrecoverable state explicitly.
++11. Add regression tests across the relevant layers.
++12. Update authoritative documentation and `docs/GAPS.md` where appropriate.
++
++Do not add raw arbitrary PVE passthrough as a shortcut.
++
++Do not guess PVE values or semantics.
++
++Do not write to production during investigation.
++
++Keep destructive tests within `conformance-dev`.
++
++Make focused Conventional/Commitizen commits as coherent work is completed.
++Do not push unless explicitly requested.
++
++Report:
++
++- behaviour added
++- PVE semantics verified
++- tests/gates run
++- documentation changed
++- remaining gaps or intentionally unsupported cases
++- commit hashes
+diff --git a/.github/prompts/release.prompt.md b/.github/prompts/release.prompt.md
+new file mode 100644
+index 0000000..5d626c1
+--- /dev/null
++++ b/.github/prompts/release.prompt.md
+@@ -0,0 +1,51 @@
++---
++description: Prepare ProxOps for a release
++---
++
++Prepare the repository for a ProxOps release.
++
++Read `AGENTS.md` and `.github/instructions/proxops.instructions.md` first.
++
++Inspect:
++
++- Git status and recent commits
++- versioning and tag behaviour
++- CI and release workflows
++- build/cross-build behaviour
++- public documentation and install instructions
++- known gaps
++- accidental secrets or sensitive generated material
++
++Run the applicable release gates:
++
++- `go build ./...`
++- `go vet ./...`
++- `go test -count=1 ./...`
++- `go test -race -count=1 ./...`
++- `golangci-lint run`
++- `mkdocs build --strict`
++
++Also validate examples, configuration, release artifact generation, checksums,
++and version output where those facilities exist.
++
++Verify that the repository contains no accidental credentials, private keys,
++plaintext secrets, credential-bearing URLs, or private environment data that
++should not be public.
++
++Do not make unrelated cleanup or feature changes.
++
++Do not push, publish, change repository visibility, create releases, or create
++release tags unless explicitly requested.
++
++Report:
++
++- release readiness
++- current HEAD
++- version/tag behaviour
++- tests and validation performed
++- release artifacts/checksums verified
++- security/privacy audit result
++- documentation/install-path status
++- remaining concrete blockers
++- commits made
++- exact owner actions still required
+diff --git a/.github/pve-api-investigation.prompt.md b/.github/pve-api-investigation.prompt.md
+deleted file mode 100644
+index 9ce5284..0000000
+--- a/.github/pve-api-investigation.prompt.md
++++ /dev/null
+@@ -1,22 +0,0 @@
+----
+-description: Perform a conservative ProxOps security review
+----
+-
+-Review the current change for production safety and security.
+-
+-Check:
+-- production read/write boundaries
+-- ownership and destructive-operation safety
+-- secret exposure through logs, errors, output, tests, and files
+-- fail-closed behaviour
+-- malformed/unsupported PVE state
+-- credential precedence and validation
+-- deterministic/idempotent behaviour
+-- regression-test coverage
+-
+-Report concrete findings with severity and affected code.
+-
+-Only make fixes that are directly related to findings. Add regression tests
+-for security-sensitive fixes and run the relevant quality gates.
+-
+-Use focused commits with `<type>[optional scope]: <description>`. Do not push.
+diff --git a/.github/pve-api.instructions.md b/.github/pve-api.instructions.md
+deleted file mode 100644
+index c110f00..0000000
+--- a/.github/pve-api.instructions.md
++++ /dev/null
+@@ -1,30 +0,0 @@
+----
+-applyTo: "**/internal/schema/**/*.go,**/schema/**/*.go,**/internal/parse/**/*.go,**/examples/**/*.yaml"
+----
+-
+-# Schema and parser rules
+-
+-`docs/SCHEMA.md` is the authoritative resource contract **overview**
+-(kind at-a-glance + cross-cutting guarantees: ownership tag, dependency
+-model, config layout). The per-kind field-level schema lives in the
+-dedicated reference pages: `docs/ref-vm.md` (VM + TemplateVM + clone),
+-`docs/ref-lxc.md` (LXC + TemplateCT), `docs/reference-artifacts.md`
+-(ISO + CTTemplate + DiskImage), and `docs/cloudinit.md` (cloud-init data +
+-drive). `docs/repo-layout.md` describes the repository tree and
+-composition; `docs/OPERATIONS.md` covers runtime; `docs/GAPS.md` covers
+-known compatibility limitations.
+-
+-When changing a resource kind or field:
+-- inspect neighbouring resource types first
+-- preserve established naming and YAML conventions
+-- consider validation, parsing, PVE wire translation, live-state comparison,
+-  execution, adoption, dependencies, and ownership
+-- reject conflicting or ambiguous representations
+-- keep resource identity explicit
+-- do not add fields merely because PVE exposes them
+-- distinguish desired state from PVE-owned/generated values
+-- preserve deterministic parsing and ordering
+-- add parser/schema regression tests
+-
+-When the supported contract changes, update `docs/SCHEMA.md`.
+-When a limitation or PVE compatibility gap changes, update `docs/GAPS.md`.
+diff --git a/.github/reconcile.instructions.md b/.github/reconcile.instructions.md
+deleted file mode 100644
+index e0387d3..0000000
+--- a/.github/reconcile.instructions.md
++++ /dev/null
+@@ -1,27 +0,0 @@
+----
+-applyTo: "**/internal/secrets/**/*.go,**/*secret*.go,**/*credential*.go,**/internal/config/**/*.go"
+----
+-
+-# Security and secret-handling rules
+-
+-Credentials, tokens, passwords, SSH material, and private keys are sensitive.
+-
+-Never:
+-- print secrets
+-- log secrets
+-- put secrets in errors
+-- persist decrypted secrets unnecessarily
+-- include secrets in fixtures, snapshots, generated output, or tests
+-- weaken secret validation to keep execution moving
+-
+-Reuse the existing secret/configuration abstractions.
+-
+-When changing secret handling:
+-- inspect current precedence and validation logic first
+-- maintain fail-closed behaviour
+-- test missing, malformed, conflicting, and invalid-secret cases
+-- verify that secret values cannot reach user-visible output
+-- avoid introducing a second secret mechanism
+-
+-Do not add credentials to resource schemas unless the architecture explicitly
+-requires a secure representation.
+diff --git a/.github/release.prompt.md b/.github/release.prompt.md
+deleted file mode 100644
+index 5aa88e0..0000000
+--- a/.github/release.prompt.md
++++ /dev/null
+@@ -1,20 +0,0 @@
+----
+-description: Safely investigate and implement PVE adoption changes
+----
+-
+-Work on the requested adoption change.
+-
+-First read the relevant project docs and inspect the existing adoption,
+-schema, PVE client, tests, and gap handling.
+-
+-Preserve production read-only behaviour, deterministic output, ownership
+-safety, and explicit handling of unsupported or unrecoverable state.
+-
+-Use `conformance-dev` for any destructive or compatibility testing. Add
+-regression tests and update authoritative docs when the contract changes.
+-
+-Make focused Commitizen/Conventional commits as coherent work is completed.
+-Do not push.
+-
+-Report what was changed, what was verified, known gaps, tests run, and commit
+-hashes.
+diff --git a/.github/schema.instructions.md b/.github/schema.instructions.md
+deleted file mode 100644
+index 208cc6d..0000000
+--- a/.github/schema.instructions.md
++++ /dev/null
+@@ -1,24 +0,0 @@
+----
+-applyTo: "**/internal/plan/**/*.go,**/internal/exec/**/*.go,**/internal/reconcile/**/*.go"
+----
+-
+-# Planning and reconciliation rules
+-
+-Read `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`, and relevant schema sections
+-before changing reconciliation behaviour.
+-
+-Preserve these invariants:
+-- planning is derived from current desired and observed state
+-- plan generation does not perform PVE writes
+-- execution follows the established action ordering
+-- dependencies are honoured
+-- failed prerequisites defer dependants where the architecture requires it
+-- failed actions are not reported as converged
+-- destructive operations remain bounded and ownership-gated
+-- live state that cannot be safely reconciled is surfaced as an anomaly/error
+-- repeated convergence is idempotent
+-
+-Avoid embedding persistent state into reconciliation unless the architecture
+-explicitly requires it.
+-
+-For destructive lifecycle changes, use `conformance-dev` only.
+diff --git a/.github/security.instructions.md b/.github/security.instructions.md
+deleted file mode 100644
+index 909c47f..0000000
+--- a/.github/security.instructions.md
++++ /dev/null
+@@ -1,32 +0,0 @@
+----
+-applyTo: "**/internal/adopt/**/*.go,**/internal/adoption/**/*.go"
+----
+-
+-# Adoption rules
+-
+-Adoption is reverse engineering of observed PVE state into the project's
+-resource model.
+-
+-Before changing adoption, read:
+-- `docs/ARCHITECTURE.md`
+-- `docs/adopt.md` (adoption contract + production safety expectations)
+-- `docs/SCHEMA.md` + `docs/ref-*.md` (resource model)
+-- `docs/OPERATIONS.md`
+-- `docs/GAPS.md`
+-
+-Preserve:
+-- read-only PVE behaviour unless explicitly authorised
+-- deterministic output
+-- faithful recovery of supported state
+-- explicit reporting of unsupported/unrecoverable state
+-- ownership safety
+-- secret redaction and non-disclosure
+-
+-Never guess a value that PVE does not retain.
+-
+-If adoption discovers a new compatibility limitation:
+-- make the limitation explicit in output
+-- add a regression test where practical
+-- update `docs/GAPS.md` when it represents a lasting project limitation
+-
+-Production adoption must not be turned into reconciliation or mutation.
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 5ffbd98..c93abdf 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -96,4 +96,3 @@ prereleases automatically.
+ ProxOps is licensed under the **Apache License 2.0** — see
+ [LICENSE](LICENSE). Contributions submitted to this repository are licensed
+ under the same terms.
+-
+diff --git a/README.md b/README.md
+index bf6b13a..5db6a14 100644
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # ProxOps — repository-first GitOps reconciler for Proxmox VE
+ 
+-> ## ⚠️ Pre-1.0 — experimental. Read `docs/GAPS.md` before using in anger.
++> ## ⚠️ Pre-1.0 — experimental. Read `docs/GAPS.md` before using in anger
+ >
+ > - **Maturity.** ProxOps is a pre-1.0, actively-developed tool. It is not
+ >   yet a drop-in for unattended production infrastructure management.
+@@ -43,7 +43,7 @@ isolated, never cross-pruned.
+ ## What it manages
+ 
+ | Kind | PVE object | Notes |
+-|---|---|---|
++| ---- | ---------- | ----- |
+ | VM | qemu VM | Disks (incl. image-seeded from a `DiskImage`), networks, CPU/memory, hardware (bios/EFI/Secure Boot/TPM/cloud-init drive), options, cloud-init data, power state |
+ | TemplateVM | qemu VM marked `template=1` | Identical schema to VM; provision VMs from it with `VM.spec.clone` (PVE full-clone + own config) |
+ | LXC | PVE container | Root FS, allocated mount points, host-path bind mounts, networks (incl. static ip/gw), DNS, options |
+@@ -61,7 +61,7 @@ file.
+ Everything a cluster needs lives in the repository — no external config
+ file that points at the repository itself:
+ 
+-```
++```sh
+ proxops.yaml                     # OPTIONAL process-wide config
+ clusters/<cluster>/
+   config.yaml                    # the cluster's PVE endpoint, node allowlist,

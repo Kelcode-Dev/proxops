@@ -52,7 +52,7 @@ The template is a complete repository skeleton with one cluster
 (`example`) and resources of every kind — see
 [Repository layout](repo-layout.md). Edit it:
 
-```
+```sh
 proxops.yaml                   # optional process-wide config
 clusters/example/config.yaml   # <-- point this at YOUR PVE cluster
 clusters/example/secrets.sops.yaml   # <-- re-encrypt with YOUR secrets
@@ -142,7 +142,7 @@ proxops run            # watch mode: poll the work tree, reconcile on change
 ## Where things go wrong
 
 | Symptom | First check |
-|---|---|
+| ------- | ----------- |
 | `no ProxOps GitOps repository found` | `pwd` must be inside the repository (or pass `--git-path <path>` / `PROXOPS_GIT_PATH=<path>`) |
 | `… declares … which does not match its directory name` | `clusters/<dir>/config.yaml` must name `pve.clusters.<dir>` exactly |
 | `… no effective PVE user after credential resolution` | SOPS file / age identity / reference block — see [SOPS & credentials](sops-credentials.md#fail-closed) |

@@ -18,7 +18,7 @@ name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
 ## Statuses
 
 | Status | Meaning |
-|---|---|
+| ------ | ------- |
 | `discovered` | seen in live PVE / adoption output; not yet analysed |
 | `investigated` | analysed: ProxOps deliberately does not model it today, impact understood |
 | `planned` | a future milestone may implement it |
@@ -64,6 +64,7 @@ name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
   documentation (`ostemplate` is a /lxc create parameter).
 - **Notes**: the operator's review step is part of the adoption contract
     (docs/adopt.md).
+
 ### LXC: bind-mount writes require root@pam (fail closed under API tokens)
 
 - **Resource/area**: LXC bind mounts (`spec.bind-mounts`, `mpN` host-path form)
@@ -256,7 +257,7 @@ name. See OPERATIONS.md → "Ownership-tag migration" for the tag rename.)
 - **What is unsupported**: a full clone inherits the template's whole
   `/config`. ProxOps overwrites the fields the VM manifest declares and
   clears the inherited **cloud-init identity** keys it does not (ciuser /
-  sshkeys / ipconfig<N> / nameserver / searchdomain / cipassword /
+  sshkeys / ipconfig / nameserver / searchdomain / cipassword /
   cicustom), but it does NOT reset other undeclared fields to a
   fresh-create default — the template's hardware layout and operational
   posture survive, which is the point of cloning. A clone-backed VM also
@@ -439,11 +440,11 @@ test.
   task** — the clone inherits its own `<pool>:vm-<id>-cloudinit` volume; a
   `/config` write restating `ide2=<pool>:cloudinit` makes PVE `lvcreate` a
   volume that already exists and the task FAILS ("Logical Volume
-  vm-<id>-cloudinit already exists", probe 2026-09-15). ProxOps writes the
+  vm-\<id\>-cloudinit already exists", probe 2026-09-15). ProxOps writes the
   drive only into an EMPTY slot. The same lvcreate rule applies to any
   create-form volume written over a live one — the general data-loss guard.
   Pinned: `TestClone_DriveNotRewritten`, `TestClone_DrivePoolMismatchIsAnomaly`
-  + the mock's lvcreate mirror.
+  \+ the mock's lvcreate mirror.
 - **cloud images may lack PVE's default SCSI driver** — the Ubuntu *minimal*
   cloud image's initramfs has no `lsi53c897a` (PVE's default `scsihw`), so a
   VM using it kernel-panics ("VFS: Unable to mount root fs on
