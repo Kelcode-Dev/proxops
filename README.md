@@ -97,7 +97,7 @@ synthetic secrets) ships in [`examples/`](examples/README.md).
 
 ```sh
 # from a released tag (binaries also attach to each GitHub Release):
-go install github.com/Kelcode-Dev/proxops/cmd/proxops@v0.6.0
+go install github.com/Kelcode-Dev/proxops/cmd/proxops@v0.6.1
 
 # or build from source:
 git clone https://github.com/Kelcode-Dev/proxops && cd proxops
@@ -107,7 +107,7 @@ make build          # -> bin/proxops
 Versioned releases follow SemVer tags (`vX.Y.Z`); `@main` installs the
 current main-branch build instead. For PVE hosts without a Go toolchain,
 each GitHub Release also carries static `proxops_vX.Y.Z_<os>_<arch>`
-binaries (`make cross` produces the linux/amd64 one). See
+binaries (`make cross` produces both Linux amd64 and arm64 binaries). See
 `docs/getting-started.md`.
 
 SOPS-backed credentials additionally require `sops` (+ `age`) on PATH.
