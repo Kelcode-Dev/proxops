@@ -1,5 +1,7 @@
 # ProxOps — repository-first GitOps reconciler for Proxmox VE
 
+[![GitHub Release](https://img.shields.io/github/v/release/Kelcode-Dev/proxops)](https://github.com/Kelcode-Dev/proxops/releases/latest)
+
 > ## ⚠️ Pre-1.0 — experimental. Read `docs/GAPS.md` before using in anger
 >
 > - **Maturity.** ProxOps is a pre-1.0, actively-developed tool. It is not
@@ -97,7 +99,7 @@ synthetic secrets) ships in [`examples/`](examples/README.md).
 
 ```sh
 # from a released tag (binaries also attach to each GitHub Release):
-go install github.com/Kelcode-Dev/proxops/cmd/proxops@v0.6.1
+go install github.com/Kelcode-Dev/proxops/cmd/proxops@latest
 
 # or build from source:
 git clone https://github.com/Kelcode-Dev/proxops && cd proxops
