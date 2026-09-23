@@ -309,3 +309,61 @@ func TestBuildAgentRepositoryFirst(t *testing.T) {
 		t.Fatalf("agent build must fail at the git stage, got: %v", aerr)
 	}
 }
+
+// TestResolveVersion pins version precedence across release builds,
+// `go install @version`, and local development builds. An explicit
+// linker-supplied version always wins; otherwise the Go module version
+// is used when available, falling back to "dev".
+func TestResolveVersion(t *testing.T) {
+	tests := []struct {
+		name   string
+		linked string
+		module string
+		want   string
+	}{
+		{
+			name:   "release linker version wins",
+			linked: "v0.6.1",
+			module: "v0.6.0",
+			want:   "v0.6.1",
+		},
+		{
+			name:   "git-derived linker version wins",
+			linked: "v0.6.0-3-gabc1234",
+			module: "(devel)",
+			want:   "v0.6.0-3-gabc1234",
+		},
+		{
+			name:   "go install uses module version",
+			linked: "dev",
+			module: "v0.6.1",
+			want:   "v0.6.1",
+		},
+		{
+			name:   "development build remains dev",
+			linked: "dev",
+			module: "(devel)",
+			want:   "dev",
+		},
+		{
+			name:   "missing build info remains dev",
+			linked: "dev",
+			module: "",
+			want:   "dev",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveVersion(tt.linked, tt.module); got != tt.want {
+				t.Fatalf(
+					"resolveVersion(%q, %q) = %q, want %q",
+					tt.linked,
+					tt.module,
+					got,
+					tt.want,
+				)
+			}
+		})
+	}
+}
