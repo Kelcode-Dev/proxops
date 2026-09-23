@@ -1,4 +1,4 @@
-# ProxOps — repository-first GitOps reconciler for Proxmox VE
+# ProxOps: repository-first GitOps reconciler for Proxmox VE
 
 [![GitHub Release](https://img.shields.io/github/v/release/Kelcode-Dev/proxops)](https://github.com/Kelcode-Dev/proxops/releases/latest)
 [![CI](https://github.com/Kelcode-Dev/proxops/actions/workflows/ci.yml/badge.svg)](https://github.com/Kelcode-Dev/proxops/actions/workflows/ci.yml)
