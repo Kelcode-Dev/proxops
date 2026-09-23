@@ -993,22 +993,35 @@ func lxcMountLiveRewrite(curWire string, m LXCMount) (string, bool) {
 			want *bool
 			tok  string
 			def  bool
-		}{{o.ReadOnly, "ro=", false}, {o.Backup, "backup=", true}, {o.ACL, "acl=", false}, {o.Quota, "quota=", false}, {o.Shared, "shared=", false}} {
+		}{
+			{o.ReadOnly, "ro=", false},
+			{o.Backup, "backup=", false},
+			{o.ACL, "acl=", false},
+			{o.Quota, "quota=", false},
+			{o.Shared, "shared=", false},
+		} {
+			if c.want == nil {
+				continue
+			}
+
 			lv, present := lxcRawBoolToken(curWire, c.tok)
 			eff := c.def
 			if present {
 				eff = lv
 			}
+
 			if eff != *c.want {
 				need = true
 			}
 		}
+
 		if o.MountOptions != "" {
 			if lv := lxcRawToken(curWire, "mountoptions="); lv != "" && lv != o.MountOptions {
 				need = true
 			}
 		}
 	}
+
 	if !need {
 		return "", false
 	}

@@ -37,6 +37,7 @@ package schema_test
 // shape Go would emit.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Kelcode-Dev/proxops/internal/schema"
@@ -262,6 +263,129 @@ func TestLXCDrift_ConsoleIsConvergeable(t *testing.T) {
 	if got, ok := upd["console"]; !ok || got != "1" {
 		t.Errorf("Drift must emit console=1 for desired-true + live-absent; got upd=%v", upd)
 	}
+}
+
+// TestLXCDrift_MountPartialOptionsDoNotPanic pins tri-state mount-option
+// semantics: nil option fields are unowned and must be ignored rather than
+// dereferenced during drift comparison.
+func TestLXCDrift_MountPartialOptionsDoNotPanic(t *testing.T) {
+	lxc := schema.NewLXC()
+	if err := schema.YAMLTo("apiVersion: "+schema.APIVersion+"\n"+
+		"kind: LXC\n"+
+		"metadata:\n"+
+		"  name: x\n"+
+		"spec:\n"+
+		"  node: pve01\n"+
+		"  vmid: 100\n"+
+		"  memory: 1GiB\n"+
+		"  cpu: {cores: 1}\n"+
+		"  template: t\n"+
+		"  root: {storage: local-lvm, size: 4GiB}\n"+
+		"  networks:\n"+
+		"    - bridge: vmbr0\n"+
+		"  mount-points:\n"+
+		"    - storage: local-lvm\n"+
+		"      size: 1GiB\n"+
+		"      mount-point: /mnt/data\n"+
+		"      slot: mp0\n"+
+		"      options:\n"+
+		"        read-only: true\n", lxc); err != nil {
+		t.Fatalf("YAMLTo: %v", err)
+	}
+
+	live := map[string]any{
+		"cores":    "1",
+		"memory":   "1024",
+		"hostname": "x",
+		"rootfs":   "local-lvm:vm-100-disk-0,size=4G",
+		"net0":     "name=net0,bridge=vmbr0",
+		"mp0":      "local-lvm:vm-100-disk-1,mp=/mnt/data,ro=1,size=1G",
+		"tags":     "proxops",
+	}
+
+	upd, _, changed := lxc.Drift(live)
+	if changed {
+		t.Fatalf("matched partial mount options reported drift: upd=%v", upd)
+	}
+	if _, ok := upd["mp0"]; ok {
+		t.Fatalf("matched partial mount options emitted mp0 rewrite: %v", upd["mp0"])
+	}
+}
+
+// TestLXCDrift_MountBackupAbsentMeansFalse pins PVE's mpN backup default:
+// an absent backup= token means the mount is excluded from backup. Desired
+// backup=false therefore converges without a rewrite, while backup=true
+// must emit backup=1.
+func TestLXCDrift_MountBackupAbsentMeansFalse(t *testing.T) {
+	newLXC := func(t *testing.T, backup string) *schema.LXC {
+		t.Helper()
+
+		lxc := schema.NewLXC()
+		if err := schema.YAMLTo("apiVersion: "+schema.APIVersion+"\n"+
+			"kind: LXC\n"+
+			"metadata:\n"+
+			"  name: x\n"+
+			"spec:\n"+
+			"  node: pve01\n"+
+			"  vmid: 100\n"+
+			"  memory: 1GiB\n"+
+			"  cpu: {cores: 1}\n"+
+			"  template: t\n"+
+			"  root: {storage: local-lvm, size: 4GiB}\n"+
+			"  networks:\n"+
+			"    - bridge: vmbr0\n"+
+			"  mount-points:\n"+
+			"    - storage: local-lvm\n"+
+			"      size: 1GiB\n"+
+			"      mount-point: /mnt/data\n"+
+			"      slot: mp0\n"+
+			"      options:\n"+
+			"        backup: "+backup+"\n", lxc); err != nil {
+			t.Fatalf("YAMLTo: %v", err)
+		}
+		return lxc
+	}
+
+	live := func() map[string]any {
+		return map[string]any{
+			"cores":    "1",
+			"memory":   "1024",
+			"hostname": "x",
+			"rootfs":   "local-lvm:vm-100-disk-0,size=4G",
+			"net0":     "name=net0,bridge=vmbr0",
+			"mp0":      "local-lvm:vm-100-disk-1,mp=/mnt/data,size=1G",
+			"tags":     "proxops",
+		}
+	}
+
+	t.Run("false matches absent live token", func(t *testing.T) {
+		lxc := newLXC(t, "false")
+
+		upd, _, changed := lxc.Drift(live())
+		if changed {
+			t.Fatalf("backup=false + live backup absent reported drift: upd=%v", upd)
+		}
+		if _, ok := upd["mp0"]; ok {
+			t.Fatalf("backup=false + live backup absent emitted mp0 rewrite: %v", upd["mp0"])
+		}
+	})
+
+	t.Run("true rewrites absent live token", func(t *testing.T) {
+		lxc := newLXC(t, "true")
+
+		upd, _, changed := lxc.Drift(live())
+		if !changed {
+			t.Fatal("backup=true + live backup absent reported no drift")
+		}
+
+		got, ok := upd["mp0"].(string)
+		if !ok {
+			t.Fatalf("backup=true + live backup absent: mp0 update missing or not string: %v", upd)
+		}
+		if !strings.Contains(got, "backup=1") {
+			t.Fatalf("backup=true + live backup absent: mp0=%q, want backup=1", got)
+		}
+	})
 }
 
 func contains(s, sub string) bool {
