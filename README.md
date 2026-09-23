@@ -1,6 +1,10 @@
 # ProxOps — repository-first GitOps reconciler for Proxmox VE
 
 [![GitHub Release](https://img.shields.io/github/v/release/Kelcode-Dev/proxops)](https://github.com/Kelcode-Dev/proxops/releases/latest)
+[![CI](https://github.com/Kelcode-Dev/proxops/actions/workflows/ci.yml/badge.svg)](https://github.com/Kelcode-Dev/proxops/actions/workflows/ci.yml)
+[![Docs](https://github.com/Kelcode-Dev/proxops/actions/workflows/pages.yml/badge.svg)](https://github.com/Kelcode-Dev/proxops/actions/workflows/pages.yml)
+[![Go](https://img.shields.io/github/go-mod/go-version/Kelcode-Dev/proxops)](https://github.com/Kelcode-Dev/proxops/blob/main/go.mod)
+[![License](https://img.shields.io/github/license/Kelcode-Dev/proxops)](https://github.com/Kelcode-Dev/proxops/blob/main/LICENSE)
 
 > ## ⚠️ Pre-1.0 — experimental. Read `docs/GAPS.md` before using in anger
 >
