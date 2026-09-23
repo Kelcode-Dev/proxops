@@ -1,6 +1,6 @@
 module github.com/Kelcode-Dev/proxops
 
-go 1.26.5
+go 1.27.1
 
 require (
 	github.com/go-git/go-git/v5 v5.19.2
